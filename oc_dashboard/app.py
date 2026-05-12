@@ -164,6 +164,51 @@ def tbl() -> str:
     return _DB_TABLE
 
 
+def ts_filter_clause(ts_str: str, col: str = "timestamp") -> tuple[str, list]:
+    """
+    Build a WHERE clause matching ±10 minutes of ts_str on a TIMESTAMP column.
+    Uses typed TIMESTAMP comparison (not CAST+LIKE) so it works reliably on all
+    platforms regardless of how DuckDB formats CAST(TIMESTAMP AS VARCHAR).
+    ts_str expected as "YYYY-MM-DD HH:MM" (minute-truncated from the dropdown).
+    """
+    try:
+        base = datetime.strptime(ts_str[:16], "%Y-%m-%d %H:%M")
+    except ValueError:
+        try:
+            base = datetime.strptime(ts_str[:19], "%Y-%m-%d %H:%M:%S")
+        except ValueError:
+            # Last resort: cast-and-like
+            return f"{col}  = ?", [f"{ts_str[:16]}"]
+    lo = (base - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+    hi = (base + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+    # Use TIMESTAMP literals — works with DuckDB DATE/TIMESTAMP types directly
+    return (
+        f" {col} BETWEEN ?  AND ? ",
+        [lo, hi]
+    )
+
+
+def _ts_lo_hi(ts_str: str) -> list:
+    """Return [lo, hi] strings for a ±10-min BETWEEN clause from a minute-truncated ts."""
+    try:
+        base = datetime.strptime(ts_str[:16], "%Y-%m-%d %H:%M")
+    except ValueError:
+        base = datetime.now()
+    lo = (base - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+    hi = (base + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+    return [lo, hi]
+
+
+def expiry_clause(exp_str: str, col: str = "expiry") -> tuple[str, list]:
+    """
+    Build a WHERE clause for a DATE column expiry.
+    exp_str expected as "YYYY-MM-DD" or "YYYY-MM-DD ...".
+    Uses typed DATE comparison, not CAST+LIKE.
+    """
+    date_part = exp_str[:10]
+    return f" {col}  = ? ", [date_part]
+
+
 def latest_ts(symbol: str) -> str:
     row = get_con().execute(
         f"SELECT MAX(timestamp) FROM {tbl()} WHERE symbol = ?", [symbol]
@@ -461,16 +506,18 @@ def list_timestamps(
     Optional expiry filter ensures timestamps shown actually have data
     for the selected expiry (timestamps can differ slightly per ticker).
     """
+    # Return timestamps truncated to the minute (HH:MM) to avoid
+    # per-second differences across tickers. Queries use a ±10-min window.
     if expiry:
         df = qdf(
-            f"SELECT DISTINCT CAST(timestamp AS VARCHAR) AS ts "
+            f"SELECT DISTINCT STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS ts "
             f"FROM {tbl()} WHERE symbol = ? "
-            f"AND CAST(expiry AS VARCHAR) LIKE ? ORDER BY ts DESC",
-            [symbol, f"%{expiry[:10]}%"],
+            f"AND expiry = ? ORDER BY ts DESC",
+            [symbol, expiry[:10]],
         )
     else:
         df = qdf(
-            f"SELECT DISTINCT CAST(timestamp AS VARCHAR) AS ts "
+            f"SELECT DISTINCT STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS ts "
             f"FROM {tbl()} WHERE symbol = ? ORDER BY ts DESC",
             [symbol],
         )
@@ -479,21 +526,21 @@ def list_timestamps(
 
 @app.get("/api/expiries")
 def list_expiries(
-    symbol:    str           = Query(...),
-    timestamp: Optional[str] = Query(None),
+    symbol:      str           = Query(...),
+    timestamp:   Optional[str] = Query(None),
+    future_only: bool          = Query(True),
 ):
+    """List expiries for a symbol. By default returns only current+future expiries."""
+    today = date.today().isoformat()
+    base = f"SELECT DISTINCT CAST(expiry AS VARCHAR) AS exp FROM {tbl()} WHERE symbol = ?"
+    params = [symbol]
     if timestamp:
-        df = qdf(
-            f"SELECT DISTINCT CAST(expiry AS VARCHAR) AS exp FROM {tbl()} "
-            f"WHERE symbol = ? AND CAST(timestamp AS VARCHAR) LIKE ? ORDER BY exp",
-            [symbol, f"%{timestamp[:16]}%"],
-        )
-    else:
-        df = qdf(
-            f"SELECT DISTINCT CAST(expiry AS VARCHAR) AS exp FROM {tbl()} "
-            f"WHERE symbol = ? ORDER BY exp",
-            [symbol],
-        )
+        base += " AND timestamp BETWEEN ? AND ? "
+        params.extend(_ts_lo_hi(timestamp))
+    if future_only:
+        base += " AND expiry >= ? "
+        params.append(today)
+    df = qdf(base + " ORDER BY exp", params)
     return df["exp"].tolist()
 
 
@@ -517,7 +564,7 @@ def lot_sizes():
 def overview():
     sql = f"""
     WITH latest AS (
-        SELECT symbol, CAST(MAX(timestamp) AS VARCHAR) AS ts
+        SELECT symbol, MAX(timestamp) AS ts
         FROM {tbl()} GROUP BY symbol
     )
     SELECT
@@ -536,7 +583,7 @@ def overview():
     FROM {tbl()} t
     JOIN latest l
       ON  t.symbol = l.symbol
-      AND CAST(t.timestamp AS VARCHAR) = l.ts
+      AND t.timestamp = l.ts
     GROUP BY t.symbol, l.ts
     ORDER BY t.symbol
     """
@@ -603,11 +650,11 @@ def gex_chart(
             COALESCE(underlying_price,0) AS spot
         FROM {tbl()}
         WHERE symbol    = ?
-          AND CAST(expiry    AS VARCHAR) LIKE ?
-          AND CAST(timestamp AS VARCHAR) LIKE ?
+          AND expiry = ?
+          AND timestamp BETWEEN ? AND ? 
         ORDER BY strike_price
         """,
-        [symbol, f"%{expiry[:10]}%", f"%{timestamp[:16]}%"],
+        [symbol, expiry[:10]] + _ts_lo_hi(timestamp),
     )
     if df.empty:
         raise HTTPException(404, "No GEX data for given filters")
@@ -642,11 +689,11 @@ def _build_gamma_profile(
             COALESCE(ce_iv,           0) AS ce_iv
         FROM {tbl()}
         WHERE symbol = ?
-          AND CAST(expiry    AS VARCHAR) LIKE ?
-          AND CAST(timestamp AS VARCHAR) LIKE ?
+          AND expiry  = ? 
+          AND timestamp BETWEEN ?  AND ? 
         ORDER BY strike_price
         """,
-        [symbol, f"%{expiry[:10]}%", f"%{ts_filter[:16]}%"],
+        [symbol, expiry[:10]] + _ts_lo_hi(ts_filter),
     )
     if df.empty:
         return pd.DataFrame(), 0, 0, 1
@@ -741,11 +788,11 @@ def gamma_analysis(
                COALESCE(ce_iv, 0) AS ce_iv
         FROM {tbl()}
         WHERE symbol = ?
-          AND CAST(expiry    AS VARCHAR) LIKE ?
-          AND CAST(timestamp AS VARCHAR) LIKE ?
+          AND expiry  = ? 
+          AND timestamp  BETWEEN ?  AND ? 
         ORDER BY strike_price
         """,
-        [symbol, f"%{expiry[:10]}%", f"%{ts_filter[:16]}%"],
+        [symbol, expiry[:10]] + _ts_lo_hi(ts_filter),
     )
     atm_str = float(raw["atm_strike"].iloc[0]) if not raw.empty else spot
     near    = raw.iloc[(raw["strike_price"] - atm_str).abs().argsort()[:2]]
@@ -762,8 +809,8 @@ def gamma_analysis(
             f"SELECT AVG(COALESCE(m_volatility, 0)) AS avg_vol, "
             f"AVG(COALESCE(underlying_price, 0)) AS avg_spot "
             f"FROM {tbl()} "
-            f"WHERE symbol = ? AND CAST(timestamp AS VARCHAR) LIKE ?",
-            [symbol, f"%{ts_filter[:16]}%"],
+            f"WHERE symbol = ? AND timestamp  BETWEEN ?  AND ? ",
+            [symbol] + _ts_lo_hi(ts_filter),
         )
         if not vol_df.empty:
             avg_vol  = float(vol_df["avg_vol"].iloc[0] or 0)
@@ -843,11 +890,11 @@ def oi_change(symbol: str = Query(...), filter_type: str = Query("all")):
           AND n.strike_price = o.strike_price
           AND n.expiry       = o.expiry
         WHERE n.symbol = ?
-          AND CAST(n.timestamp AS VARCHAR) LIKE ?
-          AND CAST(o.timestamp AS VARCHAR) LIKE ?
+          AND n.timestamp  BETWEEN ?  AND ? 
+          AND o.timestamp  BETWEEN ?  AND ? 
         ORDER BY n.expiry, n.strike_price
         """,
-        [symbol, f"%{ts_new[:16]}%", f"%{ts_old[:16]}%"],
+        [symbol] + _ts_lo_hi(ts_new) + _ts_lo_hi(ts_old),
     )
     if df.empty:
         raise HTTPException(404, f"No overlapping data between timestamps for {symbol}")
@@ -893,10 +940,10 @@ def oi_signals_all():
             JOIN {tbl()} o
               ON  n.symbol=o.symbol AND n.strike_price=o.strike_price AND n.expiry=o.expiry
             WHERE n.symbol=?
-              AND CAST(n.timestamp AS VARCHAR) LIKE ?
-              AND CAST(o.timestamp AS VARCHAR) LIKE ?
+              AND n.timestamp  BETWEEN ?  AND ? 
+              AND o.timestamp  BETWEEN ?  AND ?
             """,
-            [sym, f"%{ts_new[:16]}%", f"%{ts_old[:16]}%"],
+            [sym] + _ts_lo_hi(ts_new) + _ts_lo_hi(ts_old),
         )
         if agg.empty: continue
         r = agg.iloc[0].to_dict()
@@ -912,7 +959,7 @@ def oi_signals_all():
 # ===========================================================================
 
 @app.get("/api/volume_shockers")
-def volume_shockers(top_n: int = Query(30)):
+def volume_shockers(top_n: int = Query(30), filter_type: str = Query("all")):
     sql = f"""
     WITH ts_ranked AS (
         SELECT symbol, strike_price, expiry, timestamp,
@@ -936,12 +983,16 @@ def volume_shockers(top_n: int = Query(30)):
     WHERE l.total_vol > p.total_vol AND l.total_vol > 0
     ORDER BY vol_delta DESC LIMIT ?
     """
-    df = qdf(sql, [top_n])
-    return [] if df.empty else to_records(df)
+    df = qdf(sql, [top_n * 3])  # fetch extra then filter
+    if df.empty: return []
+    idx_set = _NSE_INDICES
+    if filter_type == "index":  df = df[df["symbol"].isin(idx_set)]
+    elif filter_type == "stock": df = df[~df["symbol"].isin(idx_set)]
+    return to_records(df.head(top_n))
 
 
 @app.get("/api/iv_shockers")
-def iv_shockers(top_n: int = Query(30)):
+def iv_shockers(top_n: int = Query(30), filter_type: str = Query("all")):
     sql = f"""
     WITH ts_ranked AS (
         SELECT symbol, strike_price, expiry, timestamp,
@@ -963,8 +1014,11 @@ def iv_shockers(top_n: int = Query(30)):
     WHERE l.avg_iv>0 AND p.avg_iv>0
     ORDER BY abs_iv_delta DESC LIMIT ?
     """
-    df = qdf(sql, [top_n])
-    return [] if df.empty else to_records(df)
+    df = qdf(sql, [top_n * 3])
+    if df.empty: return []
+    if filter_type == "index":  df = df[df["symbol"].isin(_NSE_INDICES)]
+    elif filter_type == "stock": df = df[~df["symbol"].isin(_NSE_INDICES)]
+    return to_records(df.head(top_n))
 
 
 # ===========================================================================
@@ -991,12 +1045,12 @@ def iv_smile(
                COALESCE(underlying_price,0) AS spot
         FROM {tbl()}
         WHERE symbol = ?
-          AND CAST(expiry    AS VARCHAR) LIKE ?
-          AND CAST(timestamp AS VARCHAR) LIKE ?
+          AND expiry = ? 
+          AND timestamp  BETWEEN ?  AND ? 
           AND (COALESCE(ce_iv,0)>0 OR COALESCE(pe_iv,0)>0)
         ORDER BY strike_price
         """,
-        [symbol, f"%{expiry[:10]}%", f"%{ts_filter[:16]}%"],
+        [symbol, expiry[:10]] + _ts_lo_hi(ts_filter),
     )
     if df.empty:
         raise HTTPException(404, "No IV data found")
@@ -1091,6 +1145,24 @@ _SAFE_METRICS = {
 }
 
 
+@app.get("/api/atm_strikes")
+def atm_strikes(
+    symbol: str           = Query(...),
+    expiry: str           = Query(...),
+    timestamp: Optional[str] = Query(None),
+):
+    """Return distinct distance_from_atm values and corresponding strikes."""
+    ts_filter = timestamp or latest_ts(symbol)
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
+    df = qdf(
+        f"SELECT DISTINCT distance_from_atm, strike_price, atm_strike "
+        f"FROM {tbl()} WHERE symbol=? AND expiry  = ?  "
+        f"AND {ts_clause} ORDER BY distance_from_atm",
+        [symbol, expiry[:10]] + ts_params,
+    )
+    return to_records(df) if not df.empty else []
+
+
 @app.get("/api/strike_trend")
 def strike_trend(
     symbol:       str   = Query(...),
@@ -1105,10 +1177,10 @@ def strike_trend(
         SELECT CAST(timestamp AS VARCHAR) AS timestamp,
                COALESCE({metric},0)       AS value
         FROM {tbl()}
-        WHERE symbol=? AND strike_price=? AND CAST(expiry AS VARCHAR) LIKE ?
+        WHERE symbol=? AND strike_price=? AND expiry  = ? 
         ORDER BY timestamp
         """,
-        [symbol, strike_price, f"%{expiry[:10]}%"],
+        [symbol, strike_price, expiry[:10]],
     )
     return to_records(df)
 
@@ -1119,75 +1191,97 @@ def strike_trend(
 
 @app.get("/api/delta_screener")
 def delta_screener(
-    symbol:       str           = Query(...),
-    expiry:       str           = Query(...),
     timestamp:    Optional[str] = Query(None),
-    target_delta: float         = Query(30.0),
+    target_delta: float         = Query(30.0),   # upper bound (absolute)
+    min_delta:    float         = Query(5.0),    # lower bound (absolute)
+    filter_type:  str           = Query("all"),  # all | index | stock
 ):
-    ts_filter = timestamp or latest_ts(symbol)
-    tgt = abs(target_delta) / 100.0
+    tgt_hi = abs(target_delta) / 100.0
+    tgt_lo = abs(min_delta)    / 100.0
+
+    idx_list = ", ".join(f"\'{s}\'" for s in _NSE_INDICES)
+    sym_filter = (
+        f"AND symbol IN ({idx_list})"       if filter_type == "index"
+        else f"AND symbol NOT IN ({idx_list})" if filter_type == "stock"
+        else ""
+    )
+
+    if timestamp:
+        ts_clause, ts_params = ts_filter_clause(timestamp)
+        ts_sql = f"AND {ts_clause}"
+    else:
+        ts_sql    = ("AND timestamp = ("
+                     f"  SELECT MAX(timestamp) "
+                     f"  FROM {tbl()} t2 WHERE t2.symbol = {tbl()}.symbol)")
+        ts_params = []
 
     df = qdf(
         f"""
-        SELECT strike_price,
-               COALESCE(ce_ltp,    0) AS ce_ltp,
-               COALESCE(pe_ltp,    0) AS pe_ltp,
-               COALESCE(ce_delta,  0) AS ce_delta,
-               COALESCE(pe_delta,  0) AS pe_delta,
-               COALESCE(ce_iv,     0) AS ce_iv,
-               COALESCE(pe_iv,     0) AS pe_iv,
-               COALESCE(ce_oi,     0) AS ce_oi,
-               COALESCE(pe_oi,     0) AS pe_oi,
-               COALESCE(ce_volume, 0) AS ce_volume,
-               COALESCE(pe_volume, 0) AS pe_volume,
-               lotsize                   AS raw_lot,
-               COALESCE(underlying_price,0) AS spot,
-               COALESCE(days_to_expiry,  0) AS dte
+        SELECT
+            symbol, strike_price,
+            CAST(expiry AS VARCHAR)       AS expiry,
+            COALESCE(underlying_price, 0) AS spot,
+            COALESCE(days_to_expiry,   0) AS dte,
+            lotsize                       AS raw_lot,
+            COALESCE(ce_ltp,    0) AS ce_ltp,    COALESCE(pe_ltp,    0) AS pe_ltp,
+            COALESCE(ce_delta,  0) AS ce_delta,  COALESCE(pe_delta,  0) AS pe_delta,
+            COALESCE(ce_iv,     0) AS ce_iv,     COALESCE(pe_iv,     0) AS pe_iv,
+            COALESCE(ce_oi,     0) AS ce_oi,     COALESCE(pe_oi,     0) AS pe_oi,
+            COALESCE(ce_volume, 0) AS ce_volume, COALESCE(pe_volume, 0) AS pe_volume,
+            COALESCE(ce_gamma,  0) AS ce_gamma,  COALESCE(pe_gamma,  0) AS pe_gamma,
+            COALESCE(ce_theta,  0) AS ce_theta,  COALESCE(pe_theta,  0) AS pe_theta,
+            COALESCE(ce_gexv,   0) AS ce_gexv,   COALESCE(pe_gexv,   0) AS pe_gexv,
+            COALESCE(net_gexv,  0) AS net_gexv
         FROM {tbl()}
-        WHERE symbol=?
-          AND CAST(expiry    AS VARCHAR) LIKE ?
-          AND CAST(timestamp AS VARCHAR) LIKE ?
-        ORDER BY strike_price
+        WHERE 1=1 {sym_filter} {ts_sql}
+          AND (
+            ABS(COALESCE(ce_delta, 0)) BETWEEN {tgt_lo} AND {tgt_hi}
+            OR
+            ABS(COALESCE(pe_delta, 0)) BETWEEN {tgt_lo} AND {tgt_hi}
+          )
+        ORDER BY symbol, expiry, strike_price
         """,
-        [symbol, f"%{expiry[:10]}%", f"%{ts_filter[:16]}%"],
+        ts_params,
     )
     if df.empty:
-        raise HTTPException(404, "No data for delta screener")
+        return safe_response({"target_delta": target_delta, "min_delta": min_delta, "rows": []})
 
-    lot = max(int(df["raw_lot"].iloc[0]) if df["raw_lot"].iloc[0] is not None else 1, 1)
+    rows = []
+    for _, r in df.iterrows():
+        lot  = max(int(r["raw_lot"]) if r["raw_lot"] else 1, 1)
+        spot = float(r["spot"])
 
-    ce = df[df["ce_delta"] > 0].copy()
-    ce["option_type"]     = "CE"
-    ce["delta"]           = ce["ce_delta"]
-    ce["ltp"]             = ce["ce_ltp"]
-    ce["iv"]              = ce["ce_iv"]
-    ce["oi"]              = ce["ce_oi"]
-    ce["volume"]          = ce["ce_volume"]
-    ce["delta_dist"]      = (ce["delta"] - tgt).abs()
-    ce["premium_per_lot"] = ce["ltp"] * lot
-    ce["risk_indicator"]  = ce["strike_price"] * lot
+        def make_row(otype, delta_raw, ltp, iv, oi, vol, gamma, theta, gexv):
+            d = abs(float(delta_raw))
+            return {
+                "option_type": otype, "symbol": r["symbol"],
+                "expiry": r["expiry"], "strike_price": float(r["strike_price"]),
+                "delta": round(d, 4), "ltp": float(ltp),
+                "iv": float(iv), "oi": float(oi), "volume": float(vol),
+                "gamma": round(float(gamma), 6),
+                "theta": round(float(theta), 4),
+                "gexv":  round(float(gexv),  2),
+                "net_gexv": round(float(r["net_gexv"]), 2),
+                "lot_size": lot,
+                "premium_per_lot": round(float(ltp) * lot, 2),
+                "risk_indicator":  round(float(r["strike_price"]) * lot, 2),
+                "spot": spot, "dte": float(r["dte"]),
+                "margin": None, "return_on_margin": None,
+            }
 
-    pe = df[df["pe_delta"] < 0].copy()
-    pe["option_type"]     = "PE"
-    pe["delta"]           = pe["pe_delta"].abs()
-    pe["ltp"]             = pe["pe_ltp"]
-    pe["iv"]              = pe["pe_iv"]
-    pe["oi"]              = pe["pe_oi"]
-    pe["volume"]          = pe["pe_volume"]
-    pe["delta_dist"]      = (pe["delta"] - tgt).abs()
-    pe["premium_per_lot"] = pe["ltp"] * lot
-    pe["risk_indicator"]  = pe["strike_price"] * lot
+        ce_d = abs(float(r["ce_delta"]))
+        if tgt_lo <= ce_d <= tgt_hi:
+            rows.append(make_row("CE", r["ce_delta"], r["ce_ltp"], r["ce_iv"],
+                                 r["ce_oi"], r["ce_volume"], r["ce_gamma"],
+                                 r["ce_theta"], r["ce_gexv"]))
 
-    keep = ["option_type","strike_price","delta","delta_dist",
-            "ltp","iv","oi","volume","premium_per_lot","risk_indicator","spot","dte"]
-    combined = pd.concat([
-        ce[keep].sort_values("delta_dist").head(20),
-        pe[keep].sort_values("delta_dist").head(20),
-    ], ignore_index=True)
-    combined["margin"]           = None
-    combined["return_on_margin"] = None
+        pe_d = abs(float(r["pe_delta"]))
+        if tgt_lo <= pe_d <= tgt_hi:
+            rows.append(make_row("PE", r["pe_delta"], r["pe_ltp"], r["pe_iv"],
+                                 r["pe_oi"], r["pe_volume"], r["pe_gamma"],
+                                 r["pe_theta"], r["pe_gexv"]))
 
-    return safe_response({"lot_size": lot, "target_delta": target_delta, "rows": to_records(combined)})
+    return safe_response({"target_delta": target_delta, "min_delta": min_delta, "rows": rows})
 
 
 # ===========================================================================

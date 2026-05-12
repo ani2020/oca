@@ -7,218 +7,122 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.1/plotly.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=DM+Sans:wght@300;400;500;600&display=swap');
-
-:root {
-  --bg:      #080b12;
-  --surf:    #0e1320;
-  --card:    #131b2a;
-  --card2:   #182035;
-  --border:  #1e2d47;
-  --border2: #243550;
-  --acc:     #00c8f0;
-  --acc2:    #f07000;
-  --acc3:    #8b5cf6;
-  --green:   #10b981;
-  --red:     #f43f5e;
-  --amber:   #f59e0b;
-  --text:    #dde4f0;
-  --muted:   #5a7090;
-  --mono:    'JetBrains Mono', monospace;
-  --sans:    'DM Sans', sans-serif;
+:root{
+  --bg:#080b12;--surf:#0e1320;--card:#131b2a;--card2:#182035;
+  --border:#1e2d47;--border2:#243550;--acc:#00c8f0;--acc2:#f07000;
+  --acc3:#8b5cf6;--green:#10b981;--red:#f43f5e;--amber:#f59e0b;
+  --text:#dde4f0;--muted:#5a7090;
+  --mono:'JetBrains Mono',monospace;--sans:'DM Sans',sans-serif;
 }
-
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px}
-
-/* ── Topbar ── */
-.topbar{
-  display:flex;align-items:center;gap:14px;
-  padding:8px 18px;background:var(--surf);
-  border-bottom:1px solid var(--border);
-  position:sticky;top:0;z-index:200;
-}
-.logo{font-family:var(--mono);font-size:14px;font-weight:600;
-  color:var(--acc);letter-spacing:.12em;white-space:nowrap}
+.topbar{display:flex;align-items:center;gap:14px;padding:8px 18px;background:var(--surf);
+  border-bottom:1px solid var(--border);position:sticky;top:0;z-index:200}
+.logo{font-family:var(--mono);font-size:14px;font-weight:600;color:var(--acc);letter-spacing:.12em;white-space:nowrap}
 .logo em{color:var(--muted);font-style:normal;font-weight:300}
 .nav{display:flex;gap:2px;flex-wrap:wrap}
-.nav-btn{
-  background:none;border:1px solid transparent;
-  color:var(--muted);font-family:var(--mono);font-size:10px;
-  padding:5px 11px;cursor:pointer;border-radius:4px;
-  letter-spacing:.07em;transition:all .15s;white-space:nowrap;
-}
+.nav-btn{background:none;border:1px solid transparent;color:var(--muted);font-family:var(--mono);
+  font-size:10px;padding:5px 11px;cursor:pointer;border-radius:4px;letter-spacing:.07em;
+  transition:all .15s;white-space:nowrap}
 .nav-btn:hover{color:var(--text);border-color:var(--border)}
 .nav-btn.active{color:var(--acc);border-color:var(--acc);background:rgba(0,200,240,.06)}
 .topbar-right{margin-left:auto;display:flex;align-items:center;gap:10px}
 .status-dot{width:7px;height:7px;border-radius:50%;background:var(--green);
   box-shadow:0 0 6px var(--green);animation:pulse 2s infinite}
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
-#iciciStatusBadge{
-  font-family:var(--mono);font-size:9px;padding:3px 8px;border-radius:10px;
-  cursor:pointer;border:1px solid var(--border);color:var(--muted);
-  letter-spacing:.06em;transition:all .15s;
-}
+#iciciStatusBadge{font-family:var(--mono);font-size:9px;padding:3px 8px;border-radius:10px;
+  cursor:pointer;border:1px solid var(--border);color:var(--muted);letter-spacing:.06em;transition:all .15s}
 #iciciStatusBadge:hover{border-color:var(--acc);color:var(--acc)}
 #iciciStatusBadge.ok{border-color:var(--green);color:var(--green)}
-
-/* ── Layout ── */
 .main{padding:14px 18px}
 .view{display:none}.view.active{display:block}
-
-/* ── Filters ── */
-.filter-bar{
-  display:flex;align-items:center;gap:8px;flex-wrap:wrap;
-  padding:9px 12px;background:var(--card);
-  border:1px solid var(--border);border-radius:6px;margin-bottom:14px;
-}
-.fl{font-family:var(--mono);font-size:9px;color:var(--muted);
-  letter-spacing:.09em;white-space:nowrap}
+.filter-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:9px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;margin-bottom:14px}
+.fl{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.09em;white-space:nowrap}
 select,input[type=number],input[type=text],input[type=password]{
   background:var(--surf);border:1px solid var(--border);color:var(--text);
-  font-family:var(--mono);font-size:11px;padding:5px 9px;
-  border-radius:4px;outline:none;min-width:110px;
-}
+  font-family:var(--mono);font-size:11px;padding:5px 9px;border-radius:4px;outline:none;min-width:110px}
 select:focus,input:focus{border-color:var(--acc)}
-.btn{
-  background:var(--acc);color:#000;border:none;
-  font-family:var(--mono);font-size:10px;font-weight:600;
-  padding:6px 14px;border-radius:4px;cursor:pointer;
-  letter-spacing:.07em;transition:opacity .15s;white-space:nowrap;
-}
+.btn{background:var(--acc);color:#000;border:none;font-family:var(--mono);font-size:10px;
+  font-weight:600;padding:6px 14px;border-radius:4px;cursor:pointer;letter-spacing:.07em;
+  transition:opacity .15s;white-space:nowrap}
 .btn:hover{opacity:.85}
-.btn.sec{background:none;border:1px solid var(--border);
-  color:var(--muted)}
+.btn.sec{background:none;border:1px solid var(--border);color:var(--muted)}
 .btn.sec:hover{border-color:var(--acc);color:var(--acc)}
-.btn.danger{background:var(--red);color:#fff}
-
-/* ── Toggle group ── */
+.btn:disabled{opacity:.4;cursor:not-allowed}
 .toggle-group{display:flex;border:1px solid var(--border);border-radius:4px;overflow:hidden}
-.toggle-group button{
-  background:none;border:none;color:var(--muted);
-  font-family:var(--mono);font-size:10px;padding:5px 10px;
-  cursor:pointer;letter-spacing:.06em;transition:all .15s;
-}
+.toggle-group button{background:none;border:none;color:var(--muted);font-family:var(--mono);
+  font-size:10px;padding:5px 10px;cursor:pointer;letter-spacing:.06em;transition:all .15s}
 .toggle-group button.active{background:rgba(0,200,240,.12);color:var(--acc)}
 .toggle-group button:hover:not(.active){color:var(--text)}
-
-/* ── Grid ── */
 .g2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
 .g4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
 @media(max-width:960px){.g2,.g3,.g4{grid-template-columns:1fr}}
-
-/* ── Cards ── */
 .card{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:12px}
-.card-title{
-  font-family:var(--mono);font-size:9px;font-weight:500;
-  color:var(--muted);letter-spacing:.11em;text-transform:uppercase;
-  margin-bottom:10px;display:flex;align-items:center;gap:8px;
-}
-.badge{font-size:8px;padding:1px 6px;border-radius:8px;
-  background:var(--acc3);color:#fff;letter-spacing:.04em}
+.card-title{font-family:var(--mono);font-size:9px;font-weight:500;color:var(--muted);
+  letter-spacing:.11em;text-transform:uppercase;margin-bottom:10px;
+  display:flex;align-items:center;gap:8px}
+.badge{font-size:8px;padding:1px 6px;border-radius:8px;background:var(--acc3);color:#fff;letter-spacing:.04em}
 .badge-g{background:rgba(16,185,129,.2);color:var(--green)}
 .badge-r{background:rgba(244,63,94,.2);color:var(--red)}
-
-/* ── KPI tiles ── */
 .kpi-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
-.kpi{
-  background:var(--card);border:1px solid var(--border);
-  border-radius:6px;padding:10px 14px;min-width:130px;
-}
-.kpi-label{font-family:var(--mono);font-size:8px;color:var(--muted);
-  letter-spacing:.11em;text-transform:uppercase;margin-bottom:5px}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px 14px;min-width:130px}
+.kpi-label{font-family:var(--mono);font-size:8px;color:var(--muted);letter-spacing:.11em;
+  text-transform:uppercase;margin-bottom:5px}
 .kpi-val{font-family:var(--mono);font-size:20px;font-weight:600;line-height:1}
 .kpi-sub{font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:3px}
-.kpi-val.up{color:var(--green)}.kpi-val.down{color:var(--red)}
-.kpi-val.acc{color:var(--acc)}
-
-/* ── Section head ── */
-.sh{
-  font-family:var(--mono);font-size:9px;color:var(--muted);
-  letter-spacing:.13em;text-transform:uppercase;
-  margin:16px 0 10px;padding-bottom:5px;border-bottom:1px solid var(--border);
-}
-
-/* ── Loading / empty ── */
-.loading{
-  display:flex;align-items:center;justify-content:center;
-  min-height:140px;color:var(--muted);font-family:var(--mono);font-size:11px;gap:8px;
-}
-.spinner{
-  width:13px;height:13px;border:2px solid var(--border);
-  border-top-color:var(--acc);border-radius:50%;
-  animation:spin .65s linear infinite;flex-shrink:0;
-}
+.kpi-val.up{color:var(--green)}.kpi-val.down{color:var(--red)}.kpi-val.acc{color:var(--acc)}
+.sh{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.13em;
+  text-transform:uppercase;margin:16px 0 10px;padding-bottom:5px;border-bottom:1px solid var(--border)}
+.loading{display:flex;align-items:center;justify-content:center;
+  min-height:140px;color:var(--muted);font-family:var(--mono);font-size:11px;gap:8px}
+.spinner{width:13px;height:13px;border:2px solid var(--border);border-top-color:var(--acc);
+  border-radius:50%;animation:spin .65s linear infinite;flex-shrink:0}
 @keyframes spin{to{transform:rotate(360deg)}}
-.empty{color:var(--muted);font-family:var(--mono);font-size:11px;
-  text-align:center;padding:24px}
-.err{color:var(--red) !important}
-
-/* ── Table ── */
-.tw{overflow-x:auto;max-height:400px;overflow-y:auto}
+.empty{color:var(--muted);font-family:var(--mono);font-size:11px;text-align:center;padding:24px}
+.err{color:var(--red)!important}
+.tw{overflow-x:auto;max-height:520px;overflow-y:auto}
 table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
-thead th{
-  position:sticky;top:0;background:var(--surf);
-  color:var(--muted);font-weight:500;font-size:9px;
-  letter-spacing:.08em;text-transform:uppercase;
-  padding:6px 9px;text-align:right;border-bottom:1px solid var(--border);
-  white-space:nowrap;cursor:pointer;user-select:none;
-}
+thead th{position:sticky;top:0;background:var(--surf);color:var(--muted);font-weight:500;
+  font-size:9px;letter-spacing:.08em;text-transform:uppercase;padding:6px 9px;
+  text-align:right;border-bottom:1px solid var(--border);white-space:nowrap;
+  cursor:pointer;user-select:none}
 thead th:first-child{text-align:left}
 thead th:hover{color:var(--acc)}
 tbody tr{border-bottom:1px solid rgba(30,45,71,.5);transition:background .1s}
 tbody tr:hover{background:rgba(255,255,255,.025)}
 td{padding:5px 9px;text-align:right;color:var(--text);white-space:nowrap}
 td:first-child{text-align:left;color:var(--acc);font-weight:500}
-.up{color:var(--green)!important}.down{color:var(--red)!important}
-.neu{color:var(--muted)!important}
-
-/* ── Signal pills ── */
-.pill{display:inline-block;padding:1px 7px;border-radius:8px;
-  font-size:9px;font-weight:600;letter-spacing:.04em;white-space:nowrap}
+.up{color:var(--green)!important}.down{color:var(--red)!important}.neu{color:var(--muted)!important}
+.pill{display:inline-block;padding:1px 7px;border-radius:8px;font-size:9px;font-weight:600;
+  letter-spacing:.04em;white-space:nowrap}
 .pill-lb{background:rgba(16,185,129,.15);color:var(--green)}
 .pill-sb{background:rgba(244,63,94,.15);color:var(--red)}
 .pill-sc{background:rgba(16,185,129,.07);color:#6ee7b7}
 .pill-lu{background:rgba(244,63,94,.07);color:#fda4af}
 .pill-n{background:rgba(90,112,144,.15);color:var(--muted)}
-
-/* ── Charts ── */
 .chart{width:100%;min-height:320px;position:relative}
 .chart-lg{width:100%;min-height:440px}
-
-/* ── Tabs ── */
 .tabs{display:flex;gap:0;margin-bottom:12px;border-bottom:1px solid var(--border)}
-.tab{
-  background:none;border:none;border-bottom:2px solid transparent;
-  color:var(--muted);font-family:var(--mono);font-size:10px;
-  padding:7px 13px;cursor:pointer;letter-spacing:.07em;margin-bottom:-1px;transition:all .15s;
-}
+.tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);
+  font-family:var(--mono);font-size:10px;padding:7px 13px;cursor:pointer;
+  letter-spacing:.07em;margin-bottom:-1px;transition:all .15s}
 .tab.active{color:var(--acc);border-bottom-color:var(--acc)}
 .tab:hover:not(.active){color:var(--text)}
 .tab-panel{display:none}.tab-panel.active{display:block}
-
-/* ── Ticker grid ── */
 .ticker-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:9px}
-.tc{
-  background:var(--card);border:1px solid var(--border);
-  border-radius:6px;padding:11px 13px;cursor:pointer;transition:border-color .15s;
-}
+.tc{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:11px 13px;
+  cursor:pointer;transition:border-color .15s}
 .tc:hover{border-color:var(--acc)}
 .tc-sym{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--acc)}
 .tc-spot{font-family:var(--mono);font-size:19px;color:var(--text);margin:3px 0}
 .tc-row{display:flex;justify-content:space-between;margin-top:4px}
 .tc-key{font-family:var(--mono);font-size:8px;color:var(--muted);letter-spacing:.07em}
 .tc-val{font-family:var(--mono);font-size:11px}
-
-/* ── Gamma analysis card ── */
-.ga-card{
-  background:var(--card2);border:1px solid var(--border2);
-  border-radius:6px;padding:14px;margin-top:12px;
-}
-.ga-regime{
-  display:inline-block;padding:3px 10px;border-radius:10px;
-  font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.07em;margin-bottom:10px;
-}
+.ga-card{background:var(--card2);border:1px solid var(--border2);border-radius:6px;padding:14px;margin-top:12px}
+.ga-regime{display:inline-block;padding:3px 10px;border-radius:10px;
+  font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.07em;margin-bottom:10px}
 .ga-regime.pos{background:rgba(16,185,129,.15);color:var(--green)}
 .ga-regime.neg{background:rgba(244,63,94,.15);color:var(--red)}
 .ga-row{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:10px}
@@ -230,44 +134,34 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   padding:3px 0;border-bottom:1px solid rgba(30,45,71,.4)}
 .ga-list li::before{content:"▸ ";color:var(--acc);font-size:9px}
 .ga-warn li::before{content:"⚠ ";color:var(--amber)}
-
-/* ── ICICI modal ── */
-.modal-bg{
-  display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);
-  z-index:500;align-items:center;justify-content:center;
-}
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);
+  z-index:500;align-items:center;justify-content:center}
 .modal-bg.open{display:flex}
-.modal{
-  background:var(--surf);border:1px solid var(--border);
-  border-radius:8px;padding:24px;width:420px;max-width:95vw;
-}
-.modal h3{font-family:var(--mono);font-size:13px;color:var(--acc);
-  letter-spacing:.08em;margin-bottom:16px}
-.modal label{font-family:var(--mono);font-size:9px;color:var(--muted);
-  letter-spacing:.09em;display:block;margin-bottom:5px;margin-top:12px}
+.modal{background:var(--surf);border:1px solid var(--border);border-radius:8px;
+  padding:24px;width:420px;max-width:95vw}
+.modal h3{font-family:var(--mono);font-size:13px;color:var(--acc);letter-spacing:.08em;margin-bottom:16px}
+.modal label{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.09em;
+  display:block;margin-bottom:5px;margin-top:12px}
 .modal input{width:100%;margin-bottom:4px}
 .modal-foot{display:flex;gap:8px;margin-top:18px;justify-content:flex-end}
-.modal-note{font-family:var(--mono);font-size:9px;color:var(--muted);
-  line-height:1.5;margin-top:8px}
+.modal-note{font-family:var(--mono);font-size:9px;color:var(--muted);line-height:1.5;margin-top:8px}
 .modal a{color:var(--acc);text-decoration:none}
-
-/* ── Delta screener ── */
 .delta-slider-wrap{display:flex;align-items:center;gap:8px}
-.delta-slider-wrap input[type=range]{
-  -webkit-appearance:none;background:var(--border);height:4px;
-  border-radius:2px;flex:1;cursor:pointer;border:none;min-width:0;
-}
-.delta-slider-wrap input[type=range]::-webkit-slider-thumb{
-  -webkit-appearance:none;width:14px;height:14px;border-radius:50%;
-  background:var(--acc);cursor:pointer;
-}
-#deltaVal{font-family:var(--mono);font-size:12px;color:var(--acc);
-  font-weight:600;min-width:32px;text-align:center}
+.delta-slider-wrap input[type=range]{-webkit-appearance:none;background:var(--border);height:4px;
+  border-radius:2px;flex:1;cursor:pointer;border:none;min-width:80px}
+.delta-slider-wrap input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;
+  height:14px;border-radius:50%;background:var(--acc);cursor:pointer}
+#deltaVal,#deltaMinVal{font-family:var(--mono);font-size:12px;color:var(--acc);
+  font-weight:600;min-width:28px;text-align:center}
+.stg-row{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.stg-row label{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.08em}
+.stg-row input{width:100px}
+.chk-label{display:flex;align-items:center;gap:5px;font-family:var(--mono);
+  font-size:9px;color:var(--muted);cursor:pointer;white-space:nowrap}
 </style>
 </head>
 <body>
 
-<!-- ══ TOPBAR ══════════════════════════════════════════════════ -->
 <header class="topbar">
   <div class="logo">NSE<em>/</em>OC<em>·</em>INTEL</div>
   <nav class="nav">
@@ -279,6 +173,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="nav-btn" data-view="movers">MOVERS</button>
     <button class="nav-btn" data-view="trend">STRIKE TREND</button>
     <button class="nav-btn" data-view="delta">DELTA SCREENER</button>
+    <button class="nav-btn" data-view="settings">SETTINGS</button>
   </nav>
   <div class="topbar-right">
     <div class="status-dot"></div>
@@ -286,19 +181,15 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </div>
 </header>
 
-<!-- ══ ICICI MODAL ═════════════════════════════════════════════ -->
+<!-- ICICI Modal -->
 <div class="modal-bg" id="iciciModal">
   <div class="modal">
     <h3>CONFIGURE ICICI BREEZE</h3>
-    <p class="modal-note">
-      To get a session token: visit the
-      <a id="iciciLoginLink" href="#" target="_blank">ICICI Breeze login URL</a>,
-      log in, then copy the <code>apisession</code> value from the redirect URL.
-    </p>
+    <p class="modal-note">Visit the <a id="iciciLoginLink" href="https://api.icicidirect.com/apiuser/login" target="_blank">ICICI Breeze login URL</a>, log in, then copy the <code>apisession</code> value from the redirect URL.</p>
     <label>SESSION TOKEN</label>
     <input type="password" id="iciciTokenInput" placeholder="paste session token here">
     <label>API KEY (optional — overrides .env)</label>
-    <input type="text"     id="iciciKeyInput"   placeholder="leave blank to use .env value">
+    <input type="text" id="iciciKeyInput" placeholder="leave blank to use .env value">
     <div id="iciciMsg" style="font-family:var(--mono);font-size:10px;margin-top:8px;min-height:18px"></div>
     <div class="modal-foot">
       <button class="btn sec" onclick="closeIciciModal()">CANCEL</button>
@@ -307,10 +198,9 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </div>
 </div>
 
-<!-- ══ MAIN ════════════════════════════════════════════════════ -->
 <div class="main">
 
-<!-- ── OVERVIEW ─────────────────────────────────────────────── -->
+<!-- OVERVIEW -->
 <div class="view active" id="view-overview">
   <div class="filter-bar">
     <span class="fl">FILTER</span>
@@ -321,22 +211,17 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     </div>
     <button class="btn" id="btnRefreshOverview">↻ REFRESH</button>
   </div>
-  <div id="overviewCards" class="ticker-grid">
-    <div class="loading"><div class="spinner"></div>Loading…</div>
-  </div>
+  <div id="overviewCards" class="ticker-grid"><div class="loading"><div class="spinner"></div>Loading…</div></div>
   <div class="sh">AGGREGATE OI SIGNALS</div>
-  <div class="card">
-    <div class="tw" id="allOiTable">
-      <div class="loading"><div class="spinner"></div>Loading…</div>
-    </div>
-  </div>
+  <div class="card"><div class="tw" id="allOiTable"><div class="loading"><div class="spinner"></div>Loading…</div></div></div>
 </div>
 
-<!-- ── GEX & GAMMA ──────────────────────────────────────────── -->
+<!-- GEX & GAMMA -->
 <div class="view" id="view-gex">
   <div class="filter-bar">
     <span class="fl">SYMBOL</span><select id="gexSymbol"></select>
     <span class="fl">EXPIRY</span><select id="gexExpiry"></select>
+    <label class="chk-label"><input type="checkbox" id="gexExpiryShowPast" onchange="reloadExpiries('gex')"> PAST</label>
     <span class="fl">TIMESTAMP</span><select id="gexTimestamp"></select>
     <span class="fl">RANGE %</span>
     <input type="number" id="gexRange" value="5" min="1" max="20" style="width:60px">
@@ -348,7 +233,6 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     </div>
     <button class="btn" id="btnGex">LOAD</button>
   </div>
-
   <div class="g2" style="margin-bottom:12px">
     <div class="card">
       <div class="card-title">GEX BY STRIKE <span class="badge">CE + PE STACKED</span></div>
@@ -359,22 +243,18 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       <div id="gammaProfileChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div>
     </div>
   </div>
-
   <div class="kpi-row" id="gexKpis"></div>
-
   <div class="card" style="margin-bottom:12px">
     <div class="card-title">NET GEX ACROSS STRIKES</div>
     <div id="netGexChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div>
   </div>
-
-  <!-- Gamma analysis card (shown after loading) -->
   <div id="gammaAnalysisCard" style="display:none">
     <div class="sh">GAMMA ANALYSIS</div>
     <div class="ga-card" id="gaContent"></div>
   </div>
 </div>
 
-<!-- ── OI SIGNALS ───────────────────────────────────────────── -->
+<!-- OI SIGNALS -->
 <div class="view" id="view-oi">
   <div class="filter-bar">
     <span class="fl">SYMBOL</span><select id="oiSymbol"></select>
@@ -402,7 +282,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </div>
 </div>
 
-<!-- ── SHOCKERS ─────────────────────────────────────────────── -->
+<!-- SHOCKERS -->
 <div class="view" id="view-shockers">
   <div class="tabs">
     <button class="tab active" data-tab="vol-shock">VOLUME SHOCKERS</button>
@@ -412,43 +292,44 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <div class="filter-bar">
       <span class="fl">TOP N</span>
       <input type="number" id="volShockerN" value="30" min="5" max="100" style="width:65px">
+      <span class="fl">FILTER</span>
+      <div class="toggle-group" id="volShockFilterGroup">
+        <button class="active" data-ft="all">ALL</button>
+        <button data-ft="index">INDEX</button>
+        <button data-ft="stock">STOCK</button>
+      </div>
       <button class="btn" id="btnVolShock">LOAD</button>
     </div>
     <div class="g2">
-      <div class="card">
-        <div class="card-title">VOLUME SPIKE — TOP STRIKES</div>
-        <div id="volShockChart" class="chart"></div>
-      </div>
-      <div class="card">
-        <div class="card-title">VOLUME SHOCKER TABLE</div>
-        <div class="tw" id="volShockTable"></div>
-      </div>
+      <div class="card"><div class="card-title">VOLUME SPIKE</div><div id="volShockChart" class="chart"></div></div>
+      <div class="card"><div class="card-title">VOLUME SHOCKER TABLE</div><div class="tw" id="volShockTable"></div></div>
     </div>
   </div>
   <div class="tab-panel" id="tab-iv-shock">
     <div class="filter-bar">
       <span class="fl">TOP N</span>
       <input type="number" id="ivShockerN" value="30" min="5" max="100" style="width:65px">
+      <span class="fl">FILTER</span>
+      <div class="toggle-group" id="ivShockFilterGroup">
+        <button class="active" data-ft="all">ALL</button>
+        <button data-ft="index">INDEX</button>
+        <button data-ft="stock">STOCK</button>
+      </div>
       <button class="btn" id="btnIvShock">LOAD</button>
     </div>
     <div class="g2">
-      <div class="card">
-        <div class="card-title">IV SPIKE — TOP STRIKES</div>
-        <div id="ivShockChart" class="chart"></div>
-      </div>
-      <div class="card">
-        <div class="card-title">IV SHOCKER TABLE</div>
-        <div class="tw" id="ivShockTable"></div>
-      </div>
+      <div class="card"><div class="card-title">IV SPIKE</div><div id="ivShockChart" class="chart"></div></div>
+      <div class="card"><div class="card-title">IV SHOCKER TABLE</div><div class="tw" id="ivShockTable"></div></div>
     </div>
   </div>
 </div>
 
-<!-- ── IV SMILE ─────────────────────────────────────────────── -->
+<!-- IV SMILE -->
 <div class="view" id="view-iv">
   <div class="filter-bar">
     <span class="fl">SYMBOL</span><select id="ivSymbol"></select>
     <span class="fl">EXPIRY</span><select id="ivExpiry"></select>
+    <label class="chk-label"><input type="checkbox" id="ivExpiryShowPast" onchange="reloadExpiries('iv')"> PAST</label>
     <span class="fl">TIMESTAMP</span><select id="ivTimestamp"></select>
     <span class="fl">FILTER</span>
     <div class="toggle-group" id="ivFilterGroup">
@@ -459,14 +340,10 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="btn" id="btnIv">LOAD</button>
   </div>
   <div class="g2" style="margin-bottom:12px">
-    <div class="card">
-      <div class="card-title">CE IV SMILE <span class="badge">SPLINE + ANOMALIES</span></div>
-      <div id="ceSmileChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div>
-    </div>
-    <div class="card">
-      <div class="card-title">PE IV SMILE <span class="badge">SPLINE + ANOMALIES</span></div>
-      <div id="peSmileChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div>
-    </div>
+    <div class="card"><div class="card-title">CE IV SMILE <span class="badge">SPLINE + ANOMALIES</span></div>
+      <div id="ceSmileChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div></div>
+    <div class="card"><div class="card-title">PE IV SMILE <span class="badge">SPLINE + ANOMALIES</span></div>
+      <div id="peSmileChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div></div>
   </div>
   <div class="card">
     <div class="card-title">ANOMALOUS STRIKES <span class="badge badge-r">|Z| &gt; 2</span></div>
@@ -474,14 +351,11 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </div>
 </div>
 
-<!-- ── MOVERS ───────────────────────────────────────────────── -->
+<!-- MOVERS -->
 <div class="view" id="view-movers">
   <div class="filter-bar">
     <span class="fl">SIDE</span>
-    <select id="moverSide">
-      <option value="CE">CALL (CE)</option>
-      <option value="PE">PUT (PE)</option>
-    </select>
+    <select id="moverSide"><option value="CE">CALL (CE)</option><option value="PE">PUT (PE)</option></select>
     <span class="fl">FILTER</span>
     <div class="toggle-group" id="moverFilterGroup">
       <button class="active" data-ft="all">ALL</button>
@@ -506,20 +380,22 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </div>
 </div>
 
-<!-- ── STRIKE TREND ──────────────────────────────────────────── -->
+<!-- STRIKE TREND -->
 <div class="view" id="view-trend">
   <div class="filter-bar">
     <span class="fl">SYMBOL</span><select id="trendSymbol"></select>
     <span class="fl">EXPIRY</span><select id="trendExpiry"></select>
-    <span class="fl">STRIKE</span>
-    <input type="number" id="trendStrike" placeholder="e.g. 24000" style="width:95px">
+    <label class="chk-label"><input type="checkbox" id="trendExpiryShowPast" onchange="reloadExpiries('trend')"> PAST</label>
+    <span class="fl">ATM DIST</span><select id="trendAtmDist" style="min-width:120px"></select>
+    <span id="trendStrikeDisplay" style="font-family:var(--mono);font-size:11px;color:var(--acc)"></span>
+    <input type="hidden" id="trendStrike">
     <span class="fl">METRIC</span>
     <select id="trendMetric">
       <option value="ce_ltp">CE LTP</option><option value="pe_ltp">PE LTP</option>
       <option value="ce_iv">CE IV</option><option value="pe_iv">PE IV</option>
       <option value="ce_volume">CE Volume</option><option value="pe_volume">PE Volume</option>
       <option value="ce_oi">CE OI</option><option value="pe_oi">PE OI</option>
-      <option value="ce_gex">CE GEX</option><option value="pe_gex">PE GEX</option>
+      <option value="ce_gexv">CE GEXv</option><option value="pe_gexv">PE GEXv</option>
       <option value="net_gexv">Net GEXv</option>
       <option value="ce_delta">CE Delta</option><option value="pe_delta">PE Delta</option>
       <option value="ce_gamma">CE Gamma</option><option value="ce_theta">CE Theta</option>
@@ -533,51 +409,78 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </div>
 </div>
 
-<!-- ── DELTA SCREENER ───────────────────────────────────────── -->
+<!-- DELTA SCREENER -->
 <div class="view" id="view-delta">
   <div class="filter-bar">
-    <span class="fl">SYMBOL</span><select id="dsSymbol"></select>
-    <span class="fl">EXPIRY</span><select id="dsExpiry"></select>
-    <span class="fl">TARGET Δ</span>
+    <span class="fl">DELTA MAX</span>
     <div class="delta-slider-wrap">
-      <input type="range" id="deltaSlider" min="5" max="50" value="30"
-             oninput="document.getElementById('deltaVal').textContent=this.value">
+      <input type="range" id="deltaSlider" min="5" max="50" value="30">
       <span id="deltaVal">30</span>
     </div>
-    <span class="fl">TIMESTAMP</span><select id="dsTimestamp"></select>
+    <span class="fl">DELTA MIN</span>
+    <div class="delta-slider-wrap">
+      <input type="range" id="deltaMinSlider" min="1" max="30" value="5">
+      <span id="deltaMinVal">5</span>
+    </div>
+    <span class="fl">FILTER</span>
+    <div class="toggle-group" id="dsFilterGroup">
+      <button class="active" data-ft="all">ALL</button>
+      <button data-ft="index">INDEX</button>
+      <button data-ft="stock">STOCK</button>
+    </div>
+    <span class="fl">TIMESTAMP</span><select id="dsTimestamp" style="min-width:140px"></select>
     <button class="btn" id="btnDs">LOAD</button>
   </div>
-
   <div class="kpi-row" id="dsKpis"></div>
+  <div class="card">
+    <div class="card-title">
+      OPTIONS IN Δ RANGE <span id="dsRangeLabel" class="badge">5–30</span>
+      <span style="margin-left:auto">
+        <button class="btn sec" id="btnFetchMargin" style="font-size:9px;padding:4px 10px">FETCH MARGIN (ICICI)</button>
+      </span>
+    </div>
+    <div class="tw" id="dsTable"><div class="loading"><div class="spinner"></div>Select filters and click LOAD</div></div>
+  </div>
+</div>
 
-  <div class="g2" style="margin-bottom:12px">
+<!-- SETTINGS -->
+<div class="view" id="view-settings">
+  <div class="sh">DISPLAY THRESHOLDS</div>
+  <div class="g3">
     <div class="card">
-      <div class="card-title" style="color:var(--green)">CE OPTIONS near Δ<span id="dsCeLabel">30</span></div>
-      <div id="dsCeChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div>
+      <div class="card-title">IV SMILE</div>
+      <div class="stg-row"><label>MIN IV FOR SPLINE FIT (%)</label><input type="number" id="stgIvMin" value="0.5" step="0.1"></div>
+      <div class="stg-row"><label>MAX IV FOR SPLINE FIT (%)</label><input type="number" id="stgIvMax" value="150" step="1"></div>
+      <div class="stg-row"><label>ANOMALY Z-SCORE THRESHOLD</label><input type="number" id="stgIvZscore" value="2.0" step="0.1"></div>
     </div>
     <div class="card">
-      <div class="card-title" style="color:var(--red)">PE OPTIONS near Δ<span id="dsPeLabel">30</span></div>
-      <div id="dsPeChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div>
+      <div class="card-title">DELTA SCREENER</div>
+      <div class="stg-row"><label>MIN OI (HIDE ROWS BELOW)</label><input type="number" id="stgDsMinOi" value="0" step="100"></div>
+      <div class="stg-row"><label>MIN VOLUME (HIDE ROWS BELOW)</label><input type="number" id="stgDsMinVol" value="0" step="10"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">GAMMA ANALYSIS</div>
+      <div class="stg-row"><label>PRICE RANGE % (DEFAULT)</label><input type="number" id="stgGammaRange" value="5" step="0.5"></div>
+      <div class="stg-row"><label>MAGNET THRESHOLD (0–1)</label><input type="number" id="stgMagnetThr" value="0.75" step="0.05"></div>
+      <div class="stg-row"><label>LAMBDA GAMMA</label><input type="number" id="stgLambda" value="0.1" step="0.01"></div>
     </div>
   </div>
-
-  <div class="card">
-    <div class="card-title">DELTA SCREENER TABLE
-      <span class="badge" id="dsMarginBadge" style="display:none">MARGIN AVAILABLE</span>
-    </div>
-    <div class="tw" id="dsTable"></div>
+  <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+    <button class="btn" onclick="saveSettings()">SAVE SETTINGS</button>
+    <button class="btn sec" onclick="resetSettings()">RESET DEFAULTS</button>
+    <span id="settingsSaved" style="font-family:var(--mono);font-size:10px;color:var(--green);display:none">✓ Saved</span>
   </div>
 </div>
 
 </div><!-- /main -->
 
-<!-- ══ JAVASCRIPT ══════════════════════════════════════════════ -->
 <script>
 'use strict';
 
-// ── Plotly layout base ──────────────────────────────────────────
+// ── Constants ──────────────────────────────────────────────────────
+const NSE_IDX = new Set(['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50','SENSEX','NIFTYIT']);
 const LB = {
-  paper_bgcolor:'transparent', plot_bgcolor:'transparent',
+  paper_bgcolor:'transparent',plot_bgcolor:'transparent',
   font:{family:"'JetBrains Mono',monospace",size:10,color:'#7a9cbf'},
   xaxis:{gridcolor:'#1a2840',zerolinecolor:'#243550',tickfont:{size:9}},
   yaxis:{gridcolor:'#1a2840',zerolinecolor:'#243550',tickfont:{size:9}},
@@ -585,19 +488,20 @@ const LB = {
   legend:{bgcolor:'transparent',font:{size:9}},
 };
 const PC = {displayModeBar:false,responsive:true};
-const C  = {acc:'#00c8f0',acc2:'#f07000',green:'#10b981',red:'#f43f5e',
-            amber:'#f59e0b',pur:'#8b5cf6',muted:'#3d5270'};
+const C = {acc:'#00c8f0',acc2:'#f07000',green:'#10b981',red:'#f43f5e',
+           amber:'#f59e0b',pur:'#8b5cf6',muted:'#3d5270'};
 
-// ── Utility ─────────────────────────────────────────────────────
+let ALL_SYMS = [];
+let LOT_SIZES = {};
+
+// ── Utilities ─────────────────────────────────────────────────────
 async function api(path){
-  const r=await fetch(path);
-  if(!r.ok){const t=await r.text();throw new Error(t)}
+  const r = await fetch(path);
+  if(!r.ok){const t=await r.text();throw new Error(t);}
   return r.json();
 }
-
 function fmt(v,d=2){
-  if(v==null)return'—';const n=parseFloat(v);
-  if(isNaN(n))return String(v);
+  if(v==null)return'—';const n=parseFloat(v);if(isNaN(n))return String(v);
   return n.toLocaleString('en-IN',{minimumFractionDigits:d,maximumFractionDigits:d});
 }
 function fmtL(v){
@@ -606,29 +510,20 @@ function fmtL(v){
   if(Math.abs(n)>=1e5)return(n/1e5).toFixed(2)+'L';
   return n.toLocaleString('en-IN');
 }
-function cls(v){const n=parseFloat(v);if(isNaN(n)||n===0)return'neu';return n>0?'up':'down'}
+function cls(v){const n=parseFloat(v);if(isNaN(n)||n===0)return'neu';return n>0?'up':'down';}
 function sspan(v,d=2){
   const n=parseFloat(v);if(isNaN(n))return'<span class="neu">—</span>';
   const c=n>0?'up':n<0?'down':'neu',p=n>0?'+':'';
   return`<span class="${c}">${p}${fmt(v,d)}</span>`;
 }
 function pill(sig){
-  const m={
-    'Long Build-Up':['pill pill-lb','⬆ LBU'],
-    'Short Build-Up':['pill pill-sb','⬇ SBU'],
-    'Short Covering':['pill pill-sc','↩ SC'],
-    'Long Unwinding':['pill pill-lu','↪ LU'],
-    'Neutral':['pill pill-n','— NEU'],
-  };
-  const[c,l]=m[sig]||['pill pill-n',sig];
-  return`<span class="${c}">${l}</span>`;
+  const m={'Long Build-Up':['pill pill-lb','⬆ LBU'],'Short Build-Up':['pill pill-sb','⬇ SBU'],
+           'Short Covering':['pill pill-sc','↩ SC'],'Long Unwinding':['pill pill-lu','↪ LU'],
+           'Neutral':['pill pill-n','— NEU']};
+  const[c,l]=m[sig]||['pill pill-n',sig];return`<span class="${c}">${l}</span>`;
 }
-
-// Loading states — use a wrapper approach so Plotly renders freely
 function setLoad(id,msg=''){
-  const el=document.getElementById(id);
-  if(!el)return;
-  // If element already has a Plotly chart, clear it first
+  const el=document.getElementById(id);if(!el)return;
   if(el._plotly_initialized){try{Plotly.purge(el)}catch(e){}}
   el._plotly_initialized=false;
   el.innerHTML=`<div class="loading"><div class="spinner"></div>${msg||'Loading…'}</div>`;
@@ -639,23 +534,18 @@ function setEmpty(id,msg='No data'){
   el._plotly_initialized=false;
   el.innerHTML=`<div class="empty ${msg.startsWith('⚠')?'err':''}">${msg}</div>`;
 }
-
-// Plot helper — marks element as plotly-owned so setLoad can purge it
 function plot(id,traces,layout,config=PC){
-  const el=document.getElementById(id);
-  if(!el)return;
-  el.innerHTML='';  // clear any loading spinner
+  const el=document.getElementById(id);if(!el)return;
+  el.innerHTML='';
   Plotly.newPlot(el,traces,layout,config);
   el._plotly_initialized=true;
 }
-
 function populateSel(id,items){
   const el=document.getElementById(id);if(!el)return;
   const prev=el.value;
   el.innerHTML=items.map(i=>`<option value="${i}">${i}</option>`).join('');
   if(items.includes(prev))el.value=prev;
 }
-
 function makeTbl(rows,cols){
   if(!rows||!rows.length)return'<div class="empty">No data</div>';
   const heads=cols.map(c=>`<th onclick="sortTbl(this)">${typeof c==='string'?c:c.label}</th>`).join('');
@@ -667,7 +557,6 @@ function makeTbl(rows,cols){
   }).join('')+'</tr>').join('');
   return`<table><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>`;
 }
-
 function sortTbl(th){
   const tbl=th.closest('table');
   const idx=Array.from(th.parentNode.children).indexOf(th);
@@ -683,7 +572,24 @@ function sortTbl(th){
   rows.forEach(r=>tbl.querySelector('tbody').appendChild(r));
 }
 
-// ── Navigation ───────────────────────────────────────────────────
+// ── Toggle groups ─────────────────────────────────────────────────
+function wireToggleGroup(id){
+  const grp=document.getElementById(id);if(!grp)return;
+  grp.addEventListener('click',e=>{
+    const btn=e.target.closest('button');if(!btn)return;
+    grp.querySelectorAll('button').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+}
+['ovFilterGroup','gexFilterGroup','oiFilterGroup','ivFilterGroup',
+ 'moverFilterGroup','volShockFilterGroup','ivShockFilterGroup','dsFilterGroup']
+  .forEach(wireToggleGroup);
+
+function getFilter(id){
+  return document.querySelector('#'+id+' .active')?.dataset.ft||'all';
+}
+
+// ── Navigation ────────────────────────────────────────────────────
 document.querySelectorAll('.nav-btn').forEach(btn=>{
   btn.addEventListener('click',()=>{
     document.querySelectorAll('.nav-btn').forEach(b=>b.classList.remove('active'));
@@ -697,11 +603,9 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
     }
   });
 });
-
-// Shocker tabs
 document.querySelectorAll('.tab').forEach(tab=>{
   tab.addEventListener('click',()=>{
-    const view=tab.closest('.view')||document.body;
+    const view=tab.closest('.view');
     view.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
     view.querySelectorAll('.tab-panel').forEach(p=>p.classList.remove('active'));
     tab.classList.add('active');
@@ -709,156 +613,201 @@ document.querySelectorAll('.tab').forEach(tab=>{
   });
 });
 
-// Generic toggle group handler
-function wireToggleGroup(id){
-  const grp=document.getElementById(id);
-  if(!grp)return;
-  grp.addEventListener('click',e=>{
-    const btn=e.target.closest('button');if(!btn)return;
-    grp.querySelectorAll('button').forEach(b=>b.classList.remove('active'));
-    btn.classList.add('active');
-  });
-}
-['moverFilterGroup','oiFilterGroup','ivFilterGroup','gexFilterGroup','ovFilterGroup']
-  .forEach(wireToggleGroup);
-
-function getFilter(groupId){
-  return document.querySelector('#'+groupId+' .active')?.dataset.ft||'all';
-}
-
-// ── Symbol init ──────────────────────────────────────────────────
-let ALL_SYMS=[];
-let LOT_SIZES={};  // symbol -> lot_size, used for strike input step
-
-async function initSymbols(){
+// ── Settings ──────────────────────────────────────────────────────
+const SETTINGS_DEFAULTS={stgIvMin:0.5,stgIvMax:150,stgIvZscore:2.0,
+  stgDsMinOi:0,stgDsMinVol:0,stgGammaRange:5,stgMagnetThr:0.75,stgLambda:0.1};
+function loadSettings(){
   try{
-    ALL_SYMS=await api('/api/symbols');
-    ['gexSymbol','oiSymbol','ivSymbol','trendSymbol','dsSymbol'].forEach(id=>{
-      populateSel(id,ALL_SYMS);
+    const s=JSON.parse(localStorage.getItem('oc_settings')||'{}');
+    Object.entries({...SETTINGS_DEFAULTS,...s}).forEach(([k,v])=>{
+      const el=document.getElementById(k);if(el)el.value=v;
     });
-    // Pre-populate cascades so dropdowns are ready before user clicks tabs
-    const [, lotData] = await Promise.all([
-      Promise.all([
-        loadCascade('gexSymbol',  'gexExpiry',   'gexTimestamp'),
-        loadCascade('ivSymbol',   'ivExpiry',    'ivTimestamp'),
-        loadCascade('trendSymbol','trendExpiry',  null),
-        loadCascade('dsSymbol',   'dsExpiry',    'dsTimestamp'),
-      ]),
-      api('/api/lot_sizes').catch(()=>({})),
-    ]);
-    LOT_SIZES = lotData || {};
-    // Apply lot-size step to strike inputs
-    updateStrikeStep('trendSymbol', 'trendStrike');
-    updateStrikeStep('gexSymbol', null);
-  }catch(e){console.error('Symbols load failed',e)}
+  }catch(e){}
+}
+function saveSettings(){
+  const s={};
+  Object.keys(SETTINGS_DEFAULTS).forEach(k=>{const el=document.getElementById(k);if(el)s[k]=parseFloat(el.value)||0;});
+  localStorage.setItem('oc_settings',JSON.stringify(s));
+  const msg=document.getElementById('settingsSaved');
+  if(msg){msg.style.display='';setTimeout(()=>msg.style.display='none',1500);}
+}
+function resetSettings(){localStorage.removeItem('oc_settings');loadSettings();}
+function getSetting(k){
+  try{const s=JSON.parse(localStorage.getItem('oc_settings')||'{}');
+    return s[k]!=null?s[k]:SETTINGS_DEFAULTS[k];}catch(e){return SETTINGS_DEFAULTS[k];}
 }
 
-function updateStrikeStep(symId, strikeId){
-  if(!strikeId) return;
-  const sym = document.getElementById(symId)?.value;
-  const inp = document.getElementById(strikeId);
-  if(!inp || !sym) return;
-  const step = LOT_SIZES[sym] || 1;
-  inp.step = step;
-  inp.placeholder = `e.g. 24000 (step: ${step})`;
-}
-
-async function loadCascade(symId,expId,tsId){
-  const sym=document.getElementById(symId)?.value;
-  if(!sym)return;
-  try{
-    // Expiries fetched unconditionally when expId given
-    // Timestamps fetched with current expiry as filter if available
-    const expVal=expId?document.getElementById(expId)?.value:null;
-    const tsUrl=tsId
-      ? (expVal
-          ? `/api/timestamps?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(expVal)}`
-          : `/api/timestamps?symbol=${encodeURIComponent(sym)}`)
-      : null;
-    const calls=[
-      expId ? api(`/api/expiries?symbol=${encodeURIComponent(sym)}`) : Promise.resolve([]),
-      tsUrl ? api(tsUrl) : Promise.resolve([]),
-    ];
-    const[exps,tss]=await Promise.all(calls);
-    if(expId&&exps.length) populateSel(expId,exps);
-    if(tsId&&tss.length)   populateSel(tsId,tss);
-  }catch(e){
-    console.error('loadCascade failed for',symId,':',e.message);
-  }
-}
-
-// Reload timestamps when expiry changes (timestamps differ per symbol+expiry)
-async function reloadTimestamps(symId,expId,tsId){
-  const sym=document.getElementById(symId)?.value;
-  const exp=document.getElementById(expId)?.value;
-  const el=document.getElementById(tsId);
-  if(!sym||!exp||!el)return;
-  try{
-    const tss=await api(`/api/timestamps?symbol=${encodeURIComponent(sym)}`);
-    if(tss.length) populateSel(tsId,tss);
-  }catch(e){
-    console.error('reloadTimestamps failed:',e.message);
-  }
-}
-
-// ── ICICI modal ──────────────────────────────────────────────────
-function openIciciModal(){document.getElementById('iciciModal').classList.add('open')}
-function closeIciciModal(){document.getElementById('iciciModal').classList.remove('open')}
-document.getElementById('iciciModal').addEventListener('click',e=>{
-  if(e.target===e.currentTarget)closeIciciModal();
-});
-
+// ── ICICI ─────────────────────────────────────────────────────────
+function openIciciModal(){document.getElementById('iciciModal').classList.add('open');}
+function closeIciciModal(){document.getElementById('iciciModal').classList.remove('open');}
+document.getElementById('iciciModal').addEventListener('click',e=>{if(e.target===e.currentTarget)closeIciciModal();});
 async function saveIciciToken(){
   const token=document.getElementById('iciciTokenInput').value.trim();
   const msg=document.getElementById('iciciMsg');
-  if(!token){msg.textContent='⚠ Token is required';msg.style.color='var(--red)';return}
+  if(!token){msg.textContent='⚠ Token is required';msg.style.color='var(--red)';return;}
   msg.textContent='Connecting…';msg.style.color='var(--muted)';
   try{
-    const r=await fetch('/api/icici/configure',{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({session_token:token}),
-    });
+    const r=await fetch('/api/icici/configure',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({session_token:token})});
     const d=await r.json();
-    if(r.ok){
-      msg.textContent='✓ '+d.status;msg.style.color='var(--green)';
-      updateIciciStatus();
-      setTimeout(closeIciciModal,1200);
-    }else{msg.textContent='✗ '+(d.detail||'Error');msg.style.color='var(--red)'}
-  }catch(e){msg.textContent='✗ '+e.message;msg.style.color='var(--red)'}
+    if(r.ok){msg.textContent='✓ '+d.status;msg.style.color='var(--green)';
+      updateIciciStatus();setTimeout(closeIciciModal,1200);}
+    else{msg.textContent='✗ '+(d.detail||'Error');msg.style.color='var(--red)';}
+  }catch(e){msg.textContent='✗ '+e.message;msg.style.color='var(--red)';}
 }
-
 async function updateIciciStatus(){
   try{
     const d=await api('/api/icici/status');
     const badge=document.getElementById('iciciStatusBadge');
-    if(d.configured){
-      badge.textContent='ICICI: ON';badge.classList.add('ok');
-      document.getElementById('dsMarginBadge').style.display='';
-    }else{
-      badge.textContent='ICICI: OFF';badge.classList.remove('ok');
-    }
-    // Build login URL hint
-    if(d.env_key){
-      document.getElementById('iciciLoginLink').href=
-        `https://api.icicidirect.com/apiuser/login?api_key=${encodeURIComponent('')}`;
-    }
+    if(d.configured){badge.textContent='ICICI: ON';badge.classList.add('ok');}
+    else{badge.textContent='ICICI: OFF';badge.classList.remove('ok');}
   }catch(e){}
 }
 
-// ── OVERVIEW ─────────────────────────────────────────────────────
+// ── Cascade helpers ───────────────────────────────────────────────
+async function loadCascade(symId,expId,tsId,futureOnly=true){
+  const sym=document.getElementById(symId)?.value;if(!sym)return;
+  try{
+    const calls=[
+      expId ? api(`/api/expiries?symbol=${encodeURIComponent(sym)}&future_only=${futureOnly}`) : Promise.resolve([]),
+      tsId  ? api(`/api/timestamps?symbol=${encodeURIComponent(sym)}`) : Promise.resolve([]),
+    ];
+    const[exps,tss]=await Promise.all(calls);
+    if(expId&&exps.length)populateSel(expId,exps);
+    if(tsId&&tss.length)populateSel(tsId,tss);
+  }catch(e){console.error('loadCascade:',symId,e.message);}
+}
+
+async function reloadTimestamps(symId,expId,tsId){
+  const sym=document.getElementById(symId)?.value;if(!sym||!tsId)return;
+  try{
+    const tss=await api(`/api/timestamps?symbol=${encodeURIComponent(sym)}`);
+    if(tss.length)populateSel(tsId,tss);
+  }catch(e){console.error('reloadTimestamps:',e.message);}
+}
+
+// prefix = 'gex' | 'iv' | 'trend'
+async function reloadExpiries(prefix){
+  const symId=prefix+'Symbol',expId=prefix+'Expiry';
+  const sym=document.getElementById(symId)?.value;if(!sym)return;
+  const showPast=document.getElementById(prefix+'ExpiryShowPast')?.checked;
+  try{
+    const exps=await api(`/api/expiries?symbol=${encodeURIComponent(sym)}&future_only=${!showPast}`);
+    if(exps.length)populateSel(expId,exps);
+  }catch(e){console.error('reloadExpiries:',e.message);}
+}
+
+function updateStrikeStep(symId,strikeId){
+  const sym=document.getElementById(symId)?.value;
+  const inp=document.getElementById(strikeId);
+  if(!inp||!sym)return;
+  const step=LOT_SIZES[sym]||1;
+  inp.step=step;inp.placeholder=`step: ${step}`;
+}
+
+// ── Symbol init ───────────────────────────────────────────────────
+async function initSymbols(){
+  try{
+    ALL_SYMS=await api('/api/symbols');
+    ['gexSymbol','oiSymbol','ivSymbol','trendSymbol'].forEach(id=>populateSel(id,ALL_SYMS));
+    const[,lotData]=await Promise.all([
+      Promise.all([
+        loadCascade('gexSymbol',  'gexExpiry',  'gexTimestamp'),
+        loadCascade('ivSymbol',   'ivExpiry',   'ivTimestamp'),
+        loadCascade('trendSymbol','trendExpiry', null),
+      ]),
+      api('/api/lot_sizes').catch(()=>({})),
+    ]);
+    LOT_SIZES=lotData||{};
+    await loadAtmStrikes();
+    await loadDsTimestamps();
+  }catch(e){console.error('initSymbols:',e);}
+}
+
+// ── Symbol change listeners ───────────────────────────────────────
+document.getElementById('gexSymbol').addEventListener('change',()=>
+  loadCascade('gexSymbol','gexExpiry','gexTimestamp'));
+document.getElementById('gexExpiry').addEventListener('change',()=>
+  reloadTimestamps('gexSymbol','gexExpiry','gexTimestamp'));
+document.getElementById('ivSymbol').addEventListener('change',()=>
+  loadCascade('ivSymbol','ivExpiry','ivTimestamp'));
+document.getElementById('ivExpiry').addEventListener('change',()=>
+  reloadTimestamps('ivSymbol','ivExpiry','ivTimestamp'));
+document.getElementById('trendSymbol').addEventListener('change',async()=>{
+  await loadCascade('trendSymbol','trendExpiry',null);
+  await loadAtmStrikes();
+});
+document.getElementById('trendExpiry').addEventListener('change',()=>loadAtmStrikes());
+document.getElementById('trendAtmDist').addEventListener('change',()=>{
+  const opt=document.getElementById('trendAtmDist').selectedOptions[0];if(!opt)return;
+  document.getElementById('trendStrike').value=opt.dataset.strike||'';
+  document.getElementById('trendStrikeDisplay').textContent='@ '+opt.dataset.strike;
+});
+document.getElementById('oiFilterGroup').addEventListener('click',e=>{
+  const ft=e.target.dataset.ft;if(!ft)return;
+  const f=ALL_SYMS.filter(s=>ft==='index'?NSE_IDX.has(s):ft==='stock'?!NSE_IDX.has(s):true);
+  populateSel('oiSymbol',f);
+});
+document.getElementById('gexFilterGroup').addEventListener('click',e=>{
+  const ft=e.target.dataset.ft;if(!ft)return;
+  const f=ALL_SYMS.filter(s=>ft==='index'?NSE_IDX.has(s):ft==='stock'?!NSE_IDX.has(s):true);
+  populateSel('gexSymbol',f);
+  loadCascade('gexSymbol','gexExpiry','gexTimestamp');
+});
+document.getElementById('ivFilterGroup').addEventListener('click',e=>{
+  const ft=e.target.dataset.ft;if(!ft)return;
+  const f=ALL_SYMS.filter(s=>ft==='index'?NSE_IDX.has(s):ft==='stock'?!NSE_IDX.has(s):true);
+  populateSel('ivSymbol',f);
+  loadCascade('ivSymbol','ivExpiry','ivTimestamp');
+});
+document.getElementById('deltaSlider').addEventListener('input',()=>{
+  document.getElementById('deltaVal').textContent=document.getElementById('deltaSlider').value;
+  updateDsRangeLabel();
+});
+document.getElementById('deltaMinSlider').addEventListener('input',()=>{
+  document.getElementById('deltaMinVal').textContent=document.getElementById('deltaMinSlider').value;
+  updateDsRangeLabel();
+});
+
+// ── ATM strikes for trend ─────────────────────────────────────────
+async function loadAtmStrikes(){
+  const sym=document.getElementById('trendSymbol')?.value;
+  const exp=document.getElementById('trendExpiry')?.value;
+  const sel=document.getElementById('trendAtmDist');
+  if(!sym||!exp||!sel)return;
+  try{
+    const rows=await api(`/api/atm_strikes?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}`);
+    if(!rows.length)return;
+    sel.innerHTML=rows.map(r=>{
+      const d=r.distance_from_atm;
+      const label=(d>=0?'+':'')+d+' ('+r.strike_price+')';
+      return`<option value="${d}" data-strike="${r.strike_price}">${label}</option>`;
+    }).join('');
+    const atm=[...sel.options].find(o=>parseFloat(o.value)===0)||sel.options[0];
+    if(atm){sel.value=atm.value;
+      document.getElementById('trendStrike').value=atm.dataset.strike;
+      document.getElementById('trendStrikeDisplay').textContent='@ '+atm.dataset.strike;}
+  }catch(e){console.error('loadAtmStrikes:',e.message);}
+}
+
+// ── DS timestamps ─────────────────────────────────────────────────
+async function loadDsTimestamps(){
+  if(!ALL_SYMS.length)return;
+  try{
+    const tss=await api(`/api/timestamps?symbol=${encodeURIComponent(ALL_SYMS[0])}`);
+    if(tss.length)populateSel('dsTimestamp',tss);
+  }catch(e){console.error('loadDsTimestamps:',e.message);}
+}
+
+// ── OVERVIEW ──────────────────────────────────────────────────────
 async function loadOverview(){
   setLoad('overviewCards');setLoad('allOiTable');
   try{
     const ft=getFilter('ovFilterGroup');
     const[data,sigs]=await Promise.all([api('/api/overview'),api('/api/oi_signals_all')]);
-    const NSE_IDX=new Set(['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50','SENSEX','NIFTYIT']);
-    const filtered=data.filter(d=>{
-      if(ft==='index') return NSE_IDX.has(d.symbol);
-      if(ft==='stock') return !NSE_IDX.has(d.symbol);
-      return true;
-    });
+    const filtered=data.filter(d=>ft==='index'?NSE_IDX.has(d.symbol):ft==='stock'?!NSE_IDX.has(d.symbol):true);
     const cont=document.getElementById('overviewCards');
-    if(!filtered.length){cont.innerHTML='<div class="empty">No data matching filter</div>'}
+    if(!filtered.length){cont.innerHTML='<div class="empty">No data — check DB or filter</div>';}
     else{
       cont.innerHTML=filtered.map(d=>{
         const pcr=d.pcr!=null?fmt(d.pcr,3):'—';
@@ -878,7 +827,8 @@ async function loadOverview(){
         </div>`;
       }).join('');
     }
-    document.getElementById('allOiTable').innerHTML=makeTbl(sigs,[
+    const sigFiltered=sigs.filter(d=>ft==='index'?NSE_IDX.has(d.symbol):ft==='stock'?!NSE_IDX.has(d.symbol):true);
+    document.getElementById('allOiTable').innerHTML=makeTbl(sigFiltered,[
       {key:'symbol',label:'SYMBOL'},
       {key:'ce_oi_chg',label:'CE OI Δ',fmt:v=>sspan(v,0)},
       {key:'pe_oi_chg',label:'PE OI Δ',fmt:v=>sspan(v,0)},
@@ -886,252 +836,118 @@ async function loadOverview(){
       {key:'avg_pe_ltp_chg',label:'PE LTP Δ',fmt:v=>sspan(v)},
       {key:'total_oi_chg',label:'ABS OI Δ',fmt:v=>fmtL(v)},
     ]);
-  }catch(e){
-    setEmpty('overviewCards','⚠ '+e.message);
-    setEmpty('allOiTable','⚠ '+e.message);
-  }
+  }catch(e){setEmpty('overviewCards','⚠ '+e.message);setEmpty('allOiTable','⚠ '+e.message);}
 }
 function jumpGex(sym){
   document.querySelector('[data-view="gex"]').click();
-  setTimeout(()=>{
-    const s=document.getElementById('gexSymbol');
-    if([...s.options].some(o=>o.value===sym)){
-      s.value=sym;loadCascade('gexSymbol','gexExpiry','gexTimestamp');
-    }
-  },80);
+  setTimeout(()=>{const s=document.getElementById('gexSymbol');
+    if([...s.options].some(o=>o.value===sym)){s.value=sym;
+      loadCascade('gexSymbol','gexExpiry','gexTimestamp');}},80);
 }
 document.getElementById('btnRefreshOverview').addEventListener('click',loadOverview);
 document.getElementById('ovFilterGroup').addEventListener('click',()=>setTimeout(loadOverview,50));
 
-// ── GEX & GAMMA ──────────────────────────────────────────────────
-document.getElementById('gexSymbol').addEventListener('change',()=>{
-  loadCascade('gexSymbol','gexExpiry','gexTimestamp');
-  updateStrikeStep('gexSymbol', null);
-});
-document.getElementById('gexFilterGroup').addEventListener('click',e=>{
-  const ft=e.target.dataset.ft;
-  if(!ft) return;
-  const NSE_IDX=new Set(['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50','SENSEX','NIFTYIT']);
-  const filtered=ALL_SYMS.filter(s=>{
-    if(ft==='index') return NSE_IDX.has(s);
-    if(ft==='stock') return !NSE_IDX.has(s);
-    return true;
-  });
-  populateSel('gexSymbol', filtered);
-  loadCascade('gexSymbol','gexExpiry','gexTimestamp');
-});
-
-document.getElementById('gexExpiry').addEventListener('change',()=>
-  reloadTimestamps('gexSymbol','gexExpiry','gexTimestamp'));
+// ── GEX ───────────────────────────────────────────────────────────
 document.getElementById('btnGex').addEventListener('click',loadGex);
-
 async function loadGex(){
   const sym=document.getElementById('gexSymbol').value;
   const exp=document.getElementById('gexExpiry').value;
   const ts =document.getElementById('gexTimestamp').value;
   const rng=parseFloat(document.getElementById('gexRange').value)||5;
-  if(!sym||!exp||!ts){alert('Select symbol, expiry and timestamp');return}
-
+  if(!sym||!exp||!ts){alert('Select symbol, expiry and timestamp');return;}
   ['gexBarChart','gammaProfileChart','netGexChart'].forEach(id=>setLoad(id));
   document.getElementById('gexKpis').innerHTML='';
   document.getElementById('gammaAnalysisCard').style.display='none';
-
   try{
     const[gex,gp]=await Promise.all([
       api(`/api/gex?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`),
       api(`/api/gamma_profile?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&price_range_pct=${rng}`),
     ]);
-
-    // --- GEX stacked bar ---
     const strikes=gex.map(r=>r.strike_price);
-    const ceG=gex.map(r=>r.ce_gex||0);
-    const peG=gex.map(r=>r.pe_gex||0);
-    const netG=gex.map(r=>r.net_gexv||0);
+    const ceG=gex.map(r=>r.ce_gex||0),peG=gex.map(r=>r.pe_gex||0),netG=gex.map(r=>r.net_gexv||0);
     const atm=gex[0]?.atm_strike,spot=gex[0]?.spot;
-
-    const gexLayout={...LB,barmode:'relative',
-      xaxis:{...LB.xaxis,title:'Strike',tickangle:-45},
-      yaxis:{...LB.yaxis,title:'GEX (₹M)'},
-      shapes:[
-        {type:'line',x0:atm,x1:atm,y0:0,y1:1,yref:'paper',
-          line:{color:C.amber,width:1.5,dash:'dot'}},
-        {type:'line',x0:spot,x1:spot,y0:0,y1:1,yref:'paper',
-          line:{color:C.acc,width:1,dash:'dash'}},
-      ],
-      annotations:[
-        {x:atm,y:1,yref:'paper',text:'ATM',showarrow:false,
-          font:{size:8,color:C.amber},yanchor:'bottom'},
-        {x:spot,y:.93,yref:'paper',text:'SPOT',showarrow:false,
-          font:{size:8,color:C.acc},yanchor:'bottom'},
-      ],
-    };
+    const shapes=[
+      {type:'line',x0:atm,x1:atm,y0:0,y1:1,yref:'paper',line:{color:C.amber,width:1.5,dash:'dot'}},
+      {type:'line',x0:spot,x1:spot,y0:0,y1:1,yref:'paper',line:{color:C.acc,width:1,dash:'dash'}},
+    ];
     plot('gexBarChart',[
       {name:'CE GEX',x:strikes,y:ceG,type:'bar',marker:{color:C.green,opacity:.75}},
       {name:'PE GEX',x:strikes,y:peG,type:'bar',marker:{color:C.red,opacity:.75}},
-      {name:'Net GEX',x:strikes,y:netG,type:'scatter',mode:'lines',
-        line:{color:C.acc,width:2}},
-    ],gexLayout);
-
-    // --- Net GEX bar ---
-    plot('netGexChart',[{
-      name:'Net GEX',x:strikes,y:netG,type:'bar',
-      marker:{color:netG.map(v=>v>=0?C.green:C.red),opacity:.8},
-    }],{...LB,
-      xaxis:{...LB.xaxis,title:'Strike',tickangle:-45},
-      yaxis:{...LB.yaxis,title:'Net GEX (₹M)'},
-    });
-
-    // --- Gamma profile ---
+      {name:'Net GEX',x:strikes,y:netG,type:'scatter',mode:'lines',line:{color:C.acc,width:2}},
+    ],{...LB,barmode:'relative',shapes,
+      xaxis:{...LB.xaxis,title:'Strike',tickangle:-45},yaxis:{...LB.yaxis,title:'GEX (₹M)'}});
+    plot('netGexChart',[{name:'Net GEX',x:strikes,y:netG,type:'bar',
+      marker:{color:netG.map(v=>v>=0?C.green:C.red),opacity:.8}}],
+      {...LB,xaxis:{...LB.xaxis,title:'Strike',tickangle:-45},yaxis:{...LB.yaxis,title:'Net GEX (₹M)'}});
     if(gp?.profile?.length){
-      const prof=gp.profile;
-      const lvl=prof.map(r=>r.level);
-      const cg =prof.map(r=>r.call_gamma_billions);
-      const pg =prof.map(r=>r.put_gamma_billions);
-      const tg =prof.map(r=>r.total_gamma_billions);
-      const shapes=[];
-      if(gp.gamma_flip!=null)
-        shapes.push({type:'line',x0:gp.gamma_flip,x1:gp.gamma_flip,y0:0,y1:1,yref:'paper',
-          line:{color:C.red,width:2,dash:'dot'}});
-      if(gp.magnet)
-        shapes.push({type:'rect',x0:gp.magnet.lower,x1:gp.magnet.upper,y0:0,y1:1,yref:'paper',
-          fillcolor:'rgba(0,200,240,.05)',line:{width:0}});
-
+      const prof=gp.profile,lvl=prof.map(r=>r.level);
+      const cg=prof.map(r=>r.call_gamma_billions),pg=prof.map(r=>r.put_gamma_billions),tg=prof.map(r=>r.total_gamma_billions);
+      const pshapes=[];
+      if(gp.gamma_flip!=null)pshapes.push({type:'line',x0:gp.gamma_flip,x1:gp.gamma_flip,y0:0,y1:1,yref:'paper',line:{color:C.red,width:2,dash:'dot'}});
+      if(gp.magnet)pshapes.push({type:'rect',x0:gp.magnet.lower,x1:gp.magnet.upper,y0:0,y1:1,yref:'paper',fillcolor:'rgba(0,200,240,.05)',line:{width:0}});
       plot('gammaProfileChart',[
-        {name:'Call GEX',x:lvl,y:cg,type:'scatter',mode:'lines',fill:'tozeroy',
-          line:{color:C.green,width:1.5},fillcolor:'rgba(16,185,129,.1)'},
-        {name:'Put GEX', x:lvl,y:pg,type:'scatter',mode:'lines',fill:'tozeroy',
-          line:{color:C.red,  width:1.5},fillcolor:'rgba(244,63,94,.1)'},
-        {name:'Total GEX',x:lvl,y:tg,type:'scatter',mode:'lines',
-          line:{color:C.acc,width:2.5}},
-      ],{...LB,shapes,
-        xaxis:{...LB.xaxis,title:'Price Level'},
-        yaxis:{...LB.yaxis,title:'GEX (₹B)'},
-      });
-
-      // KPIs
+        {name:'Call GEX',x:lvl,y:cg,type:'scatter',mode:'lines',fill:'tozeroy',line:{color:C.green,width:1.5},fillcolor:'rgba(16,185,129,.1)'},
+        {name:'Put GEX', x:lvl,y:pg,type:'scatter',mode:'lines',fill:'tozeroy',line:{color:C.red,  width:1.5},fillcolor:'rgba(244,63,94,.1)'},
+        {name:'Total',   x:lvl,y:tg,type:'scatter',mode:'lines',line:{color:C.acc,width:2.5}},
+      ],{...LB,shapes:pshapes,xaxis:{...LB.xaxis,title:'Price Level'},yaxis:{...LB.yaxis,title:'GEX (₹B)'}});
       const regime=gp.spot>=(gp.gamma_flip||0)?'Positive Gamma':'Negative Gamma';
       document.getElementById('gexKpis').innerHTML=[
-        {label:'SPOT',       value:fmt(gp.spot),      sub:''},
-        {label:'GAMMA FLIP', value:gp.gamma_flip!=null?fmt(gp.gamma_flip,0):'—',
-          sub:regime, subcls:regime==='Positive Gamma'?'up':'down'},
-        {label:'MAGNET CTR', value:gp.magnet?fmt(gp.magnet.center,0):'—',
-          sub:gp.magnet?`${fmt(gp.magnet.lower,0)}–${fmt(gp.magnet.upper,0)}`:''},
-        {label:'STRENGTH',   value:gp.magnet?fmt(gp.magnet.strength,4):'—',sub:'₹B'},
-      ].map(k=>`<div class="kpi">
-        <div class="kpi-label">${k.label}</div>
-        <div class="kpi-val acc">${k.value}</div>
-        <div class="kpi-sub ${k.subcls||''}">${k.sub}</div>
-      </div>`).join('');
-    }else{
-      setEmpty('gammaProfileChart','No gamma profile data');
-    }
-
-    // Load full gamma analysis async (doesn't block GEX charts)
+        {label:'SPOT',value:fmt(gp.spot),sub:''},
+        {label:'GAMMA FLIP',value:gp.gamma_flip!=null?fmt(gp.gamma_flip,0):'—',sub:regime,subcls:regime==='Positive Gamma'?'up':'down'},
+        {label:'MAGNET CTR',value:gp.magnet?fmt(gp.magnet.center,0):'—',sub:gp.magnet?fmt(gp.magnet.lower,0)+'–'+fmt(gp.magnet.upper,0):''},
+        {label:'STRENGTH',value:gp.magnet?fmt(gp.magnet.strength,4):'—',sub:'₹B'},
+      ].map(k=>`<div class="kpi"><div class="kpi-label">${k.label}</div><div class="kpi-val acc">${k.value}</div><div class="kpi-sub ${k.subcls||''}">${k.sub}</div></div>`).join('');
+    }else setEmpty('gammaProfileChart','No gamma profile data');
     loadGammaAnalysis(sym,exp,ts,rng);
-
-  }catch(e){
-    ['gexBarChart','gammaProfileChart','netGexChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
-  }
+  }catch(e){['gexBarChart','gammaProfileChart','netGexChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));}
 }
-
 async function loadGammaAnalysis(sym,exp,ts,rng){
-  const card=document.getElementById('gammaAnalysisCard');
-  const cont=document.getElementById('gaContent');
-  card.style.display='';
-  cont.innerHTML='<div class="loading"><div class="spinner"></div>Fetching ATR & running analysis…</div>';
+  const card=document.getElementById('gammaAnalysisCard'),cont=document.getElementById('gaContent');
+  card.style.display='';cont.innerHTML='<div class="loading"><div class="spinner"></div>Fetching ATR…</div>';
   try{
-    const ga=await api(
-      `/api/gamma_analysis?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&price_range_pct=${rng}`
-    );
+    const ga=await api(`/api/gamma_analysis?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&price_range_pct=${rng}`);
     const pos=ga.regime==='Positive Gamma';
-    const regimeCls=pos?'pos':'neg';
-
-    const row=(label,value,cls='')=>
-      `<div class="ga-item"><div class="ga-label">${label}</div>
-       <div class="ga-value ${cls}">${value||'—'}</div></div>`;
-
-    const structs=ga.structures?.length
-      ?`<ul class="ga-list">${ga.structures.map(s=>`<li>${s}</li>`).join('')}</ul>`
-      :'<div class="empty" style="padding:8px">No specific structures identified</div>';
-    const warns=ga.warnings?.length
-      ?`<ul class="ga-list ga-warn">${ga.warnings.map(w=>`<li>${w}</li>`).join('')}</ul>`
-      :'<div class="empty" style="padding:8px">No warnings</div>';
-
-    cont.innerHTML=`
-      <div class="ga-regime ${regimeCls}">${ga.regime}</div>
+    const row=(label,value,c='')=>`<div class="ga-item"><div class="ga-label">${label}</div><div class="ga-value ${c}">${value||'—'}</div></div>`;
+    const structs=ga.structures?.length?`<ul class="ga-list">${ga.structures.map(s=>`<li>${s}</li>`).join('')}</ul>`:'<div class="empty" style="padding:8px">None identified</div>';
+    const warns=ga.warnings?.length?`<ul class="ga-list ga-warn">${ga.warnings.map(w=>`<li>${w}</li>`).join('')}</ul>`:'<div class="empty" style="padding:8px">No warnings</div>';
+    cont.innerHTML=`<div class="ga-regime ${pos?'pos':'neg'}">${ga.regime}</div>
       <div class="ga-row">
-        ${row('GAMMA FLIP',  fmt(ga.gamma_flip,0))}
-        ${row('GAMMA@SPOT',  fmt(ga.gamma_at_spot,4))}
-        ${row('ATM IV',      ga.atm_iv_pct!=null?ga.atm_iv_pct+'%':'—')}
-        ${row('ATR(14)',     ga.atr!=null?fmt(ga.atr,1):'—')}
-        ${row('γ-ADJ ATR',  ga.gamma_adj_atr!=null?fmt(ga.gamma_adj_atr,1):'—')}
-        ${row('EXP RANGE',  ga.expected_range!=null?'±'+fmt(ga.expected_range,1):'—')}
-        ${row('TREND',      ga.trend,'acc')}
-        ${row('BEHAVIOR',   ga.behavior)}
-        ${row('BULL BREAK', ga.bullish_break!=null?fmt(ga.bullish_break,0):'—','up')}
-        ${row('BEAR BREAK', ga.bearish_break!=null?fmt(ga.bearish_break,0):'—','down')}
+        ${row('GAMMA FLIP',fmt(ga.gamma_flip,0))}${row('GAMMA@SPOT',fmt(ga.gamma_at_spot,4))}
+        ${row('ATM IV',ga.atm_iv_pct!=null?ga.atm_iv_pct+'%':'—')}${row('ATR(14)',ga.atr!=null?fmt(ga.atr,1):'—')}
+        ${row('γ-ADJ ATR',ga.gamma_adj_atr!=null?fmt(ga.gamma_adj_atr,1):'—')}
+        ${row('EXP RANGE',ga.expected_range!=null?'±'+fmt(ga.expected_range,1):'—')}
+        ${row('TREND',ga.trend,'acc')}${row('BEHAVIOR',ga.behavior)}
+        ${row('BULL BREAK',ga.bullish_break!=null?fmt(ga.bullish_break,0):'—','up')}
+        ${row('BEAR BREAK',ga.bearish_break!=null?fmt(ga.bearish_break,0):'—','down')}
       </div>
-      <div class="g2">
-        <div>
-          <div class="ga-label" style="margin-bottom:6px">RECOMMENDED STRUCTURES</div>
-          ${structs}
-        </div>
-        <div>
-          <div class="ga-label" style="margin-bottom:6px">WARNINGS</div>
-          ${warns}
-        </div>
-      </div>
-    `;
-  }catch(e){
-    cont.innerHTML=`<div class="empty err">⚠ Gamma analysis failed: ${e.message}</div>`;
-  }
+      <div class="g2"><div><div class="ga-label" style="margin-bottom:6px">RECOMMENDED STRUCTURES</div>${structs}</div>
+      <div><div class="ga-label" style="margin-bottom:6px">WARNINGS</div>${warns}</div></div>`;
+  }catch(e){cont.innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
 }
 
-// ── OI SIGNALS ───────────────────────────────────────────────────
-// oiSymbol has no cascade (expiry not needed for OI change)
+// ── OI ────────────────────────────────────────────────────────────
 document.getElementById('btnOi').addEventListener('click',loadOi);
-document.getElementById('oiFilterGroup').addEventListener('click',e=>{
-  const ft=e.target.dataset.ft;
-  if(!ft) return;
-  const NSE_IDX=new Set(['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50','SENSEX','NIFTYIT']);
-  const filtered=ALL_SYMS.filter(s=>{
-    if(ft==='index') return NSE_IDX.has(s);
-    if(ft==='stock') return !NSE_IDX.has(s);
-    return true;
-  });
-  populateSel('oiSymbol', filtered);
-});
-
 async function loadOi(){
   const sym=document.getElementById('oiSymbol').value;
-  if(!sym){alert('Select a symbol');return}
+  if(!sym){alert('Select a symbol');return;}
   ['ceOiChart','peOiChart'].forEach(id=>setLoad(id));
   document.getElementById('oiSignalTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
   try{
     const data=await api(`/api/oi_change?symbol=${sym}`);
     const strikes=data.map(r=>r.strike_price);
-    const ceChg=data.map(r=>r.ce_oi_chg||0);
-    const peChg=data.map(r=>r.pe_oi_chg||0);
-    const ax={...LB,xaxis:{...LB.xaxis,title:'Strike',tickangle:-45},
-              yaxis:{...LB.yaxis,title:'OI Change'}};
-    plot('ceOiChart',[{name:'CE OI Δ',x:strikes,y:ceChg,type:'bar',
-      marker:{color:ceChg.map(v=>v>=0?C.green:C.red),opacity:.8}}],ax);
-    plot('peOiChart',[{name:'PE OI Δ',x:strikes,y:peChg,type:'bar',
-      marker:{color:peChg.map(v=>v>=0?C.green:C.red),opacity:.8}}],ax);
+    const ceChg=data.map(r=>r.ce_oi_chg||0),peChg=data.map(r=>r.pe_oi_chg||0);
+    const ax={...LB,xaxis:{...LB.xaxis,title:'Strike',tickangle:-45},yaxis:{...LB.yaxis,title:'OI Change'}};
+    plot('ceOiChart',[{name:'CE OI Δ',x:strikes,y:ceChg,type:'bar',marker:{color:ceChg.map(v=>v>=0?C.green:C.red),opacity:.8}}],ax);
+    plot('peOiChart',[{name:'PE OI Δ',x:strikes,y:peChg,type:'bar',marker:{color:peChg.map(v=>v>=0?C.green:C.red),opacity:.8}}],ax);
     document.getElementById('oiSignalTable').innerHTML=makeTbl(data,[
-      {key:'strike_price',label:'STRIKE'},
-      {key:'expiry',label:'EXPIRY'},
-      {key:'ce_oi_chg',label:'CE OI Δ',fmt:v=>sspan(v,0)},
-      {key:'ce_ltp_chg',label:'CE LTP Δ',fmt:v=>sspan(v)},
+      {key:'strike_price',label:'STRIKE'},{key:'expiry',label:'EXPIRY'},
+      {key:'ce_oi_chg',label:'CE OI Δ',fmt:v=>sspan(v,0)},{key:'ce_ltp_chg',label:'CE LTP Δ',fmt:v=>sspan(v)},
       {key:'ce_signal',label:'CE SIG',fmt:v=>pill(v)},
-      {key:'pe_oi_chg',label:'PE OI Δ',fmt:v=>sspan(v,0)},
-      {key:'pe_ltp_chg',label:'PE LTP Δ',fmt:v=>sspan(v)},
+      {key:'pe_oi_chg',label:'PE OI Δ',fmt:v=>sspan(v,0)},{key:'pe_ltp_chg',label:'PE LTP Δ',fmt:v=>sspan(v)},
       {key:'pe_signal',label:'PE SIG',fmt:v=>pill(v)},
     ]);
-  }catch(e){
-    ['ceOiChart','peOiChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
-    document.getElementById('oiSignalTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
-  }
+  }catch(e){['ceOiChart','peOiChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
+    document.getElementById('oiSignalTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
 }
 
 // ── SHOCKERS ─────────────────────────────────────────────────────
@@ -1140,367 +956,250 @@ document.getElementById('btnIvShock').addEventListener('click',loadIvShock);
 
 async function loadVolShock(){
   const n=document.getElementById('volShockerN').value||30;
+  const ft=getFilter('volShockFilterGroup');
   setLoad('volShockChart');
   document.getElementById('volShockTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
   try{
-    const data=await api(`/api/volume_shockers?top_n=${n}`);
-    if(!data.length){
-      setEmpty('volShockChart','No volume spikes detected between the two most recent snapshots');
-      document.getElementById('volShockTable').innerHTML='<div class="empty">No data</div>';
-      return;
-    }
-    const labels=data.map(r=>`${r.symbol} ${r.strike_price}`);
-    const vals  =data.map(r=>r.vol_delta||0);
-    plot('volShockChart',[{
-      name:'Vol Δ',x:vals,y:labels,type:'bar',orientation:'h',
-      marker:{color:C.acc2,opacity:.8}
-    }],{...LB,
-      yaxis:{...LB.yaxis,automargin:true},
-      xaxis:{...LB.xaxis,title:'Volume Change'},
-      height:Math.max(280,data.length*22),
-      margin:{...LB.margin,l:140},
-    });
+    const data=await api(`/api/volume_shockers?top_n=${n}&filter_type=${ft}`);
+    if(!data.length){setEmpty('volShockChart','No volume spikes detected');
+      document.getElementById('volShockTable').innerHTML='<div class="empty">No data</div>';return;}
+    const labels=data.map(r=>`${r.symbol} ${r.strike_price}`),vals=data.map(r=>r.vol_delta||0);
+    plot('volShockChart',[{name:'Vol Δ',x:vals,y:labels,type:'bar',orientation:'h',marker:{color:C.acc2,opacity:.8}}],
+      {...LB,yaxis:{...LB.yaxis,automargin:true},xaxis:{...LB.xaxis,title:'Volume Change'},
+       height:Math.max(280,data.length*22),margin:{...LB.margin,l:140}});
     document.getElementById('volShockTable').innerHTML=makeTbl(data,[
-      {key:'symbol',label:'SYMBOL'},
-      {key:'strike_price',label:'STRIKE'},
-      {key:'expiry',label:'EXPIRY'},
-      {key:'vol_now',label:'VOL NOW',fmt:v=>fmtL(v)},
-      {key:'vol_prev',label:'VOL PREV',fmt:v=>fmtL(v)},
-      {key:'vol_delta',label:'DELTA',fmt:v=>sspan(v,0)},
-      {key:'vol_pct_chg',label:'% CHG',fmt:v=>sspan(v,1)},
+      {key:'symbol',label:'SYMBOL'},{key:'strike_price',label:'STRIKE'},{key:'expiry',label:'EXPIRY'},
+      {key:'vol_now',label:'VOL NOW',fmt:v=>fmtL(v)},{key:'vol_prev',label:'VOL PREV',fmt:v=>fmtL(v)},
+      {key:'vol_delta',label:'DELTA',fmt:v=>sspan(v,0)},{key:'vol_pct_chg',label:'% CHG',fmt:v=>sspan(v,1)},
     ]);
-  }catch(e){
-    setEmpty('volShockChart','⚠ '+e.message);
-    document.getElementById('volShockTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
-  }
+  }catch(e){setEmpty('volShockChart','⚠ '+e.message);
+    document.getElementById('volShockTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
 }
 
 async function loadIvShock(){
   const n=document.getElementById('ivShockerN').value||30;
+  const ft=getFilter('ivShockFilterGroup');
   setLoad('ivShockChart');
   document.getElementById('ivShockTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
   try{
-    const data=await api(`/api/iv_shockers?top_n=${n}`);
-    if(!data.length){
-      setEmpty('ivShockChart','No IV changes detected between the two most recent snapshots');
-      document.getElementById('ivShockTable').innerHTML='<div class="empty">No data</div>';
-      return;
-    }
-    const labels=data.map(r=>`${r.symbol} ${r.strike_price}`);
-    const ivd   =data.map(r=>r.iv_delta||0);
-    plot('ivShockChart',[{
-      name:'IV Δ',x:ivd,y:labels,type:'bar',orientation:'h',
-      marker:{color:ivd.map(v=>v>=0?C.red:C.green),opacity:.8}
-    }],{...LB,
-      yaxis:{...LB.yaxis,automargin:true},
-      xaxis:{...LB.xaxis,title:'IV Change (%)'},
-      height:Math.max(280,data.length*22),
-      margin:{...LB.margin,l:140},
-    });
+    const data=await api(`/api/iv_shockers?top_n=${n}&filter_type=${ft}`);
+    if(!data.length){setEmpty('ivShockChart','No IV changes detected');
+      document.getElementById('ivShockTable').innerHTML='<div class="empty">No data</div>';return;}
+    const labels=data.map(r=>`${r.symbol} ${r.strike_price}`),ivd=data.map(r=>r.iv_delta||0);
+    plot('ivShockChart',[{name:'IV Δ',x:ivd,y:labels,type:'bar',orientation:'h',marker:{color:ivd.map(v=>v>=0?C.red:C.green),opacity:.8}}],
+      {...LB,yaxis:{...LB.yaxis,automargin:true},xaxis:{...LB.xaxis,title:'IV Change (%)'},
+       height:Math.max(280,data.length*22),margin:{...LB.margin,l:140}});
     document.getElementById('ivShockTable').innerHTML=makeTbl(data,[
-      {key:'symbol',label:'SYMBOL'},
-      {key:'strike_price',label:'STRIKE'},
-      {key:'expiry',label:'EXPIRY'},
-      {key:'iv_now',label:'IV NOW',fmt:v=>fmt(v,2)+'%'},
-      {key:'iv_prev',label:'IV PREV',fmt:v=>fmt(v,2)+'%'},
+      {key:'symbol',label:'SYMBOL'},{key:'strike_price',label:'STRIKE'},{key:'expiry',label:'EXPIRY'},
+      {key:'iv_now',label:'IV NOW',fmt:v=>fmt(v,2)+'%'},{key:'iv_prev',label:'IV PREV',fmt:v=>fmt(v,2)+'%'},
       {key:'iv_delta',label:'Δ IV',fmt:v=>sspan(v)},
     ]);
-  }catch(e){
-    setEmpty('ivShockChart','⚠ '+e.message);
-    document.getElementById('ivShockTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
-  }
+  }catch(e){setEmpty('ivShockChart','⚠ '+e.message);
+    document.getElementById('ivShockTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
 }
 
-// ── IV SMILE ─────────────────────────────────────────────────────
-document.getElementById('ivSymbol').addEventListener('change',()=>
-  loadCascade('ivSymbol','ivExpiry','ivTimestamp'));
-document.getElementById('ivExpiry').addEventListener('change',()=>
-  reloadTimestamps('ivSymbol','ivExpiry','ivTimestamp'));
+// ── IV SMILE ──────────────────────────────────────────────────────
 document.getElementById('btnIv').addEventListener('click',loadIvSmile);
-document.getElementById('ivFilterGroup').addEventListener('click',e=>{
-  const ft=e.target.dataset.ft;
-  if(!ft) return;
-  const NSE_IDX=new Set(['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50','SENSEX','NIFTYIT']);
-  const filtered=ALL_SYMS.filter(s=>{
-    if(ft==='index') return NSE_IDX.has(s);
-    if(ft==='stock') return !NSE_IDX.has(s);
-    return true;
-  });
-  populateSel('ivSymbol', filtered);
-  loadCascade('ivSymbol','ivExpiry','ivTimestamp');
-});
-
 async function loadIvSmile(){
   const sym=document.getElementById('ivSymbol').value;
   const exp=document.getElementById('ivExpiry').value;
   const ts =document.getElementById('ivTimestamp').value;
-  if(!sym||!exp){alert('Select symbol and expiry');return}
+  if(!sym||!exp){alert('Select symbol and expiry');return;}
   ['ceSmileChart','peSmileChart'].forEach(id=>setLoad(id));
   document.getElementById('ivAnomalyTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
   try{
-    const data=await api(
-      `/api/iv_smile?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`
-    );
-    const strikes=data.map(r=>r.strike_price);
-    const spot=data[0]?.spot||0;
-
-    function renderSmile(elId,ivKey,fitKey,anomKey,lineColor){
-      const iv  =data.map(r=>r[ivKey]>0?r[ivKey]:null);
-      const fit =data.map(r=>r[fitKey]);
-      const isA =data.map(r=>r[anomKey]);
-      const aStrikes=strikes.filter((_,i)=>isA[i]);
-      const aIv     =data.filter((_,i)=>isA[i]).map(r=>r[ivKey]);
-
+    const data=await api(`/api/iv_smile?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`);
+    const strikes=data.map(r=>r.strike_price),spot=data[0]?.spot||0;
+    const spotShapes=[{type:'line',x0:spot,x1:spot,y0:0,y1:1,yref:'paper',line:{color:C.amber,width:1,dash:'dash'}}];
+    function renderSmile(elId,ivKey,fitKey,anomKey,lc){
+      const iv=data.map(r=>r[ivKey]>0?r[ivKey]:null);
+      const fit=data.map(r=>r[fitKey]);
+      const aS=strikes.filter((_,i)=>data[i][anomKey]);
+      const aIv=data.filter((_,i)=>data[i][anomKey]).map(r=>r[ivKey]);
       plot(elId,[
-        {name:'IV',x:strikes,y:iv,type:'scatter',mode:'markers',
-          marker:{color:C.muted,size:5,opacity:.9}},
-        {name:'Spline',x:strikes,y:fit,type:'scatter',mode:'lines',
-          line:{color:lineColor,width:2}},
-        {name:'Anomaly',x:aStrikes,y:aIv,type:'scatter',mode:'markers',
-          marker:{color:C.acc2,size:10,symbol:'x',line:{width:2}}},
-      ],{...LB,
-        shapes:[{type:'line',x0:spot,x1:spot,y0:0,y1:1,yref:'paper',
-          line:{color:C.amber,width:1,dash:'dash'}}],
-        annotations:[{x:spot,y:1,yref:'paper',text:'SPOT',showarrow:false,
-          font:{size:8,color:C.amber},yanchor:'bottom'}],
-        xaxis:{...LB.xaxis,title:'Strike'},
-        yaxis:{...LB.yaxis,title:'IV (%)'},
-      });
+        {name:'IV',x:strikes,y:iv,type:'scatter',mode:'markers',marker:{color:C.muted,size:5,opacity:.9}},
+        {name:'Spline',x:strikes,y:fit,type:'scatter',mode:'lines',line:{color:lc,width:2}},
+        {name:'Anomaly',x:aS,y:aIv,type:'scatter',mode:'markers',marker:{color:C.acc2,size:10,symbol:'x',line:{width:2}}},
+      ],{...LB,shapes:spotShapes,xaxis:{...LB.xaxis,title:'Strike'},yaxis:{...LB.yaxis,title:'IV (%)'}});
     }
-
     renderSmile('ceSmileChart','ce_iv','ce_iv_fit','ce_anomaly',C.green);
     renderSmile('peSmileChart','pe_iv','pe_iv_fit','pe_anomaly',C.red);
-
     const anomRows=data.filter(r=>r.ce_anomaly||r.pe_anomaly);
     document.getElementById('ivAnomalyTable').innerHTML=makeTbl(anomRows,[
       {key:'strike_price',label:'STRIKE'},
-      {key:'ce_iv',label:'CE IV',fmt:v=>fmt(v,2)+'%'},
-      {key:'ce_iv_fit',label:'CE FIT',fmt:v=>v!=null?fmt(v,2)+'%':'—'},
+      {key:'ce_iv',label:'CE IV',fmt:v=>fmt(v,2)+'%'},{key:'ce_iv_fit',label:'CE FIT',fmt:v=>v!=null?fmt(v,2)+'%':'—'},
       {key:'ce_zscore',label:'CE Z',fmt:v=>sspan(v)},
-      {key:'pe_iv',label:'PE IV',fmt:v=>fmt(v,2)+'%'},
-      {key:'pe_iv_fit',label:'PE FIT',fmt:v=>v!=null?fmt(v,2)+'%':'—'},
+      {key:'pe_iv',label:'PE IV',fmt:v=>fmt(v,2)+'%'},{key:'pe_iv_fit',label:'PE FIT',fmt:v=>v!=null?fmt(v,2)+'%':'—'},
       {key:'pe_zscore',label:'PE Z',fmt:v=>sspan(v)},
     ]);
-  }catch(e){
-    ['ceSmileChart','peSmileChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
-    document.getElementById('ivAnomalyTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
-  }
+  }catch(e){['ceSmileChart','peSmileChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
+    document.getElementById('ivAnomalyTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
 }
 
-// ── MOVERS ───────────────────────────────────────────────────────
+// ── MOVERS ────────────────────────────────────────────────────────
 document.getElementById('btnMovers').addEventListener('click',loadMovers);
-
 async function loadMovers(){
   const side=document.getElementById('moverSide').value;
   const n   =document.getElementById('moverN').value||20;
   const ft  =getFilter('moverFilterGroup');
   ['gainersChart','losersChart'].forEach(id=>setLoad(id));
-  ['gainersTable','losersTable'].forEach(id=>{
-    document.getElementById(id).innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
-  });
+  ['gainersTable','losersTable'].forEach(id=>{document.getElementById(id).innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';});
   try{
     const d=await api(`/api/top_movers?side=${side}&top_n=${n}&filter_type=${ft}`);
-    const cols=[
-      {key:'symbol',label:'SYMBOL'},
-      {key:'strike_price',label:'STRIKE'},
-      {key:'expiry',label:'EXPIRY'},
-      {key:'ltp_now',label:'LTP',fmt:v=>fmt(v)},
-      {key:'ltp_chg',label:'Δ LTP',fmt:v=>sspan(v)},
-      {key:'ltp_pct_chg',label:'% CHG',fmt:v=>sspan(v,1)},
-    ];
+    const cols=[{key:'symbol',label:'SYMBOL'},{key:'strike_price',label:'STRIKE'},{key:'expiry',label:'EXPIRY'},
+      {key:'ltp_now',label:'LTP',fmt:v=>fmt(v)},{key:'ltp_chg',label:'Δ LTP',fmt:v=>sspan(v)},{key:'ltp_pct_chg',label:'% CHG',fmt:v=>sspan(v,1)}];
     function moverChart(elId,rows,isGain){
-      const lbls=rows.map(r=>`${r.symbol} ${r.strike_price}`);
-      const vals=rows.map(r=>r.ltp_chg||0);
-      plot(elId,[{
-        name:isGain?'Gain':'Loss',x:lbls,y:vals,type:'bar',
-        marker:{color:isGain?C.green:C.red,opacity:.8}
-      }],{...LB,
-        xaxis:{...LB.xaxis,tickangle:-45,automargin:true},
-        yaxis:{...LB.yaxis,title:'LTP Change'},
-      });
+      plot(elId,[{name:isGain?'Gain':'Loss',x:rows.map(r=>`${r.symbol} ${r.strike_price}`),y:rows.map(r=>r.ltp_chg||0),
+        type:'bar',marker:{color:isGain?C.green:C.red,opacity:.8}}],
+        {...LB,xaxis:{...LB.xaxis,tickangle:-45,automargin:true},yaxis:{...LB.yaxis,title:'LTP Change'}});
     }
-    moverChart('gainersChart',d.gainers,true);
-    moverChart('losersChart', d.losers, false);
+    moverChart('gainersChart',d.gainers,true);moverChart('losersChart',d.losers,false);
     document.getElementById('gainersTable').innerHTML=makeTbl(d.gainers,cols);
-    document.getElementById('losersTable').innerHTML =makeTbl(d.losers, cols);
-  }catch(e){
-    ['gainersChart','losersChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
-    ['gainersTable','losersTable'].forEach(id=>{
-      document.getElementById(id).innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
-    });
-  }
+    document.getElementById('losersTable').innerHTML=makeTbl(d.losers,cols);
+  }catch(e){['gainersChart','losersChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
+    ['gainersTable','losersTable'].forEach(id=>{document.getElementById(id).innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;});}
 }
 
-// ── STRIKE TREND ─────────────────────────────────────────────────
-document.getElementById('trendSymbol').addEventListener('change',()=>{
-  loadCascade('trendSymbol','trendExpiry',null);
-  updateStrikeStep('trendSymbol','trendStrike');
-});
+// ── STRIKE TREND ──────────────────────────────────────────────────
 document.getElementById('btnTrend').addEventListener('click',loadTrend);
-
 async function loadTrend(){
   const sym   =document.getElementById('trendSymbol').value;
   const exp   =document.getElementById('trendExpiry').value;
   const strike=document.getElementById('trendStrike').value;
   const metric=document.getElementById('trendMetric').value;
-  if(!sym||!exp||!strike){alert('Fill symbol, expiry and strike');return}
+  if(!sym||!exp||!strike){alert('Select symbol, expiry and ATM distance');return;}
   setLoad('trendChart');
   try{
-    const data=await api(
-      `/api/strike_trend?symbol=${sym}&expiry=${encodeURIComponent(exp)}&strike_price=${strike}&metric=${metric}`
-    );
-    if(!data.length){setEmpty('trendChart','No data for this selection');return}
-    document.getElementById('trendChartTitle').textContent=
-      `${sym} | ${strike} | ${metric.toUpperCase()} | Exp ${exp}`;
-    plot('trendChart',[{
-      name:metric,x:data.map(r=>r.timestamp),y:data.map(r=>r.value),
-      type:'scatter',mode:'lines+markers',
-      line:{color:C.acc,width:2},marker:{size:4},
-      fill:'tozeroy',fillcolor:'rgba(0,200,240,.05)',
-    }],{...LB,
-      xaxis:{...LB.xaxis,title:'Timestamp'},
-      yaxis:{...LB.yaxis,title:metric},
-    });
-  }catch(e){setEmpty('trendChart','⚠ '+e.message)}
+    const data=await api(`/api/strike_trend?symbol=${sym}&expiry=${encodeURIComponent(exp)}&strike_price=${strike}&metric=${metric}`);
+    if(!data.length){setEmpty('trendChart','No data for this selection');return;}
+    document.getElementById('trendChartTitle').textContent=`${sym} | ${strike} | ${metric.toUpperCase()} | ${exp}`;
+    plot('trendChart',[{name:metric,x:data.map(r=>r.timestamp),y:data.map(r=>r.value),
+      type:'scatter',mode:'lines+markers',line:{color:C.acc,width:2},marker:{size:4},
+      fill:'tozeroy',fillcolor:'rgba(0,200,240,.05)'}],
+      {...LB,xaxis:{...LB.xaxis,title:'Timestamp'},yaxis:{...LB.yaxis,title:metric}});
+  }catch(e){setEmpty('trendChart','⚠ '+e.message);}
 }
 
-// ── DELTA SCREENER ───────────────────────────────────────────────
-document.getElementById('dsSymbol').addEventListener('change',()=>{
-  loadCascade('dsSymbol','dsExpiry','dsTimestamp');
-});
-document.getElementById('dsExpiry').addEventListener('change',()=>
-  reloadTimestamps('dsSymbol','dsExpiry','dsTimestamp'));
-document.getElementById('btnDs').addEventListener('click',loadDeltaScreener);
+// ── DELTA SCREENER ────────────────────────────────────────────────
+let _dsCurrentRows=[];
 
-// Cache of screener rows for margin fetch
-let _dsRows=[];
-let _dsLot=1;
+function updateDsRangeLabel(){
+  const hi=document.getElementById('deltaSlider').value;
+  const lo=document.getElementById('deltaMinSlider').value;
+  const lbl=document.getElementById('dsRangeLabel');
+  if(lbl)lbl.textContent=lo+'–'+hi;
+}
+
+document.getElementById('btnDs').addEventListener('click',loadDeltaScreener);
+document.getElementById('btnFetchMargin').addEventListener('click',fetchDsMargin);
 
 async function loadDeltaScreener(){
-  const sym   =document.getElementById('dsSymbol').value;
-  const exp   =document.getElementById('dsExpiry').value;
-  const ts    =document.getElementById('dsTimestamp').value;
+  const ts    =document.getElementById('dsTimestamp')?.value||'';
   const tgtDlt=document.getElementById('deltaSlider').value;
-  if(!sym||!exp){alert('Select symbol and expiry');return}
-
-  document.getElementById('dsCeLabel').textContent=tgtDlt;
-  document.getElementById('dsPeLabel').textContent=tgtDlt;
-
-  ['dsCeChart','dsPeChart'].forEach(id=>setLoad(id));
-  document.getElementById('dsTable').innerHTML=
-    '<div class="loading"><div class="spinner"></div>Loading…</div>';
+  const minDlt=document.getElementById('deltaMinSlider').value;
+  const ft    =getFilter('dsFilterGroup');
+  updateDsRangeLabel();
+  document.getElementById('dsTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
   document.getElementById('dsKpis').innerHTML='';
-
   try{
     const tsParam=ts?`&timestamp=${encodeURIComponent(ts)}`:'';
-    const res=await api(
-      `/api/delta_screener?symbol=${sym}&expiry=${encodeURIComponent(exp)}${tsParam}&target_delta=${tgtDlt}`
-    );
-    _dsRows=res.rows;_dsLot=res.lot_size;
-    await renderDsTable(_dsRows,_dsLot,sym,exp,res.target_delta);
-
-    const ceRows=_dsRows.filter(r=>r.option_type==='CE').sort((a,b)=>a.delta_dist-b.delta_dist);
-    const peRows=_dsRows.filter(r=>r.option_type==='PE').sort((a,b)=>a.delta_dist-b.delta_dist);
-
-    // KPIs from best match
-    const bestCe=ceRows[0],bestPe=peRows[0];
+    const res=await api(`/api/delta_screener?target_delta=${tgtDlt}&min_delta=${minDlt}&filter_type=${ft}${tsParam}`);
+    _dsCurrentRows=res.rows||[];
+    const minOi=getSetting('stgDsMinOi'),minVol=getSetting('stgDsMinVol');
+    const visible=_dsCurrentRows.filter(r=>r.oi>=minOi&&r.volume>=minVol);
+    const tgtN=parseFloat(tgtDlt)/100;
+    const ceRows=visible.filter(r=>r.option_type==='CE');
+    const peRows=visible.filter(r=>r.option_type==='PE');
+    const bestCe=ceRows.length?ceRows.reduce((p,c)=>Math.abs(c.delta-tgtN)<Math.abs(p.delta-tgtN)?c:p):null;
+    const bestPe=peRows.length?peRows.reduce((p,c)=>Math.abs(c.delta-tgtN)<Math.abs(p.delta-tgtN)?c:p):null;
     document.getElementById('dsKpis').innerHTML=[
-      {label:'LOT SIZE',  value:_dsLot,sub:''},
-      bestCe?{label:'CE ~Δ'+tgtDlt,value:fmt(bestCe.ltp),sub:
-        `Strike ${bestCe.strike_price} | Δ${fmt(bestCe.delta,2)}`}:null,
-      bestPe?{label:'PE ~Δ'+tgtDlt,value:fmt(bestPe.ltp),sub:
-        `Strike ${bestPe.strike_price} | Δ${fmt(bestPe.delta,2)}`}:null,
-      bestCe?{label:'CE LOT PREMIUM',value:'₹'+fmtL(bestCe.premium_per_lot),sub:''}:null,
-      bestPe?{label:'PE LOT PREMIUM',value:'₹'+fmtL(bestPe.premium_per_lot),sub:''}:null,
-    ].filter(Boolean).map(k=>`<div class="kpi">
-      <div class="kpi-label">${k.label}</div>
-      <div class="kpi-val acc">${k.value}</div>
-      <div class="kpi-sub">${k.sub}</div>
-    </div>`).join('');
-
-    // CE chart
-    function dsChart(elId,rows,color){
-      if(!rows.length){setEmpty(elId,'No options found near target delta');return}
-      plot(elId,[
-        {name:'Premium/Lot (₹)',x:rows.map(r=>r.strike_price),
-         y:rows.map(r=>r.premium_per_lot),type:'bar',
-         marker:{color,opacity:.75}},
-        {name:'Δ',x:rows.map(r=>r.strike_price),y:rows.map(r=>r.delta*1000),
-         type:'scatter',mode:'lines+markers',yaxis:'y2',
-         line:{color:C.amber,width:1.5},marker:{size:5}},
-      ],{...LB,
-        xaxis:{...LB.xaxis,title:'Strike'},
-        yaxis:{...LB.yaxis,title:'Lot Premium (₹)'},
-        yaxis2:{overlaying:'y',side:'right',title:'Delta ×1000',
-          gridcolor:'transparent',tickfont:{size:9}},
-      });
-    }
-    dsChart('dsCeChart',ceRows,C.green);
-    dsChart('dsPeChart',peRows,C.red);
-
-  }catch(e){
-    ['dsCeChart','dsPeChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
-    document.getElementById('dsTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
-  }
+      {label:'CE ROWS',value:ceRows.length,sub:'in delta range'},
+      {label:'PE ROWS',value:peRows.length,sub:'in delta range'},
+      bestCe?{label:'BEST CE',value:fmt(bestCe.ltp),sub:bestCe.symbol+' '+bestCe.strike_price+' Δ'+fmt(bestCe.delta,3)}:null,
+      bestPe?{label:'BEST PE',value:fmt(bestPe.ltp),sub:bestPe.symbol+' '+bestPe.strike_price+' Δ'+fmt(bestPe.delta,3)}:null,
+    ].filter(Boolean).map(k=>`<div class="kpi"><div class="kpi-label">${k.label}</div>
+      <div class="kpi-val acc">${k.value}</div><div class="kpi-sub">${k.sub}</div></div>`).join('');
+    renderDsTable(visible);
+  }catch(e){document.getElementById('dsTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
 }
 
-async function renderDsTable(rows,lot,sym,exp,tgtDelta){
-  const iciciOk=(await api('/api/icici/status')).configured;
-
-  // If ICICI available, enrich with margin for best CE and PE
-  if(iciciOk){
-    const toFetch=rows.filter(r=>r.margin==null&&r.ltp>0);
-    await Promise.all(toFetch.map(async r=>{
-      try{
-        const expShort=exp.substring(0,10);
-        const otype=r.option_type==='CE'?'call':'put';
-        const m=await api(
-          `/api/icici/margin?symbol=${sym}&strike=${r.strike_price}&expiry=${expShort}&option_type=${otype}&ltp=${r.ltp}&qty=${lot}`
-        );
-        // Use span_margin (SPAN requirement) as the margin figure;
-        // fall back to isec_margin if span_margin not present
-        r.margin = m.span_margin != null ? m.span_margin : m.isec_margin;
-        r.return_on_margin = r.margin > 0
-          ? parseFloat(((r.premium_per_lot / r.margin) * 100).toFixed(2)) : null;
-      }catch(e){}
-    }));
-    document.getElementById('dsMarginBadge').style.display='';
+function renderDsTable(rows){
+  if(!rows||!rows.length){
+    document.getElementById('dsTable').innerHTML='<div class="empty">No options in delta range</div>';return;
   }
-
   document.getElementById('dsTable').innerHTML=makeTbl(rows,[
     {key:'option_type',label:'TYPE',fmt:v=>`<span class="${v==='CE'?'up':'down'}">${v}</span>`},
-    {key:'strike_price',label:'STRIKE'},
+    {key:'symbol',label:'SYMBOL'},{key:'expiry',label:'EXPIRY'},{key:'strike_price',label:'STRIKE'},
     {key:'delta',label:'Δ',fmt:v=>fmt(v,3)},
-    {key:'delta_dist',label:'Δ DIST',fmt:v=>fmt(v,3)},
     {key:'ltp',label:'LTP',fmt:v=>fmt(v,2)},
-    {key:'iv',label:'IV %',fmt:v=>fmt(v,2)+'%'},
+    {key:'iv',label:'IV%',fmt:v=>fmt(v,1)+'%'},
+    {key:'gamma',label:'γ',fmt:v=>fmt(v,5)},
+    {key:'theta',label:'Θ',fmt:v=>fmt(v,3)},
+    {key:'gexv',label:'GEXv',fmt:v=>fmtL(v)},
+    {key:'net_gexv',label:'NetGEXv',fmt:v=>fmtL(v)},
     {key:'oi',label:'OI',fmt:v=>fmtL(v)},
     {key:'volume',label:'VOL',fmt:v=>fmtL(v)},
+    {key:'lot_size',label:'LOT'},
     {key:'premium_per_lot',label:'LOT PREM ₹',fmt:v=>fmtL(v)},
-    {key:'margin',label:'SPAN MARGIN ₹',fmt:v=>v!=null?fmtL(v):'—'},
-    {key:'return_on_margin',label:'RoM %',fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'margin',label:'SPAN MARGIN ₹',fmt:v=>v!=null&&v>0?fmtL(v):'—'},
+    {key:'return_on_margin',label:'RoM%',fmt:v=>v!=null?sspan(v,2):'—'},
     {key:'risk_indicator',label:'RISK NOTL',fmt:v=>fmtL(v)},
   ]);
+}
+
+async function fetchDsMargin(){
+  const status=await api('/api/icici/status').catch(()=>({configured:false}));
+  if(!status.configured){alert('ICICI not configured. Click the ICICI badge in the topbar.');return;}
+  const btn=document.getElementById('btnFetchMargin');
+  btn.textContent='FETCHING…';btn.disabled=true;
+
+  // Throttle: ICICI Breeze allows ~10 API calls/min on margin_calculator
+  // Process rows sequentially with a 6-second gap between calls
+  const DELAY_MS = 6200;   // ~10 calls/min with headroom
+  const toFetch = _dsCurrentRows.filter(r=>r.ltp&&r.ltp>0&&r.margin==null);
+  let done=0;
+  for(const r of toFetch){
+    try{
+      const expShort=(r.expiry||'').substring(0,10);
+      const otype=r.option_type==='CE'?'call':'put';
+      const m=await api(
+        `/api/icici/margin?symbol=${r.symbol}&strike=${r.strike_price}`+
+        `&expiry=${expShort}&option_type=${otype}&ltp=${r.ltp}&qty=${r.lot_size}`
+      );
+      r.margin=m.span_margin!=null?m.span_margin:m.isec_margin;
+      r.return_on_margin=r.margin>0?parseFloat(((r.premium_per_lot/r.margin)*100).toFixed(2)):null;
+    }catch(e){
+      console.warn('Margin fetch failed for',r.symbol,r.strike_price,e.message);
+    }
+    done++;
+    btn.textContent=`FETCHING… ${done}/${toFetch.length}`;
+    // Re-render partial results so user sees progress
+    const minOi=getSetting('stgDsMinOi'),minVol=getSetting('stgDsMinVol');
+    renderDsTable(_dsCurrentRows.filter(r=>r.oi>=minOi&&r.volume>=minVol));
+    // Wait between calls to avoid rate limit (skip wait after last call)
+    if(done<toFetch.length) await new Promise(res=>setTimeout(res,DELAY_MS));
+  }
+  btn.textContent='FETCH MARGIN (ICICI)';btn.disabled=false;
 }
 
 // ── View init map ─────────────────────────────────────────────────
 const VIEW_INIT={
   gex:()=>loadCascade('gexSymbol','gexExpiry','gexTimestamp'),
   oi:()=>{},
-  shockers:()=>{loadVolShock();loadIvShock()},
+  shockers:()=>{loadVolShock();loadIvShock();},
   iv:()=>loadCascade('ivSymbol','ivExpiry','ivTimestamp'),
   movers:()=>loadMovers(),
-  trend:()=>loadCascade('trendSymbol','trendExpiry',null),
-  delta:()=>loadCascade('dsSymbol','dsExpiry','dsTimestamp'),
+  trend:()=>loadCascade('trendSymbol','trendExpiry',null).then(()=>loadAtmStrikes()),
+  delta:()=>loadDsTimestamps(),
+  settings:()=>loadSettings(),
 };
 
 // ── Bootstrap ─────────────────────────────────────────────────────
 (async function init(){
-  // Symbols + cascades first — completely independent of data quality
+  loadSettings();
   await initSymbols();
-  // These are fire-and-forget; failures don't block the UI
-  loadOverview().catch(e => console.error('Overview failed:', e));
-  updateIciciStatus().catch(e => {});
+  loadOverview().catch(e=>console.error('Overview:',e));
+  updateIciciStatus().catch(()=>{});
 })();
 </script>
 </body>
