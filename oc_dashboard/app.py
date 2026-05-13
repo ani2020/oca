@@ -28,7 +28,7 @@ import pandas as pd
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.encoders import jsonable_encoder
 
@@ -231,6 +231,7 @@ def expiry_clause(exp_str: str, col: str = "expiry") -> tuple[str, list]:
 # ===========================================================================
 # In-memory cache — keyed lookups for data that changes only on new imports
 # ===========================================================================
+import asyncio
 import threading
 import pickle
 import time
@@ -295,20 +296,26 @@ def _margin_cache_load() -> None:
         valid = {k: v for k, v in data.items() if v.get("date") == today}
         with _margin_cache_lock:
             _margin_cache_store = valid
-        print(f"  ✓ Loaded {len(valid)} margin cache entries from {p}")
+        if valid:
+            print(f"  ✓ Margin cache: loaded {len(valid)} entries from prior session ({p.name})")
     except Exception as exc:
         print(f"  ⚠ Could not load margin cache: {exc}")
 
 
-def _margin_cache_save() -> None:
-    """Persist current margin cache to disk."""
+def _margin_cache_save(verbose: bool = False) -> None:
+    """
+    Persist current margin cache to disk.
+    verbose=True prints confirmation (used at shutdown and after batch fetch).
+    Background per-entry saves are silent to avoid console spam.
+    """
     p = _margin_cache_path()
     try:
         with _margin_cache_lock:
             data = dict(_margin_cache_store)
         with open(p, "wb") as f:
             pickle.dump(data, f)
-        print(f"  ✓ Margin cache saved ({len(data)} entries) to {p}")
+        if verbose:
+            print(f"  ✓ Margin cache saved ({len(data)} entries) to {p}")
     except Exception as exc:
         print(f"  ⚠ Could not save margin cache: {exc}")
 
@@ -323,14 +330,20 @@ def _margin_cache_get(symbol: str, strike: str, expiry: str, option_type: str) -
     return None
 
 
-def _margin_cache_put(symbol: str, strike: str, expiry: str, option_type: str, result: Dict) -> None:
-    """Store a margin result in cache (keyed to today's date)."""
+def _margin_cache_put(symbol: str, strike: str, expiry: str, option_type: str,
+                      result: Dict, save: bool = False) -> None:
+    """Store a margin result in cache (keyed to today's date).
+    Pass save=False when doing bulk inserts to avoid repeated disk writes;
+    call _margin_cache_save() once after the batch completes.
+    """
     key = (symbol.upper(), str(strike), expiry[:10], option_type.lower())
     entry = {"result": result, "date": date.today().isoformat()}
     with _margin_cache_lock:
         _margin_cache_store[key] = entry
-    # Async save to disk (don't block the request)
-    threading.Thread(target=_margin_cache_save, daemon=True).start()
+    if save:
+        # Silent background save — verbose=False to avoid per-entry console spam
+        threading.Thread(target=lambda: _margin_cache_save(verbose=False),
+                         daemon=True).start()
 
 
 def _margin_cache_clear() -> int:
@@ -539,6 +552,23 @@ def _gamma_analysis_inline(
 # App lifecycle
 # ===========================================================================
 
+_autosave_stop = threading.Event()
+
+
+def _start_margin_cache_autosave(interval_secs: int = 300) -> None:
+    """
+    Start a daemon thread that saves the margin cache to disk every interval_secs.
+    Silent — no console output. Stops when _autosave_stop is set (on shutdown).
+    This ensures single-row /api/icici/margin calls eventually persist even if
+    the batch endpoint is not used.
+    """
+    def _loop():
+        while not _autosave_stop.wait(timeout=interval_secs):
+            _margin_cache_save(verbose=False)
+    t = threading.Thread(target=_loop, daemon=True, name="margin-cache-autosave")
+    t.start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Verify DB exists and is readable (quick smoke-test, no persistent lock held)
@@ -551,9 +581,10 @@ async def lifespan(app: FastAPI):
     _load_icici_ticker_map()
     _try_init_icici()
     _margin_cache_load()          # load persisted margin cache from disk
+    _start_margin_cache_autosave()   # periodic silent background save
     print("✓ Dashboard ready — open http://localhost:8000")
     yield
-    _margin_cache_save()          # persist margin cache on clean shutdown
+    _margin_cache_save(verbose=True)   # persist margin cache on clean shutdown
 
 
 class _SafeJSONEncoder(json.JSONEncoder):
@@ -736,7 +767,13 @@ def overview():
         SUM(COALESCE(t.net_gexv,  0))      AS net_gex,
         AVG(COALESCE(t.ce_iv,     0))      AS avg_ce_iv,
         AVG(COALESCE(t.pe_iv,     0))      AS avg_pe_iv,
-        MAX(COALESCE(t.lotsize,  1))      AS lot_size
+        MAX(COALESCE(t.lotsize,  1))       AS lot_size,
+        CASE WHEN SUM(COALESCE(t.ce_oi,0)+COALESCE(t.pe_oi,0)) > 0
+             THEN SUM(COALESCE(t.ce_iv,0)*COALESCE(t.ce_oi,0)
+                    + COALESCE(t.pe_iv,0)*COALESCE(t.pe_oi,0))
+                / SUM(COALESCE(t.ce_oi,0)+COALESCE(t.pe_oi,0))
+             ELSE NULL END                 AS oi_wtd_iv,
+        AVG(COALESCE(t.m_volatility,0)) - AVG(COALESCE(t.ce_iv,0)) AS rv_iv_spread
     FROM {tbl()} t
     JOIN latest l
       ON  t.symbol = l.symbol
@@ -1051,6 +1088,8 @@ def oi_change(symbol: str = Query(...), filter_type: str = Query("all")):
         WHERE n.symbol = ?
           AND n.timestamp  BETWEEN ?  AND ? 
           AND o.timestamp  BETWEEN ?  AND ? 
+          AND n.expiry >= CURRENT_DATE
+          AND (COALESCE(n.ce_ltp,0) + COALESCE(n.pe_ltp,0)) > 0
         ORDER BY n.expiry, n.strike_price
         """,
         [symbol] + _ts_lo_hi(ts_new) + _ts_lo_hi(ts_old),
@@ -1125,6 +1164,8 @@ def volume_shockers(top_n: int = Query(30), filter_type: str = Query("all")):
                COALESCE(ce_volume,0)+COALESCE(pe_volume,0) AS total_vol,
                DENSE_RANK() OVER (PARTITION BY symbol ORDER BY timestamp DESC) AS rk
         FROM {tbl()}
+        WHERE expiry >= CURRENT_DATE           -- active expiries only
+          AND (COALESCE(ce_ltp,0) + COALESCE(pe_ltp,0)) > 0   -- has live price
     ),
     latest AS (SELECT * FROM ts_ranked WHERE rk=1),
     prev   AS (SELECT * FROM ts_ranked WHERE rk=2)
@@ -1158,6 +1199,8 @@ def iv_shockers(top_n: int = Query(30), filter_type: str = Query("all")):
                (COALESCE(ce_iv,0)+COALESCE(pe_iv,0))/2.0 AS avg_iv,
                DENSE_RANK() OVER (PARTITION BY symbol ORDER BY timestamp DESC) AS rk
         FROM {tbl()}
+        WHERE expiry >= CURRENT_DATE           -- active expiries only
+          AND (COALESCE(ce_iv,0) + COALESCE(pe_iv,0)) > 0     -- has live IV
     ),
     latest AS (SELECT * FROM ts_ranked WHERE rk=1),
     prev   AS (SELECT * FROM ts_ranked WHERE rk=2)
@@ -1270,6 +1313,7 @@ def top_movers(
                    PARTITION BY symbol, strike_price, expiry
                    ORDER BY timestamp DESC) AS rk
         FROM {tbl()}
+        WHERE expiry >= CURRENT_DATE          -- exclude expired options
     ),
     latest AS (SELECT * FROM ts_ranked WHERE rk=1),
     prev   AS (SELECT * FROM ts_ranked WHERE rk=2)
@@ -1284,7 +1328,9 @@ def top_movers(
              ELSE NULL END        AS ltp_pct_chg
     FROM latest n
     JOIN prev p ON n.symbol=p.symbol AND n.strike_price=p.strike_price AND n.expiry=p.expiry
-    WHERE p.ltp>0 {sym_filter}
+    WHERE p.ltp>0                             -- at least one trade both snapshots
+      AND n.ltp>0                             -- actively traded now
+      {sym_filter}
     """
     return safe_response({
         "gainers": to_records(qdf(base + f" ORDER BY ltp_chg DESC LIMIT {top_n}")),
@@ -1443,6 +1489,565 @@ def delta_screener(
     return safe_response({"target_delta": target_delta, "min_delta": min_delta, "rows": rows})
 
 
+
+
+# ===========================================================================
+# Max Pain
+# ===========================================================================
+
+@app.get("/api/max_pain")
+def max_pain(
+    symbol:    str           = Query(...),
+    expiry:    str           = Query(...),
+    timestamp: Optional[str] = Query(None),
+):
+    """
+    Compute max pain strike for one expiry at a given timestamp.
+    Max pain = strike where total intrinsic-value loss for option buyers is maximised,
+    i.e. where option writers (MMs) lose least if price expires there.
+    Returns: pain curve (intrinsic loss per potential expiry price) + max_pain_strike.
+    """
+    ts_filter = timestamp or latest_ts(symbol)
+    lo, hi = _ts_lo_hi(ts_filter)
+    df = qdf(
+        f"""
+        SELECT strike_price,
+               COALESCE(ce_oi, 0) AS ce_oi,
+               COALESCE(pe_oi, 0) AS pe_oi,
+               COALESCE(lotsize, 1) AS lotsize,
+               COALESCE(underlying_price, 0) AS spot
+        FROM {tbl()}
+        WHERE symbol = ? AND expiry = ?
+          AND timestamp BETWEEN ? AND ?
+        ORDER BY strike_price
+        """,
+        [symbol, expiry[:10], lo, hi],
+    )
+    if df.empty:
+        raise HTTPException(404, "No data for max pain")
+
+    strikes  = df["strike_price"].values
+    ce_oi    = df["ce_oi"].values
+    pe_oi    = df["pe_oi"].values
+    lot      = max(int(df["lotsize"].iloc[0]), 1)
+    spot     = float(df["spot"].iloc[0])
+
+    # For each candidate expiry price, compute total intrinsic value (buyer loss = writer gain)
+    pain = []
+    for price in strikes:
+        call_loss = float(np.sum(np.maximum(price - strikes, 0) * ce_oi * lot))
+        put_loss  = float(np.sum(np.maximum(strikes - price, 0) * pe_oi * lot))
+        pain.append({
+            "price":     float(price),
+            "call_pain": call_loss / 1e6,
+            "put_pain":  put_loss  / 1e6,
+            "total_pain":(call_loss + put_loss) / 1e6,
+        })
+
+    pain_df      = pd.DataFrame(pain)
+    max_pain_idx = int(pain_df["total_pain"].idxmin())
+    max_pain_strike = float(pain_df.loc[max_pain_idx, "price"])
+
+    return safe_response({
+        "symbol":          symbol,
+        "expiry":          expiry[:10],
+        "spot":            spot,
+        "max_pain_strike": max_pain_strike,
+        "distance_pts":    round(max_pain_strike - spot, 2),
+        "distance_pct":    round((max_pain_strike - spot) / spot * 100, 3) if spot else None,
+        "pain_curve":      to_records(pain_df),
+    })
+
+
+@app.get("/api/max_pain_series")
+def max_pain_series(
+    symbol: str = Query(...),
+    expiry: str = Query(...),
+):
+    """
+    Time series of max pain strike for one symbol+expiry across all timestamps in DB.
+    Shows how max pain drifts intraday as OI changes.
+    """
+    # Get all distinct timestamps for this symbol+expiry
+    ts_df = qdf(
+        f"SELECT DISTINCT STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS ts "
+        f"FROM {tbl()} WHERE symbol = ? AND expiry = ? ORDER BY ts",
+        [symbol, expiry[:10]],
+    )
+    if ts_df.empty:
+        raise HTTPException(404, "No timestamps found")
+
+    series = []
+    for ts in ts_df["ts"].tolist():
+        if ts is None or (isinstance(ts, float)):
+            continue          # skip NaN rows produced by STRFTIME on NULL timestamps
+        ts = str(ts)
+        lo, hi = _ts_lo_hi(ts)
+        df = qdf(
+            f"""
+            SELECT strike_price,
+                   COALESCE(ce_oi, 0) AS ce_oi,
+                   COALESCE(pe_oi, 0) AS pe_oi,
+                   COALESCE(lotsize, 1) AS lotsize,
+                   COALESCE(underlying_price, 0) AS spot
+            FROM {tbl()}
+            WHERE symbol = ? AND expiry = ?
+              AND timestamp BETWEEN ? AND ?
+            ORDER BY strike_price
+            """,
+            [symbol, expiry[:10], lo, hi],
+        )
+        if df.empty:
+            continue
+        strikes = df["strike_price"].values
+        ce_oi   = df["ce_oi"].values
+        pe_oi   = df["pe_oi"].values
+        lot     = max(int(df["lotsize"].iloc[0]), 1)
+        spot    = float(df["spot"].iloc[0])
+        pain_vals = []
+        for price in strikes:
+            total = float(np.sum(np.maximum(price - strikes, 0) * ce_oi * lot) +
+                          np.sum(np.maximum(strikes - price, 0) * pe_oi * lot))
+            pain_vals.append(total)
+        mp_idx = int(np.argmin(pain_vals))
+        series.append({
+            "timestamp":       ts,
+            "max_pain_strike": float(strikes[mp_idx]),
+            "spot":            spot,
+            "distance_pts":    round(float(strikes[mp_idx]) - spot, 2),
+        })
+
+    return safe_response({"symbol": symbol, "expiry": expiry[:10], "series": series})
+
+
+# ===========================================================================
+# IV Term Structure
+# ===========================================================================
+
+@app.get("/api/iv_term_structure")
+def iv_term_structure(
+    symbol:    str           = Query(...),
+    timestamp: Optional[str] = Query(None),
+):
+    """
+    ATM CE and PE IV across all expiries at a given timestamp.
+    Uses the row where distance_from_atm = 0 (ATM strike) per expiry.
+    """
+    ts_filter = timestamp or latest_ts(symbol)
+    lo, hi    = _ts_lo_hi(ts_filter)
+    df = qdf(
+        f"""
+        SELECT
+            CAST(expiry AS VARCHAR)         AS expiry,
+            COALESCE(days_to_expiry, 0)     AS dte,
+            COALESCE(ce_iv, 0)              AS ce_iv,
+            COALESCE(pe_iv, 0)              AS pe_iv,
+            COALESCE(ce_iv_nse, 0)          AS ce_iv_nse,
+            COALESCE(underlying_price, 0)   AS spot,
+            strike_price
+        FROM {tbl()}
+        WHERE symbol = ?
+          AND timestamp BETWEEN ? AND ?
+          AND distance_from_atm = 0
+        ORDER BY expiry
+        """,
+        [symbol, lo, hi],
+    )
+    if df.empty:
+        # Fallback: nearest strike to spot per expiry
+        df = qdf(
+            f"""
+            WITH ranked AS (
+                SELECT
+                    CAST(expiry AS VARCHAR)       AS expiry,
+                    COALESCE(days_to_expiry, 0)   AS dte,
+                    COALESCE(ce_iv, 0)            AS ce_iv,
+                    COALESCE(pe_iv, 0)            AS pe_iv,
+                    COALESCE(ce_iv_nse, 0)        AS ce_iv_nse,
+                    COALESCE(underlying_price, 0) AS spot,
+                    strike_price,
+                    ABS(distance_from_atm)        AS atm_dist,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY expiry
+                        ORDER BY ABS(distance_from_atm), strike_price
+                    ) AS rn
+                FROM {tbl()}
+                WHERE symbol = ? AND timestamp BETWEEN ? AND ?
+            )
+            SELECT * FROM ranked WHERE rn = 1 ORDER BY expiry
+            """,
+            [symbol, lo, hi],
+        )
+    if df.empty:
+        raise HTTPException(404, "No IV term structure data")
+
+    # Compute mid-IV and skew per row
+    df["mid_iv"]  = (df["ce_iv"] + df["pe_iv"]) / 2.0
+    df["skew"]    = df["pe_iv"] - df["ce_iv"]     # positive = put premium (normal)
+
+    return safe_response({
+        "symbol":    symbol,
+        "timestamp": ts_filter[:16],
+        "rows":      to_records(df[["expiry","dte","ce_iv","pe_iv","ce_iv_nse","mid_iv","skew","spot","strike_price"]]),
+    })
+
+
+# ===========================================================================
+# IV Rank / Percentile / Realised-Implied spread
+# ===========================================================================
+
+@app.get("/api/iv_rank")
+def iv_rank(
+    symbol:        str           = Query(...),
+    expiry:        str           = Query(...),
+    timestamp:     Optional[str] = Query(None),
+    lookback_days: int           = Query(90),
+):
+    """
+    IV Rank and IV Percentile for ATM options of a given symbol+expiry.
+    Lookback window is configurable (default 90 days from the selected timestamp).
+
+    IV Rank     = (current_iv - min_iv) / (max_iv - min_iv)  × 100
+    IV Pctile   = fraction of historical ATM IVs below current IV × 100
+    RV-IV spread = m_volatility (realised annualised) - ATM IV
+    """
+    ts_filter = timestamp or latest_ts(symbol)
+    lo, hi    = _ts_lo_hi(ts_filter)
+
+    # Current ATM IV
+    cur = qdf(
+        f"""
+        SELECT COALESCE(ce_iv, 0) AS ce_iv,
+               COALESCE(pe_iv, 0) AS pe_iv,
+               COALESCE(m_volatility, 0) AS rv
+        FROM {tbl()}
+        WHERE symbol = ? AND expiry = ?
+          AND timestamp BETWEEN ? AND ?
+          AND distance_from_atm = 0
+        LIMIT 1
+        """,
+        [symbol, expiry[:10], lo, hi],
+    )
+    if cur.empty:
+        raise HTTPException(404, "No current ATM IV data")
+
+    ce_iv_now = float(cur["ce_iv"].iloc[0])
+    pe_iv_now = float(cur["pe_iv"].iloc[0])
+    atm_iv    = (ce_iv_now + pe_iv_now) / 2.0
+    rv        = float(cur["rv"].iloc[0])
+
+    # Historical ATM IVs within lookback window
+    cutoff = (datetime.strptime(ts_filter[:16], "%Y-%m-%d %H:%M")
+              - timedelta(days=lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
+    hist = qdf(
+        f"""
+        SELECT (COALESCE(ce_iv,0) + COALESCE(pe_iv,0)) / 2.0 AS atm_iv
+        FROM {tbl()}
+        WHERE symbol = ? AND expiry = ?
+          AND timestamp >= ?
+          AND distance_from_atm = 0
+          AND (COALESCE(ce_iv,0) + COALESCE(pe_iv,0)) > 0
+        """,
+        [symbol, expiry[:10], cutoff],
+    )
+
+    iv_rank = iv_pctile = None
+    hist_count = 0
+    if not hist.empty:
+        vals = hist["atm_iv"].dropna().values
+        hist_count = len(vals)
+        if len(vals) >= 2:
+            iv_min, iv_max = float(vals.min()), float(vals.max())
+            iv_rank   = round((atm_iv - iv_min) / (iv_max - iv_min) * 100, 1)                         if iv_max > iv_min else None
+            iv_pctile = round(float(np.mean(vals < atm_iv)) * 100, 1)
+
+    return safe_response({
+        "symbol":       symbol,
+        "expiry":       expiry[:10],
+        "ce_iv":        round(ce_iv_now, 2),
+        "pe_iv":        round(pe_iv_now, 2),
+        "atm_iv":       round(atm_iv, 2),
+        "rv":           round(rv, 2),
+        "rv_iv_spread": round(rv - atm_iv, 2),
+        "iv_rank":      iv_rank,
+        "iv_pctile":    iv_pctile,
+        "lookback_days":lookback_days,
+        "hist_count":   hist_count,
+    })
+
+
+# ===========================================================================
+# Put-Call Skew (25-delta Risk Reversal + sentiment/regime from DB)
+# ===========================================================================
+
+@app.get("/api/pc_skew")
+def pc_skew(
+    symbol:    str           = Query(...),
+    expiry:    str           = Query(...),
+    timestamp: Optional[str] = Query(None),
+):
+    """
+    Put-Call skew analysis:
+    - 25-delta risk reversal: IV of ~25-delta put minus ~25-delta call
+    - OTM skew: left-wing slope vs right-wing slope of IV smile
+    - riskreversal, sentiment, regime columns from the ATM row
+    - Time series of riskreversal across timestamps for this expiry
+    """
+    ts_filter = timestamp or latest_ts(symbol)
+    lo, hi    = _ts_lo_hi(ts_filter)
+
+    # All strikes for this expiry/timestamp
+    df = qdf(
+        f"""
+        SELECT
+            strike_price,
+            distance_from_atm,
+            COALESCE(ce_iv,    0) AS ce_iv,
+            COALESCE(pe_iv,    0) AS pe_iv,
+            COALESCE(ce_delta, 0) AS ce_delta,
+            COALESCE(pe_delta, 0) AS pe_delta,
+            COALESCE(riskreversal, 0) AS riskreversal,
+            CAST(sentiment AS VARCHAR)  AS sentiment,
+            CAST(regime    AS VARCHAR)  AS regime,
+            COALESCE(underlying_price, 0) AS spot
+        FROM {tbl()}
+        WHERE symbol = ? AND expiry = ?
+          AND timestamp BETWEEN ? AND ?
+        ORDER BY strike_price
+        """,
+        [symbol, expiry[:10], lo, hi],
+    )
+    if df.empty:
+        raise HTTPException(404, "No skew data")
+
+    spot = float(df["spot"].iloc[0])
+
+    # ATM row (distance_from_atm == 0)
+    atm_rows = df[df["distance_from_atm"] == 0]
+    atm_row  = atm_rows.iloc[0].to_dict() if not atm_rows.empty else {}
+
+    # 25-delta RR: find CE strike with delta nearest 0.25 and PE with |delta| nearest 0.25
+    ce_candidates = df[(df["ce_delta"] > 0) & (df["ce_iv"] > 0)].copy()
+    pe_candidates = df[(df["pe_delta"] < 0) & (df["pe_iv"] > 0)].copy()
+
+    rr_25d = None
+    ce_25d_iv = pe_25d_iv = None
+    ce_25d_strike = pe_25d_strike = None
+
+    if not ce_candidates.empty and not pe_candidates.empty:
+        ce_candidates["d_dist"] = (ce_candidates["ce_delta"] - 0.25).abs()
+        pe_candidates["d_dist"] = (pe_candidates["pe_delta"].abs() - 0.25).abs()
+        ce_25 = ce_candidates.loc[ce_candidates["d_dist"].idxmin()]
+        pe_25 = pe_candidates.loc[pe_candidates["d_dist"].idxmin()]
+        ce_25d_iv     = float(ce_25["ce_iv"])
+        pe_25d_iv     = float(pe_25["pe_iv"])
+        ce_25d_strike = float(ce_25["strike_price"])
+        pe_25d_strike = float(pe_25["strike_price"])
+        rr_25d        = round(pe_25d_iv - ce_25d_iv, 2)
+
+    # OTM wing slopes (from smile spline — simple linear fit each side)
+    atm_strike = float(atm_row.get("strike_price", spot))
+    left  = df[(df["strike_price"] < atm_strike) & (df["pe_iv"] > 1)].copy()
+    right = df[(df["strike_price"] > atm_strike) & (df["ce_iv"] > 1)].copy()
+
+    left_slope = right_slope = skew_asymmetry = None
+    if len(left) >= 3:
+        c = np.polyfit(left["strike_price"].values, left["pe_iv"].values, 1)
+        left_slope = round(float(c[0]) * 100, 4)   # IV change per 1% of spot
+    if len(right) >= 3:
+        c = np.polyfit(right["strike_price"].values, right["ce_iv"].values, 1)
+        right_slope = round(float(c[0]) * 100, 4)
+    if left_slope is not None and right_slope is not None:
+        skew_asymmetry = round(abs(left_slope) - abs(right_slope), 4)
+
+    # riskreversal time series for this symbol+expiry (ATM row only)
+    # Risk reversal series: limit to the same date as the selected timestamp
+    # to avoid pulling in years of history and compressing the x-axis.
+    ts_date = ts_filter[:10]   # "YYYY-MM-DD"
+    rr_ts_df = qdf(
+        f"""
+        SELECT STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS ts,
+               COALESCE(riskreversal, 0)             AS riskreversal,
+               CAST(sentiment AS VARCHAR)             AS sentiment,
+               CAST(regime    AS VARCHAR)             AS regime
+        FROM {tbl()}
+        WHERE symbol = ? AND expiry = ?
+          AND distance_from_atm = 0
+          AND CAST(timestamp AS DATE) = CAST(? AS DATE)
+        ORDER BY timestamp
+        """,
+        [symbol, expiry[:10], ts_date],
+    )
+
+    return safe_response({
+        "symbol":         symbol,
+        "expiry":         expiry[:10],
+        "spot":           spot,
+        "atm_strike":     atm_strike,
+        # 25-delta RR
+        "rr_25d":         rr_25d,
+        "ce_25d_iv":      ce_25d_iv,
+        "pe_25d_iv":      pe_25d_iv,
+        "ce_25d_strike":  ce_25d_strike,
+        "pe_25d_strike":  pe_25d_strike,
+        # Wing slopes
+        "left_wing_slope":  left_slope,
+        "right_wing_slope": right_slope,
+        "skew_asymmetry":   skew_asymmetry,
+        # ATM row signals from DB
+        "riskreversal": _safe(atm_row.get("riskreversal")),
+        "sentiment":    atm_row.get("sentiment", ""),
+        "regime":       atm_row.get("regime", ""),
+        # Time series
+        "rr_series": to_records(rr_ts_df),
+    })
+
+
+# ===========================================================================
+# Delta-weighted OI (Net MM Delta Exposure)
+# ===========================================================================
+
+@app.get("/api/delta_oi")
+def delta_oi(
+    symbol:    str           = Query(...),
+    expiry:    str           = Query(...),
+    timestamp: Optional[str] = Query(None),
+):
+    """
+    Delta-weighted OI = SUM(delta × OI × lot) across all strikes.
+    Represents the net delta position carried by market makers (they are on the
+    opposite side of retail/hedger flow). A strongly positive value means MMs
+    are net short delta — they buy underlying on rallies (amplifying moves).
+    Returns per-strike breakdown + aggregate per expiry + grand total.
+    """
+    ts_filter = timestamp or latest_ts(symbol)
+    lo, hi    = _ts_lo_hi(ts_filter)
+
+    df = qdf(
+        f"""
+        SELECT
+            CAST(expiry AS VARCHAR)       AS expiry,
+            strike_price,
+            COALESCE(ce_delta, 0)         AS ce_delta,
+            COALESCE(pe_delta, 0)         AS pe_delta,
+            COALESCE(ce_oi,    0)         AS ce_oi,
+            COALESCE(pe_oi,    0)         AS pe_oi,
+            COALESCE(lotsize,  1)         AS lotsize,
+            COALESCE(underlying_price, 0) AS spot,
+            COALESCE(ce_vanna, 0)         AS ce_vanna,
+            COALESCE(pe_vanna, 0)         AS pe_vanna,
+            COALESCE(net_vanna_ex, 0)     AS net_vanna_ex,
+            COALESCE(net_charm_ex, 0)     AS net_charm_ex,
+            COALESCE(net_flow,  0)        AS net_flow
+        FROM {tbl()}
+        WHERE symbol = ? AND expiry = ?
+          AND timestamp BETWEEN ? AND ?
+        ORDER BY strike_price
+        """,
+        [symbol, expiry[:10], lo, hi],
+    )
+    if df.empty:
+        raise HTTPException(404, "No delta OI data")
+
+    lot  = max(int(df["lotsize"].iloc[0]), 1)
+    spot = float(df["spot"].iloc[0])
+
+    # Per-strike delta exposure (MM is short what retail is long)
+    df["ce_delta_oi"]  = df["ce_delta"]        * df["ce_oi"] * lot
+    df["pe_delta_oi"]  = df["pe_delta"].abs()  * df["pe_oi"] * lot
+    df["net_delta_oi"] = df["ce_delta_oi"] - df["pe_delta_oi"]  # net MM delta
+
+    # Scale to millions
+    for c in ["ce_delta_oi", "pe_delta_oi", "net_delta_oi"]:
+        df[c] = df[c] / 1e6
+
+    net_total   = float(df["net_delta_oi"].sum())
+    ce_total    = float(df["ce_delta_oi"].sum())
+    pe_total    = float(df["pe_delta_oi"].sum())
+    net_flow    = float(df["net_flow"].sum())
+    net_vanna   = float(df["net_vanna_ex"].sum())
+    net_charm   = float(df["net_charm_ex"].sum())
+
+    return safe_response({
+        "symbol":        symbol,
+        "expiry":        expiry[:10],
+        "spot":          spot,
+        "net_delta_oi":  round(net_total, 4),
+        "ce_delta_oi":   round(ce_total,  4),
+        "pe_delta_oi":   round(pe_total,  4),
+        "net_flow":      round(net_flow,  2),
+        "net_vanna_ex":  round(net_vanna, 4),
+        "net_charm_ex":  round(net_charm, 4),
+        "interpretation": (
+            "MMs net SHORT delta — buying pressure on rallies (trend amplifier)"
+            if net_total < -0.5 else
+            "MMs net LONG delta — selling pressure on rallies (mean-reverting)"
+            if net_total > 0.5 else
+            "MMs near delta-neutral — balanced book"
+        ),
+        "rows": to_records(df[[
+            "strike_price", "ce_delta", "pe_delta",
+            "ce_oi", "pe_oi", "ce_delta_oi", "pe_delta_oi", "net_delta_oi",
+        ]]),
+    })
+
+
+# ===========================================================================
+# OI-weighted IV (for overview enrichment)
+# ===========================================================================
+
+@app.get("/api/oi_weighted_iv")
+def oi_weighted_iv(
+    symbol:    str           = Query(...),
+    timestamp: Optional[str] = Query(None),
+):
+    """
+    OI-weighted average IV per expiry + overall.
+    More accurate measure of the market's effective implied vol than simple average.
+    """
+    ts_filter = timestamp or latest_ts(symbol)
+    lo, hi    = _ts_lo_hi(ts_filter)
+    df = qdf(
+        f"""
+        SELECT
+            CAST(expiry AS VARCHAR)           AS expiry,
+            COALESCE(days_to_expiry, 0)       AS dte,
+            SUM(COALESCE(ce_iv,0) * COALESCE(ce_oi,0)) AS ce_iv_x_oi,
+            SUM(COALESCE(pe_iv,0) * COALESCE(pe_oi,0)) AS pe_iv_x_oi,
+            SUM(COALESCE(ce_oi,0))            AS total_ce_oi,
+            SUM(COALESCE(pe_oi,0))            AS total_pe_oi
+        FROM {tbl()}
+        WHERE symbol = ? AND timestamp BETWEEN ? AND ?
+          AND COALESCE(ce_iv,0) > 0
+        GROUP BY expiry, days_to_expiry
+        ORDER BY expiry
+        """,
+        [symbol, lo, hi],
+    )
+    if df.empty:
+        raise HTTPException(404, "No IV data")
+
+    df["oi_wtd_ce_iv"] = df.apply(
+        lambda r: r["ce_iv_x_oi"] / r["total_ce_oi"] if r["total_ce_oi"] > 0 else None, axis=1)
+    df["oi_wtd_pe_iv"] = df.apply(
+        lambda r: r["pe_iv_x_oi"] / r["total_pe_oi"] if r["total_pe_oi"] > 0 else None, axis=1)
+    df["oi_wtd_avg_iv"] = df.apply(
+        lambda r: (r["ce_iv_x_oi"] + r["pe_iv_x_oi"]) / (r["total_ce_oi"] + r["total_pe_oi"])
+        if (r["total_ce_oi"] + r["total_pe_oi"]) > 0 else None, axis=1)
+
+    total_ce_x = float(df["ce_iv_x_oi"].sum())
+    total_pe_x = float(df["pe_iv_x_oi"].sum())
+    total_ce   = float(df["total_ce_oi"].sum())
+    total_pe   = float(df["total_pe_oi"].sum())
+    overall    = (total_ce_x + total_pe_x) / (total_ce + total_pe) if (total_ce + total_pe) > 0 else None
+
+    return safe_response({
+        "symbol":         symbol,
+        "overall_oi_iv":  round(overall, 2) if overall else None,
+        "by_expiry":      to_records(df[["expiry","dte","oi_wtd_ce_iv","oi_wtd_pe_iv","oi_wtd_avg_iv"]]),
+    })
+
+
 # ===========================================================================
 # Cache management endpoints
 # ===========================================================================
@@ -1546,10 +2151,108 @@ def icici_margin(
     if result is None:
         raise HTTPException(502, "Margin API call failed")
 
-    # Store in cache (exclude non-serialisable 'raw' field)
+    # Store in memory cache (no disk write — batch endpoint and shutdown handle persistence)
     cache_result = {k: v for k, v in result.items() if k != "raw"}
-    _margin_cache_put(symbol, strike, expiry, option_type, cache_result)
+    _margin_cache_put(symbol, strike, expiry, option_type, cache_result, save=False)
     return {**cache_result, "cached": False}
+
+
+@app.post("/api/icici/margin/batch")
+async def icici_margin_batch(body: Dict):
+    """
+    Fetch margin for a list of option rows server-side with rate-limiting.
+    Accepts: {"rows": [{"symbol","strike","expiry","option_type","ltp","qty"}, ...]}
+    Returns: Server-Sent Events stream with progress updates.
+
+    Each event is JSON:
+      {"type":"progress","done":N,"total":M,"symbol":...,"cached":bool}
+      {"type":"result","idx":N,"margin":float,"span_margin":float,"cached":bool}
+      {"type":"done","total":M,"from_cache":K,"fetched":J}
+      {"type":"error","idx":N,"message":"..."}
+
+    Rate limit: 750 ms between live API calls (~80 calls/min, under Breeze 100/min limit).
+    Cache hits are returned immediately with no delay.
+    """
+    if _icici is None:
+        raise HTTPException(503, "ICICI not configured")
+
+    rows = body.get("rows", [])
+    if not rows:
+        raise HTTPException(400, "rows list is empty")
+
+    DELAY_MS = 750   # ms between live Breeze API calls
+
+    async def event_stream():
+        total      = len(rows)
+        from_cache = 0
+        fetched    = 0
+
+        def ev(d: dict) -> str:
+            return "data: " + json.dumps(d) + "\n\n"
+
+        for idx, row in enumerate(rows):
+            symbol      = str(row.get("symbol", ""))
+            strike      = str(row.get("strike", ""))
+            expiry      = str(row.get("expiry", ""))[:10]
+            option_type = str(row.get("option_type", "")).lower()
+            ltp         = float(row.get("ltp", 0))
+            qty         = int(row.get("qty", 1))
+
+            if not symbol or not strike or not expiry or ltp <= 0:
+                yield ev({"type": "error", "idx": idx, "message": "invalid row"})
+                continue
+
+            # Progress heartbeat (non-blocking, sent before each row)
+            yield ev({"type": "progress", "done": idx, "total": total,
+                      "symbol": symbol, "strike": strike})
+
+            # Cache hit — return instantly, no delay
+            hit = _margin_cache_get(symbol, strike, expiry, option_type)
+            if hit is not None:
+                from_cache += 1
+                payload = {k: v for k, v in hit.items() if k != "raw"}
+                payload.update({"type": "result", "idx": idx, "cached": True})
+                yield ev(payload)
+                continue
+
+            # Live fetch — throttle between calls
+            try:
+                await asyncio.sleep(DELAY_MS / 1000.0)
+                exp_date  = datetime.strptime(expiry, "%Y-%m-%d").date()
+                ic_symbol = _to_icici_ticker(symbol)
+
+                # Run blocking Breeze call in thread pool so event loop stays free
+                loop   = asyncio.get_event_loop()
+                result = await loop.run_in_executor(
+                    None,
+                    lambda s=ic_symbol, st=strike, e=exp_date, ot=option_type, l=ltp, q=qty:
+                        _icici.get_margin_for_option(
+                            symbol=s, strike=st, expiry=e,
+                            option_type=ot, ltp=l, qty=q, action="sell",
+                        )
+                )
+                if result:
+                    cache_result = {k: v for k, v in result.items() if k != "raw"}
+                    # save=False — single save after full batch
+                    _margin_cache_put(symbol, strike, expiry, option_type,
+                                      cache_result, save=False)
+                    fetched += 1
+                    payload = dict(cache_result)
+                    payload.update({"type": "result", "idx": idx, "cached": False})
+                    yield ev(payload)
+                else:
+                    yield ev({"type": "error", "idx": idx, "message": "API returned None"})
+            except Exception as exc:
+                yield ev({"type": "error", "idx": idx, "message": str(exc)})
+
+        # One disk write for the whole batch
+        threading.Thread(target=lambda: _margin_cache_save(verbose=True),
+                         daemon=True).start()
+        yield ev({"type": "done", "total": total,
+                  "from_cache": from_cache, "fetched": fetched})
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @app.post("/api/icici/margin/refresh")
