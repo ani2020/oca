@@ -177,6 +177,8 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </nav>
   <div class="topbar-right">
     <div class="status-dot"></div>
+    <span id="cacheRefreshBtn" onclick="refreshDbCache()" style="font-family:var(--mono);font-size:9px;padding:3px 8px;border-radius:10px;cursor:pointer;border:1px solid var(--border);color:var(--muted);letter-spacing:.06em;transition:all .15s" title="Clear DB cache — re-fetch symbols/expiries/timestamps after new import">↻ DB</span>
+    <span id="marginRefreshBtn" onclick="refreshMarginCache()" style="font-family:var(--mono);font-size:9px;padding:3px 8px;border-radius:10px;cursor:pointer;border:1px solid var(--border);color:var(--muted);letter-spacing:.06em;transition:all .15s" title="Clear margin cache — re-fetch from ICICI Breeze">↻ MARGIN</span>
     <span id="iciciStatusBadge" onclick="openIciciModal()">ICICI: OFF</span>
   </div>
 </header>
@@ -1194,7 +1196,38 @@ const VIEW_INIT={
   settings:()=>loadSettings(),
 };
 
+// ── Cache helpers ────────────────────────────────────────────────
+async function refreshDbCache(){
+  const btn=document.getElementById('cacheRefreshBtn');
+  btn.textContent='↻ …';btn.style.color='var(--amber)';
+  try{
+    await fetch('/api/cache/refresh',{method:'POST'});
+    btn.textContent='✓ DB';btn.style.color='var(--green)';
+    // Repopulate all dropdowns from fresh DB data
+    await initSymbols();
+    loadOverview().catch(()=>{});
+  }catch(e){
+    btn.textContent='✗ DB';btn.style.color='var(--red)';
+  }
+  setTimeout(()=>{btn.textContent='↻ DB';btn.style.color='';},3000);
+}
+
+async function refreshMarginCache(){
+  const btn=document.getElementById('marginRefreshBtn');
+  btn.textContent='↻ …';btn.style.color='var(--amber)';
+  try{
+    const r=await fetch('/api/icici/margin/refresh',{method:'POST'});
+    const d=await r.json();
+    btn.textContent='✓ MARGIN';btn.style.color='var(--green)';
+    console.log('Margin cache cleared:',d.cleared,'entries');
+  }catch(e){
+    btn.textContent='✗ MARGIN';btn.style.color='var(--red)';
+  }
+  setTimeout(()=>{btn.textContent='↻ MARGIN';btn.style.color='';},3000);
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────
+
 (async function init(){
   loadSettings();
   await initSymbols();

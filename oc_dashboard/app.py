@@ -89,24 +89,43 @@ def _to_icici_ticker(nse_symbol: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# DuckDB — single read-only connection
+# DuckDB — JIT connection: open per-query, close immediately after.
+# This ensures the file lock is released between requests so the import
+# script can acquire a write lock without stopping the dashboard.
 # ---------------------------------------------------------------------------
-_con: Optional[duckdb.DuckDBPyConnection] = None
-
-
-def get_con() -> duckdb.DuckDBPyConnection:
-    global _con
-    if _con is None:
-        _con = duckdb.connect(_DB_FILE, read_only=True)
-    return _con
-
 
 def qdf(sql: str, params: list = []) -> pd.DataFrame:
+    """Open a short-lived read-only DuckDB connection, run the query, close."""
+    con = None
     try:
-        return get_con().execute(sql, params).df()
+        con = duckdb.connect(_DB_FILE, read_only=True)
+        return con.execute(sql, params).df()
     except Exception as exc:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        if con:
+            try:
+                con.close()
+            except Exception:
+                pass
+
+
+def _qraw(sql: str, params: list = []):
+    """Like qdf but returns raw fetchone() result — used for scalar queries."""
+    con = None
+    try:
+        con = duckdb.connect(_DB_FILE, read_only=True)
+        return con.execute(sql, params).fetchone()
+    except Exception as exc:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=str(exc))
+    finally:
+        if con:
+            try:
+                con.close()
+            except Exception:
+                pass
 
 
 def _safe(v: Any) -> Any:
@@ -209,10 +228,124 @@ def expiry_clause(exp_str: str, col: str = "expiry") -> tuple[str, list]:
     return f" {col}  = ? ", [date_part]
 
 
+# ===========================================================================
+# In-memory cache — keyed lookups for data that changes only on new imports
+# ===========================================================================
+import threading
+import pickle
+import time
+
+_cache_lock   = threading.Lock()
+_cache_store: Dict[str, Any] = {}   # key → cached value (no expiry — manual refresh)
+_cache_populated: set = set()        # keys that have been set at least once
+
+
+def _cache_get(key: str) -> Optional[Any]:
+    with _cache_lock:
+        return _cache_store.get(key)
+
+
+def _cache_set(key: str, value: Any) -> None:
+    with _cache_lock:
+        _cache_store[key] = value
+        _cache_populated.add(key)
+
+
+def cache_clear_all() -> None:
+    """Clear the in-memory DB cache (symbols, expiries, timestamps, overview)."""
+    with _cache_lock:
+        _cache_store.clear()
+        _cache_populated.clear()
+    print("  ✓ DB cache cleared")
+
+
+# ===========================================================================
+# Margin cache — file-persisted, same-day TTL, separate refresh
+# File: margin_cache.pkl next to oc.duckdb
+# Key: (symbol, strike, expiry_date, option_type)
+# Value: {"result": {...}, "date": "YYYY-MM-DD"}
+# ===========================================================================
+
+_margin_cache_lock  = threading.Lock()
+_margin_cache_store: Dict[tuple, Dict] = {}
+_MARGIN_CACHE_FILE  = "margin_cache.pkl"
+
+
+def _margin_cache_path() -> Path:
+    return Path(_DB_FILE).parent / _MARGIN_CACHE_FILE
+
+
+def _margin_cache_load() -> None:
+    """Load margin cache from disk on startup."""
+    global _margin_cache_store
+    p = _margin_cache_path()
+    if not p.exists():
+        return
+    try:
+        # Only load if file was created today
+        file_date = datetime.fromtimestamp(p.stat().st_mtime).date()
+        if file_date != date.today():
+            print(f"  ℹ Margin cache is from {file_date}, will be rebuilt today")
+            p.unlink(missing_ok=True)
+            return
+        with open(p, "rb") as f:
+            data = pickle.load(f)
+        # Filter to today's entries only
+        today = date.today().isoformat()
+        valid = {k: v for k, v in data.items() if v.get("date") == today}
+        with _margin_cache_lock:
+            _margin_cache_store = valid
+        print(f"  ✓ Loaded {len(valid)} margin cache entries from {p}")
+    except Exception as exc:
+        print(f"  ⚠ Could not load margin cache: {exc}")
+
+
+def _margin_cache_save() -> None:
+    """Persist current margin cache to disk."""
+    p = _margin_cache_path()
+    try:
+        with _margin_cache_lock:
+            data = dict(_margin_cache_store)
+        with open(p, "wb") as f:
+            pickle.dump(data, f)
+        print(f"  ✓ Margin cache saved ({len(data)} entries) to {p}")
+    except Exception as exc:
+        print(f"  ⚠ Could not save margin cache: {exc}")
+
+
+def _margin_cache_get(symbol: str, strike: str, expiry: str, option_type: str) -> Optional[Dict]:
+    """Return cached margin result if present and from today, else None."""
+    key = (symbol.upper(), str(strike), expiry[:10], option_type.lower())
+    with _margin_cache_lock:
+        entry = _margin_cache_store.get(key)
+    if entry and entry.get("date") == date.today().isoformat():
+        return entry["result"]
+    return None
+
+
+def _margin_cache_put(symbol: str, strike: str, expiry: str, option_type: str, result: Dict) -> None:
+    """Store a margin result in cache (keyed to today's date)."""
+    key = (symbol.upper(), str(strike), expiry[:10], option_type.lower())
+    entry = {"result": result, "date": date.today().isoformat()}
+    with _margin_cache_lock:
+        _margin_cache_store[key] = entry
+    # Async save to disk (don't block the request)
+    threading.Thread(target=_margin_cache_save, daemon=True).start()
+
+
+def _margin_cache_clear() -> int:
+    """Clear all margin cache entries. Returns count cleared."""
+    with _margin_cache_lock:
+        count = len(_margin_cache_store)
+        _margin_cache_store.clear()
+    p = _margin_cache_path()
+    p.unlink(missing_ok=True)
+    print(f"  ✓ Margin cache cleared ({count} entries)")
+    return count
+
+
 def latest_ts(symbol: str) -> str:
-    row = get_con().execute(
-        f"SELECT MAX(timestamp) FROM {tbl()} WHERE symbol = ?", [symbol]
-    ).fetchone()
+    row = _qraw(f"SELECT MAX(timestamp) FROM {tbl()} WHERE symbol = ?", [symbol])
     if not row or row[0] is None:
         raise HTTPException(404, f"No data for {symbol}")
     return str(row[0])
@@ -408,14 +541,19 @@ def _gamma_analysis_inline(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    print(f"✓ Connecting to {_DB_FILE} …")
-    get_con()
+    # Verify DB exists and is readable (quick smoke-test, no persistent lock held)
+    try:
+        con = duckdb.connect(_DB_FILE, read_only=True)
+        con.close()
+        print(f"✓ DB verified: {_DB_FILE}")
+    except Exception as exc:
+        print(f"✗ DB open failed: {exc}")
     _load_icici_ticker_map()
     _try_init_icici()
+    _margin_cache_load()          # load persisted margin cache from disk
     print("✓ Dashboard ready — open http://localhost:8000")
     yield
-    if _con:
-        _con.close()
+    _margin_cache_save()          # persist margin cache on clean shutdown
 
 
 class _SafeJSONEncoder(json.JSONEncoder):
@@ -492,8 +630,13 @@ app.add_middleware(
 
 @app.get("/api/symbols")
 def list_symbols():
+    cached = _cache_get("symbols")
+    if cached is not None:
+        return cached
     df = qdf(f"SELECT DISTINCT symbol FROM {tbl()} ORDER BY symbol")
-    return df["symbol"].tolist()
+    result = df["symbol"].tolist()
+    _cache_set("symbols", result)
+    return result
 
 
 @app.get("/api/timestamps")
@@ -501,13 +644,11 @@ def list_timestamps(
     symbol: str           = Query(...),
     expiry: Optional[str] = Query(None),
 ):
-    """
-    List distinct timestamps for a symbol.
-    Optional expiry filter ensures timestamps shown actually have data
-    for the selected expiry (timestamps can differ slightly per ticker).
-    """
-    # Return timestamps truncated to the minute (HH:MM) to avoid
-    # per-second differences across tickers. Queries use a ±10-min window.
+    """List distinct timestamps (minute-truncated). Cached per (symbol, expiry)."""
+    cache_key = f"ts:{symbol}:{expiry[:10] if expiry else 'all'}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
     if expiry:
         df = qdf(
             f"SELECT DISTINCT STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS ts "
@@ -521,7 +662,9 @@ def list_timestamps(
             f"FROM {tbl()} WHERE symbol = ? ORDER BY ts DESC",
             [symbol],
         )
-    return df["ts"].tolist()
+    result = df["ts"].tolist()
+    _cache_set(cache_key, result)
+    return result
 
 
 @app.get("/api/expiries")
@@ -530,7 +673,12 @@ def list_expiries(
     timestamp:   Optional[str] = Query(None),
     future_only: bool          = Query(True),
 ):
-    """List expiries for a symbol. By default returns only current+future expiries."""
+    """List expiries for a symbol. Cached per (symbol, future_only) when no timestamp filter."""
+    cache_key = f"exp:{symbol}:{future_only}" if not timestamp else None
+    if cache_key:
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
     today = date.today().isoformat()
     base = f"SELECT DISTINCT CAST(expiry AS VARCHAR) AS exp FROM {tbl()} WHERE symbol = ?"
     params = [symbol]
@@ -541,19 +689,25 @@ def list_expiries(
         base += " AND expiry >= ? "
         params.append(today)
     df = qdf(base + " ORDER BY exp", params)
-    return df["exp"].tolist()
+    result = df["exp"].tolist()
+    if cache_key:
+        _cache_set(cache_key, result)
+    return result
 
 
 @app.get("/api/lot_sizes")
 def lot_sizes():
     """Return lot_size for each symbol (used by frontend for strike step)."""
+    cached = _cache_get("lot_sizes")
+    if cached is not None:
+        return cached
     df = qdf(
         f"SELECT symbol, MAX(COALESCE(lotsize, 1)) AS lot_size "
         f"FROM {tbl()} GROUP BY symbol ORDER BY symbol"
     )
-    if df.empty:
-        return {}
-    return {row["symbol"]: int(row["lot_size"]) for row in df.to_dict(orient="records")}
+    result = {} if df.empty else {row["symbol"]: int(row["lot_size"]) for row in df.to_dict(orient="records")}
+    _cache_set("lot_sizes", result)
+    return result
 
 
 # ===========================================================================
@@ -562,6 +716,9 @@ def lot_sizes():
 
 @app.get("/api/overview")
 def overview():
+    cached = _cache_get("overview")
+    if cached is not None:
+        return cached
     sql = f"""
     WITH latest AS (
         SELECT symbol, MAX(timestamp) AS ts
@@ -592,7 +749,9 @@ def overview():
         lambda r: round(r["total_pe_oi"] / r["total_ce_oi"], 3)
         if r["total_ce_oi"] else None, axis=1,
     )
-    return to_records(df)
+    result = to_records(df)
+    _cache_set("overview", result)
+    return result
 
 
 @app.get("/api/snapshot")
@@ -1285,6 +1444,40 @@ def delta_screener(
 
 
 # ===========================================================================
+# Cache management endpoints
+# ===========================================================================
+
+@app.post("/api/cache/refresh")
+def cache_refresh():
+    """
+    Clear the in-memory DB cache (symbols, expiries, timestamps, lot_sizes, overview).
+    Next requests will re-query the DB and repopulate. Use after a new OC import.
+    Does NOT clear the margin cache — use /api/icici/margin/refresh for that.
+    """
+    cache_clear_all()
+    return {"status": "ok", "message": "DB cache cleared — next requests will refresh from DB"}
+
+
+@app.get("/api/cache/status")
+def cache_status():
+    """Show what is currently cached."""
+    with _cache_lock:
+        keys = list(_cache_store.keys())
+    with _margin_cache_lock:
+        margin_count = len(_margin_cache_store)
+        today = date.today().isoformat()
+        margin_today = sum(1 for v in _margin_cache_store.values() if v.get("date") == today)
+    return {
+        "db_cache_keys":     keys,
+        "db_cache_count":    len(keys),
+        "margin_cache_total": margin_count,
+        "margin_cache_today": margin_today,
+        "margin_cache_file":  str(_margin_cache_path()),
+        "margin_cache_file_exists": _margin_cache_path().exists(),
+    }
+
+
+# ===========================================================================
 # ICICI
 # ===========================================================================
 
@@ -1324,13 +1517,27 @@ def icici_margin(
     ltp:         float = Query(...),
     qty:         int   = Query(...),
     action:      str   = Query("sell"),
+    force:       bool  = Query(False),   # force=true bypasses cache
 ):
+    """
+    Fetch margin for one option leg.
+    Results are cached by (symbol, strike, expiry, option_type) for the trading day.
+    Cached value is returned instantly on repeat calls — no Breeze API hit.
+    Use force=true to bypass cache and re-fetch from Breeze.
+    """
     if _icici is None:
         raise HTTPException(503, "ICICI not configured")
     try:
         exp = datetime.strptime(expiry[:10], "%Y-%m-%d").date()
     except ValueError:
         raise HTTPException(400, f"Bad expiry '{expiry}'")
+
+    # Check cache first (skip if force=true)
+    if not force:
+        cached = _margin_cache_get(symbol, strike, expiry, option_type)
+        if cached is not None:
+            return {**cached, "cached": True}
+
     ic_symbol = _to_icici_ticker(symbol)
     result = _icici.get_margin_for_option(
         symbol=ic_symbol, strike=strike, expiry=exp,
@@ -1338,7 +1545,26 @@ def icici_margin(
     )
     if result is None:
         raise HTTPException(502, "Margin API call failed")
-    return result
+
+    # Store in cache (exclude non-serialisable 'raw' field)
+    cache_result = {k: v for k, v in result.items() if k != "raw"}
+    _margin_cache_put(symbol, strike, expiry, option_type, cache_result)
+    return {**cache_result, "cached": False}
+
+
+@app.post("/api/icici/margin/refresh")
+def icici_margin_refresh():
+    """
+    Clear the margin cache (both in-memory and the .pkl file on disk).
+    Use when you want to re-fetch fresh margin values from ICICI Breeze,
+    e.g. after a significant market move or at the start of a new trading day.
+    """
+    count = _margin_cache_clear()
+    return {
+        "status": "ok",
+        "cleared": count,
+        "message": f"Margin cache cleared ({count} entries). Next margin requests will re-fetch from Breeze.",
+    }
 
 
 # ===========================================================================
