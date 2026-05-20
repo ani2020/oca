@@ -11,7 +11,7 @@
   --bg:#080b12;--surf:#0e1320;--card:#131b2a;--card2:#182035;
   --border:#1e2d47;--border2:#243550;--acc:#00c8f0;--acc2:#f07000;
   --acc3:#8b5cf6;--green:#10b981;--red:#f43f5e;--amber:#f59e0b;
-  --text:#dde4f0;--muted:#5a7090;
+  --text:#dde4f0;--muted:#a8b4c7;
   --mono:'JetBrains Mono',monospace;--sans:'DM Sans',sans-serif;
 }
 *{box-sizing:border-box;margin:0;padding:0}
@@ -183,7 +183,45 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
 .subtab.active{color:var(--acc);border-bottom-color:var(--acc)}
 .subtab:hover:not(.active){color:var(--text)}
 .subtab-panel{display:none}.subtab-panel.active{display:block}
+
+/* ── VIX gauge ── */
+.vix-gauge{display:flex;flex-direction:column;align-items:center;padding:16px}
+.vix-number{font-family:var(--mono);font-size:48px;font-weight:600;line-height:1}
+.vix-level{font-family:var(--mono);font-size:11px;padding:3px 12px;border-radius:10px;margin-top:6px;letter-spacing:.08em}
+.vix-low     {background:rgba(16,185,129,.15);color:var(--green)}
+.vix-normal  {background:rgba(0,200,240,.15);color:var(--acc)}
+.vix-elevated{background:rgba(245,158,11,.15);color:var(--amber)}
+.vix-extreme {background:rgba(244,63,94,.15);color:var(--red)}
+/* ── Clock / market status ── */
+.market-clock{font-family:var(--mono);font-size:10px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.market-status{padding:2px 7px;border-radius:8px;font-size:9px;font-weight:600;letter-spacing:.06em}
+.ms-open{background:rgba(16,185,129,.15);color:var(--green)}
+.ms-pre {background:rgba(245,158,11,.15);color:var(--amber)}
+.ms-post{background:rgba(0,200,240,.1);color:var(--muted)}
+.ms-closed{background:rgba(90,112,144,.1);color:var(--muted)}
+/* ── DTE badge ── */
+.dte-badge{font-family:var(--mono);font-size:9px;padding:2px 8px;border-radius:8px;font-weight:600;letter-spacing:.05em}
+.dte-far  {background:rgba(16,185,129,.15);color:var(--green)}
+.dte-mid  {background:rgba(245,158,11,.15);color:var(--amber)}
+.dte-near {background:rgba(244,63,94,.15);color:var(--red)}
+/* ── OI walls table ── */
+.wall-strong{color:var(--green);font-weight:600}
+.wall-medium{color:var(--amber)}
+.wall-weak  {color:var(--muted)}
+/* ── Option lens greeks card ── */
+.greeks-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.greek-row{display:flex;justify-content:space-between;padding:4px 8px;
+  border-radius:4px;background:var(--surf);border:1px solid var(--border)}
+.greek-label{font-family:var(--mono);font-size:8px;color:var(--muted);letter-spacing:.08em}
+.greek-val  {font-family:var(--mono);font-size:11px;font-weight:500}
+.ltp-s-prem{background:rgba(16,185,129,.12);color:var(--green);
+  padding:1px 6px;border-radius:6px;font-size:9px;font-family:var(--mono)}
+.ltp-s-disc{background:rgba(244,63,94,.12);color:var(--red);
+  padding:1px 6px;border-radius:6px;font-size:9px;font-family:var(--mono)}
 </style>
+</head>
+<body>
+
 </head>
 <body>
 
@@ -197,9 +235,14 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="nav-btn" data-view="iv">IV ANALYSIS</button>
     <button class="nav-btn" data-view="movers">MOVERS</button>
     <button class="nav-btn" data-view="trend">STRIKE TREND</button>
-    <button class="nav-btn" data-view="delta">DELTA SCREENER</button>
+    <button class="nav-btn" data-view="delta">OPTION SCREENER</button>
     <button class="nav-btn" data-view="settings">SETTINGS</button>
+    <button class="nav-btn" data-view="vix">VIX</button>
+    <button class="nav-btn" data-view="walls">OI WALLS</button>
+    <button class="nav-btn" data-view="market">MARKET INFO</button>
+    <button class="nav-btn" data-view="divergence">DIVERGENCE</button>
   </nav>
+  <div id="marketClock" class="market-clock" style="margin-right:8px"></div>
   <div class="topbar-right">
     <div class="status-dot"></div>
     <span id="cacheRefreshBtn" onclick="refreshDbCache()" title="Clear DB cache after new import"
@@ -250,6 +293,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   <div class="filter-bar">
     <span class="fl">SYMBOL</span><select id="gexSymbol"></select>
     <span class="fl">EXPIRY</span><select id="gexExpiry"></select>
+    <span id="gexExpiryDteBadge"></span>
     <label class="chk-label"><input type="checkbox" id="gexExpiryShowPast" onchange="reloadExpiries('gex')"> PAST</label>
     <span class="fl">TIMESTAMP</span><select id="gexTimestamp"></select>
     <span class="fl">RANGE %</span>
@@ -285,6 +329,11 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       <div class="card-title">NET GEX ACROSS STRIKES</div>
       <div id="netGexChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div>
     </div>
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">STRIKES TABLE <span class="badge">PCR + GEX</span></div>
+      <div class="tw" id="gexStrikeTable"></div>
+    </div>
+
     <div id="gammaAnalysisCard" style="display:none">
       <div class="sh">GAMMA ANALYSIS</div>
       <div class="ga-card" id="gaContent"></div>
@@ -342,9 +391,32 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <div class="card"><div class="card-title">PE OI CHANGE BY STRIKE</div>
       <div id="peOiChart" class="chart"><div class="loading"><div class="spinner"></div>Select symbol</div></div></div>
   </div>
+  <div class="subtabs">
+    <button class="subtab active" data-stab="oi-signals">SIGNALS</button>
+    <button class="subtab" data-stab="oi-history">EOD HISTORY</button>
+  </div>
+  <div class="subtab-panel active" id="stab-oi-signals">
   <div class="card">
-    <div class="card-title">BUILD-UP / COVERING SIGNALS</div>
+    <div class="card-title">BUILD-UP / COVERING SIGNALS
+      <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:8px">sorted by |ΔOI|  ·  threshold: <span id="oiThresholdLabel">10</span> lots</span>
+    </div>
     <div class="tw" id="oiSignalTable"></div>
+  </div>
+  </div>
+  <div class="subtab-panel" id="stab-oi-history">
+    <div class="filter-bar">
+      <span class="fl">DAYS</span><input type="number" id="oiHistDays" value="5" min="2" max="30" style="width:55px">
+      <span class="fl">VIEW</span>
+      <div class="toggle-group" id="oiHistViewGroup">
+        <button class="active" data-hv="oi">OI</button>
+        <button data-hv="iv">IV</button>
+      </div>
+      <button class="btn" id="btnOiHist">LOAD</button>
+    </div>
+    <div class="card">
+      <div class="card-title">MULTI-DAY OI/IV HEATMAP <span class="badge">strike × date</span></div>
+      <div id="oiHistChart" class="chart-lg"><div class="empty">Click LOAD first</div></div>
+    </div>
   </div>
 </div>
 
@@ -393,6 +465,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   <div class="filter-bar">
     <span class="fl">SYMBOL</span><select id="ivSymbol"></select>
     <span class="fl">EXPIRY</span><select id="ivExpiry"></select>
+    <span id="ivExpiryDteBadge"></span>
     <label class="chk-label"><input type="checkbox" id="ivExpiryShowPast" onchange="reloadExpiries('iv')"> PAST</label>
     <span class="fl">TIMESTAMP</span><select id="ivTimestamp"></select>
     <span class="fl">FILTER</span>
@@ -485,12 +558,14 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   <div class="filter-bar">
     <span class="fl">SYMBOL</span><select id="trendSymbol"></select>
     <span class="fl">EXPIRY</span><select id="trendExpiry"></select>
+    <span id="trendExpiryDteBadge"></span>
     <label class="chk-label"><input type="checkbox" id="trendExpiryShowPast" onchange="reloadExpiries('trend')"> PAST</label>
     <span class="fl">ATM DIST</span><select id="trendAtmDist" style="min-width:120px"></select>
     <span id="trendStrikeDisplay" style="font-family:var(--mono);font-size:11px;color:var(--acc)"></span>
     <input type="hidden" id="trendStrike">
-    <span class="fl">METRIC</span>
-    <select id="trendMetric">
+    <span class="fl">TIMESTAMP</span><select id="trendTimestamp" style="min-width:140px"></select>
+    <span class="fl">M1 (LEFT)</span>
+    <select id="trendM1">
       <option value="ce_ltp">CE LTP</option><option value="pe_ltp">PE LTP</option>
       <option value="ce_iv">CE IV</option><option value="pe_iv">PE IV</option>
       <option value="ce_volume">CE Volume</option><option value="pe_volume">PE Volume</option>
@@ -503,8 +578,25 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       <option value="ce_vanna">CE Vanna</option><option value="ce_charm">CE Charm</option>
       <option value="riskreversal">Risk Reversal</option><option value="net_flow">Net Flow</option>
     </select>
+    <span class="fl">M2 (RIGHT)</span>
+    <select id="trendM2" style="min-width:100px">
+      <option value="">— none —</option>
+      <option value="ce_oi">CE OI</option><option value="pe_oi">PE OI</option>
+      <option value="ce_volume">CE Volume</option><option value="pe_volume">PE Volume</option>
+      <option value="ce_iv">CE IV</option><option value="pe_iv">PE IV</option>
+      <option value="ce_TPrice">CE TheoPrice</option><option value="pe_TPrice">PE TheoPrice</option>
+      <option value="riskreversal">Risk Rev</option>
+    </select>
+    <span class="fl">M3</span>
+    <select id="trendM3" style="min-width:100px">
+      <option value="">— none —</option>
+      <option value="ce_oi">CE OI</option><option value="pe_oi">PE OI</option>
+      <option value="ce_volume">CE Volume</option><option value="pe_volume">PE Volume</option>
+      <option value="net_flow">Net Flow</option>
+    </select>
     <button class="btn" id="btnTrend">LOAD</button>
   </div>
+  <div id="trendSnapshotCard" style="margin-top:0"></div>
   <div class="card">
     <div class="card-title" id="trendChartTitle">STRIKE TIME-SERIES</div>
     <div id="trendChart" class="chart-lg"><div class="loading"><div class="spinner"></div>Select filters</div></div>
@@ -534,6 +626,12 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="btn" id="btnDs">LOAD</button>
   </div>
   <div class="kpi-row" id="dsKpis"></div>
+  <div class="subtabs">
+    <button class="subtab active" data-stab="ds-screener">DELTA SCREENER</button>
+    <button class="subtab" data-stab="ds-premium">PREMIUM LENS</button>
+  </div>
+
+  <div class="subtab-panel active" id="stab-ds-screener">
   <div class="card">
     <div class="card-title">
       OPTIONS IN Δ RANGE <span id="dsRangeLabel" class="badge">5–30</span>
@@ -542,6 +640,74 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       </span>
     </div>
     <div class="tw" id="dsTable"><div class="loading"><div class="spinner"></div>Select filters and click LOAD</div></div>
+  </div>
+  </div><!-- /stab-ds-screener -->
+
+  <div class="subtab-panel" id="stab-ds-premium">
+    <div class="filter-bar">
+      <span class="fl">SYMBOL</span><select id="plSymbol"></select>
+      <span class="fl">EXPIRY</span><select id="plExpiry"></select>
+      <span id="plExpiryDteBadge"></span>
+      <label class="chk-label"><input type="checkbox" id="plExpiryShowPast" onchange="reloadExpiries('pl')"> PAST</label>
+      <span class="fl">TIMESTAMP</span><select id="plTimestamp" style="min-width:140px"></select>
+      <span class="fl">MIN OI</span><input type="number" id="plMinOi" value="0" style="width:65px">
+      <span class="fl">RATIO OUTSIDE</span>
+      <input type="number" id="plMinRatio" value="0.85" step="0.05" style="width:60px" title="Show CE/PE where ltp/theoretical < this">
+      <span style="font-family:var(--mono);font-size:10px;color:var(--muted)">–</span>
+      <input type="number" id="plMaxRatio" value="1.15" step="0.05" style="width:60px" title="or > this">
+      <button class="btn" id="btnPl">LOAD</button>
+    </div>
+    <div class="card">
+      <div class="card-title">PREMIUM RICHNESS / CHEAPNESS
+        <span class="badge badge-g">RICH &gt; max ratio</span>
+        <span class="badge badge-r" style="margin-left:4px">CHEAP &lt; min ratio</span>
+      </div>
+      <div class="tw" id="plTable"><div class="loading"><div class="spinner"></div>Select filters and click LOAD</div></div>
+    </div>
+  </div><!-- /stab-ds-premium -->
+
+</div>
+
+<!-- ══ DIVERGENCE ════════════════════════════════════════════ -->
+<div class="view" id="view-divergence">
+  <div class="filter-bar">
+    <span class="fl">MODE</span>
+    <div class="toggle-group" id="divModeGroup">
+      <button class="active" data-dm="snapshot">SNAPSHOT</button>
+      <button data-dm="intraday">INTRADAY</button>
+    </div>
+    <span class="fl">FILTER</span>
+    <div class="toggle-group" id="divFilterGroup">
+      <button class="active" data-ft="all">ALL</button>
+      <button data-ft="index">INDEX</button>
+      <button data-ft="stock">STOCK</button>
+    </div>
+    <span class="fl">MIN SPOT %</span>
+    <input type="number" id="divMinSpot" value="0.03" step="0.01" style="width:60px">
+    <span class="fl">MIN PREM %</span>
+    <input type="number" id="divMinPrem" value="0.5" step="0.1" style="width:60px">
+    <button class="btn" id="btnDiv">LOAD</button>
+  </div>
+  <div class="card">
+    <div class="card-title">DIVERGENCE SIGNALS <span class="badge">ranked by magnitude</span>
+      <span style="margin-left:8px">
+        <input type="text" id="divSearch" placeholder="filter symbol…"
+          oninput="filterTableBySymbol('divTable',this.value)"
+          style="width:120px;font-size:10px;padding:3px 7px">
+      </span>
+      <span id="divLegendBtn" onclick="toggleDivLegend()" style="margin-left:auto;font-family:var(--mono);font-size:9px;color:var(--acc);cursor:pointer">ℹ LEGEND</span>
+    </div>
+    <div id="divLegend" style="display:none;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:4px;margin-bottom:8px;font-family:var(--mono);font-size:10px;line-height:1.8">
+      <strong style="color:var(--acc)">HOW TO READ:</strong> Each row is one symbol (not one strike). ATM CE+PE options are averaged across expiries to give one signal per underlying.<br>
+      <span class="down">⬆ BULL HEDGE</span> — Spot went UP but PE (put) premium also went UP. Smart money buying puts on a rally — bearish hedge / distribution signal.<br>
+      <span class="up">⬇ BEAR SQUEEZE</span> — Spot went DOWN but CE (call) premium went UP. Call buying on a dip — potential short squeeze or bullish reversal bet.<br>
+      <span style="color:var(--amber)">⚡ IV SPIKE</span> — Spot barely moved but IV jumped ≥1%. Event anticipation — earnings, results, news not yet public.<br>
+      <span class="down">🔴 SMART SELL</span> — Spot UP but CE premium DOWN. Call sellers active on rally — strong resistance / ceiling.<br>
+      <span class="up">🟢 SMART BUY</span> — Spot DOWN but PE premium DOWN. Put sellers active on dip — strong support / floor signal.<br>
+      <strong>MAGNITUDE</strong> = |spot%| + |premium%| — higher = stronger divergence.<br>
+      <strong>MODE: SNAPSHOT</strong> = last 2 OC snapshots (minutes apart). <strong>INTRADAY</strong> = today's first snapshot vs latest.
+    </div>
+    <div class="tw" id="divTable"><div class="loading"><div class="spinner"></div>Select mode and click LOAD</div></div>
   </div>
 </div>
 
@@ -559,6 +725,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       <div class="card-title">DELTA SCREENER</div>
       <div class="stg-row"><label>MIN OI (HIDE ROWS BELOW)</label><input type="number" id="stgDsMinOi" value="0" step="100"></div>
       <div class="stg-row"><label>MIN VOLUME (HIDE ROWS BELOW)</label><input type="number" id="stgDsMinVol" value="0" step="10"></div>
+      <div class="stg-row"><label>MIN OI CHANGE (OI SIGNALS)</label><input type="number" id="stgMinOiChange" value="10" step="5" title="Hide OI signal rows where absolute CE+PE OI change is below this threshold"></div>
       <div class="stg-row"><label>BID-ASK WARN THRESHOLD (%)</label><input type="number" id="stgBaqWarn" value="5" step="0.5"></div>
       <div class="stg-row"><label>BID-ASK BAD THRESHOLD (%)</label><input type="number" id="stgBaqBad" value="15" step="1"></div>
     </div>
@@ -577,7 +744,94 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </div>
 </div>
 
+
+<!-- ══ VIX ═══════════════════════════════════════════════════════ -->
+<div class="view" id="view-vix">
+  <div class="filter-bar">
+    <span class="fl">LOOKBACK DAYS</span>
+    <input type="number" id="vixLookback" value="30" min="5" max="365" style="width:70px">
+    <button class="btn" id="btnVix">REFRESH</button>
+  </div>
+  <div class="g2" style="margin-bottom:12px">
+    <div class="card" style="display:flex;align-items:center;justify-content:center">
+      <div id="vixGauge"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">INDIA VIX HISTORY</div>
+      <div id="vixChart" class="chart"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ OI WALLS ═══════════════════════════════════════════════════ -->
+<div class="view" id="view-walls">
+  <div class="filter-bar">
+    <span class="fl">FILTER</span>
+    <div class="toggle-group" id="wallsFilterGroup">
+      <button class="active" data-ft="all">ALL</button>
+      <button data-ft="index">INDEX</button>
+      <button data-ft="stock">STOCK</button>
+    </div>
+    <button class="btn" id="btnWalls">REFRESH</button>
+  </div>
+  <div class="kpi-row" id="oiWallsKpis"></div>
+  <div class="card">
+    <div class="card-title">CALL &amp; PUT WALLS — DISTANCE FROM SPOT
+      <span class="badge" style="margin-left:6px">STRENGTH = max OI ÷ avg OI</span>
+      <span style="margin-left:auto">
+        <input type="text" id="wallsSearch" placeholder="filter symbol…"
+          oninput="filterTableBySymbol('oiWallsTable',this.value)"
+          style="width:120px;font-size:10px;padding:3px 7px">
+      </span>
+    </div>
+    <div class="tw" id="oiWallsTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+  </div>
+</div>
+
+
+<!-- ══ MARKET INFO ════════════════════════════════════════════════ -->
+<div class="view" id="view-market">
+  <div class="filter-bar">
+    <span class="fl">SYMBOL (optional)</span>
+    <input type="text" id="marketSymbol" placeholder="e.g. RELIANCE" style="width:120px">
+    <button class="btn" id="btnMarket">REFRESH</button>
+  </div>
+
+  <div class="subtabs">
+    <button class="subtab active" data-stab="market-status">MARKET STATUS</button>
+    <button class="subtab" data-stab="market-block">BLOCK DEALS</button>
+    <button class="subtab" data-stab="market-corp">CORP ACTIONS</button>
+    <button class="subtab" data-stab="market-ann">ANNOUNCEMENTS</button>
+    <button class="subtab" data-stab="market-board">BOARD MEETINGS</button>
+  </div>
+
+  <div class="subtab-panel active" id="stab-market-status">
+    <div id="marketStatusCard"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+  </div>
+  <div class="subtab-panel" id="stab-market-block">
+    <div class="card"><div class="card-title">TODAY'S BLOCK DEALS</div>
+      <div class="tw" id="blockDealsTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+  <div class="subtab-panel" id="stab-market-corp">
+    <div class="card"><div class="card-title">CORPORATE ACTIONS</div>
+      <div class="tw" id="corpActionsTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+  <div class="subtab-panel" id="stab-market-ann">
+    <div class="card"><div class="card-title">CORPORATE ANNOUNCEMENTS</div>
+      <div class="tw" id="announcementsTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+  <div class="subtab-panel" id="stab-market-board">
+    <div class="card"><div class="card-title">BOARD MEETINGS</div>
+      <div class="tw" id="boardMeetingsTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+</div>
+
 </div><!-- /main -->
+
 
 <script>
 'use strict';
@@ -760,6 +1014,7 @@ const SETTINGS_DEFAULTS={
   stgIvMin:0.5,stgIvMax:150,stgIvZscore:2.0,
   stgDsMinOi:0,stgDsMinVol:0,stgBaqWarn:5,stgBaqBad:15,
   stgIvLookback:90,stgGammaRange:5,stgMagnetThr:0.75,stgLambda:0.1,
+  stgMinOiChange:10,  // hide OI signals rows where |ce+pe oi change| < this
 };
 function loadSettings(){
   try{
@@ -867,12 +1122,12 @@ async function reloadExpiries(prefix){
 async function initSymbols(){
   try{
     ALL_SYMS=await api('/api/symbols');
-    ['gexSymbol','oiSymbol','ivSymbol','trendSymbol'].forEach(id=>populateSel(id,ALL_SYMS));
+    ['gexSymbol','oiSymbol','ivSymbol','trendSymbol','plSymbol'].forEach(id=>populateSel(id,ALL_SYMS));
     const[,lotData]=await Promise.all([
       Promise.all([
         loadCascade('gexSymbol','gexExpiry','gexTimestamp'),
         loadCascade('ivSymbol','ivExpiry','ivTimestamp'),
-        loadCascade('trendSymbol','trendExpiry',null),
+        loadCascade('trendSymbol','trendExpiry','trendTimestamp'),
       ]),
       api('/api/lot_sizes').catch(()=>({})),
     ]);
@@ -1007,17 +1262,17 @@ async function loadGex(){
   const exp=document.getElementById('gexExpiry').value;
   const ts =document.getElementById('gexTimestamp').value;
   const rng=parseFloat(document.getElementById('gexRange').value)||5;
-  if(!sym||!exp||!ts){alert('Select symbol, expiry and timestamp');return;}
+  if(!sym||!exp){alert('Select symbol and expiry');return;}
   ['gexBarChart','gammaProfileChart','netGexChart'].forEach(id=>setLoad(id));
   document.getElementById('gexKpis').innerHTML='';
   document.getElementById('gammaAnalysisCard').style.display='none';
   try{
     const[gex,gp]=await Promise.all([
-      api(`/api/gex?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`),
-      api(`/api/gamma_profile?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&price_range_pct=${rng}`),
+      api(`/api/gex?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`),
+      api(`/api/gamma_profile?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&price_range_pct=${rng}`),
     ]);
     const strikes=gex.map(r=>r.strike_price);
-    const ceG=gex.map(r=>r.ce_gex||0),peG=gex.map(r=>r.pe_gex||0),netG=gex.map(r=>r.net_gexv||0);
+    const ceG=gex.map(r=>r.ce_gexv||0),peG=gex.map(r=>r.pe_gexv||0),netG=gex.map(r=>r.net_gexv||0);
     const atm=gex[0]?.atm_strike,spot=gex[0]?.spot;
     const shapes=[
       {type:'line',x0:atm,x1:atm,y0:0,y1:1,yref:'paper',line:{color:C.amber,width:1.5,dash:'dot'}},
@@ -1050,9 +1305,9 @@ async function loadGex(){
       ].map(k=>`<div class="kpi"><div class="kpi-label">${k.label}</div><div class="kpi-val acc">${k.value}</div><div class="kpi-sub ${k.subcls||''}">${k.sub}</div></div>`).join('');
     }else setEmpty('gammaProfileChart','No gamma profile data');
     loadGammaAnalysis(sym,exp,ts,rng);
-    // Load new sub-panels in background
     loadMaxPain(sym,exp,ts);
     loadMmDelta(sym,exp,ts);
+    renderGexTable(gex);
   }catch(e){['gexBarChart','gammaProfileChart','netGexChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));}
 }
 
@@ -1060,7 +1315,7 @@ async function loadGammaAnalysis(sym,exp,ts,rng){
   const card=document.getElementById('gammaAnalysisCard'),cont=document.getElementById('gaContent');
   card.style.display='';cont.innerHTML='<div class="loading"><div class="spinner"></div>Fetching ATR…</div>';
   try{
-    const ga=await api(`/api/gamma_analysis?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&price_range_pct=${rng}`);
+    const ga=await api(`/api/gamma_analysis?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&price_range_pct=${rng}`);
     const pos=ga.regime==='Positive Gamma';
     const row=(lbl,val,c='')=>`<div class="ga-item"><div class="ga-label">${lbl}</div><div class="ga-value ${c}">${val||'—'}</div></div>`;
     const structs=ga.structures?.length?`<ul class="ga-list">${ga.structures.map(s=>`<li>${s}</li>`).join('')}</ul>`:'<div class="empty" style="padding:8px">None identified</div>';
@@ -1086,8 +1341,8 @@ async function loadMaxPain(sym,exp,ts){
   document.getElementById('maxPainKpis').innerHTML='';
   try{
     const[mp,mps]=await Promise.all([
-      api(`/api/max_pain?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`),
-      api(`/api/max_pain_series?symbol=${sym}&expiry=${encodeURIComponent(exp)}`),
+      api(`/api/max_pain?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`),
+      api(`/api/max_pain_series?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}`),
     ]);
     // KPIs
     document.getElementById('maxPainKpis').innerHTML=[
@@ -1129,7 +1384,7 @@ async function loadMmDelta(sym,exp,ts){
   document.getElementById('mmDeltaKpis').innerHTML='';
   document.getElementById('mmDeltaTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
   try{
-    const d=await api(`/api/delta_oi?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`);
+    const d=await api(`/api/delta_oi?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`);
     document.getElementById('mmDeltaKpis').innerHTML=[
       {label:'NET MM DELTA',value:fmt(d.net_delta_oi,4),sub:d.interpretation,subcls:d.net_delta_oi<-0.5?'down':d.net_delta_oi>0.5?'up':'neu'},
       {label:'CE DELTA OI',value:fmt(d.ce_delta_oi,4),sub:'₹M lots',subcls:'up'},
@@ -1165,20 +1420,40 @@ async function loadMmDelta(sym,exp,ts){
 // ── OI ────────────────────────────────────────────────────────────
 async function loadOi(){
   const sym=document.getElementById('oiSymbol').value;if(!sym){alert('Select a symbol');return;}
+  const minOiChg=getSetting('stgMinOiChange')||1;
   ['ceOiChart','peOiChart'].forEach(id=>setLoad(id));
   document.getElementById('oiSignalTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
   try{
-    const data=await api(`/api/oi_change?symbol=${sym}`);
-    const strikes=data.map(r=>r.strike_price);
-    const ceChg=data.map(r=>r.ce_oi_chg||0),peChg=data.map(r=>r.pe_oi_chg||0);
-    const ax={...LB,xaxis:{...LB.xaxis,title:'Strike',tickangle:-45},yaxis:{...LB.yaxis,title:'OI Change'}};
-    plot('ceOiChart',[{name:'CE OI Δ',x:strikes,y:ceChg,type:'bar',marker:{color:ceChg.map(v=>v>=0?C.green:C.red),opacity:.8}}],ax);
-    plot('peOiChart',[{name:'PE OI Δ',x:strikes,y:peChg,type:'bar',marker:{color:peChg.map(v=>v>=0?C.green:C.red),opacity:.8}}],ax);
+    const data=await api(`/api/oi_change?symbol=${encodeURIComponent(sym)}&min_oi_change=${minOiChg}`);
+    if(!data.length){
+      ['ceOiChart','peOiChart'].forEach(id=>setEmpty(id,'No significant OI changes'));
+      document.getElementById('oiSignalTable').innerHTML='<div class="empty">No significant OI changes above threshold</div>';
+      return;
+    }
+    // Sort by strike for charts
+    const chartData=[...data].sort((a,b)=>a.strike_price-b.strike_price);
+    const strikes=chartData.map(r=>r.strike_price);
+    const ceChg=chartData.map(r=>r.ce_oi_chg||0);
+    const peChg=chartData.map(r=>r.pe_oi_chg||0);
+    const ax={...LB,
+      xaxis:{...LB.xaxis,title:'Strike',tickangle:-45},
+      yaxis:{...LB.yaxis,title:'OI Change (NSE intraday delta)'},
+    };
+    plot('ceOiChart',[{name:'CE OI Δ',x:strikes,y:ceChg,type:'bar',
+      marker:{color:ceChg.map(v=>v>=0?C.green:C.red),opacity:.8}}],ax);
+    plot('peOiChart',[{name:'PE OI Δ',x:strikes,y:peChg,type:'bar',
+      marker:{color:peChg.map(v=>v>=0?C.green:C.red),opacity:.8}}],ax);
+    // Table sorted by magnitude (already sorted server-side)
     document.getElementById('oiSignalTable').innerHTML=makeTbl(data,[
       {key:'strike_price',label:'STRIKE'},{key:'expiry',label:'EXPIRY'},
-      {key:'ce_oi_chg',label:'CE OI Δ',fmt:v=>sspan(v,0)},{key:'ce_ltp_chg',label:'CE LTP Δ',fmt:v=>sspan(v)},
+      {key:'timestamp',label:'TIMESTAMP'},
+      {key:'ce_oi_chg',label:'CE OI Δ',fmt:v=>sspan(v,0)},
+      {key:'ce_oi',label:'CE OI',fmt:v=>fmtL(v)},
+      {key:'ce_vol_oi',label:'CE V/OI',fmt:v=>v!=null?fmt(v,3):'—'},
       {key:'ce_signal',label:'CE SIG',fmt:v=>pill(v)},
-      {key:'pe_oi_chg',label:'PE OI Δ',fmt:v=>sspan(v,0)},{key:'pe_ltp_chg',label:'PE LTP Δ',fmt:v=>sspan(v)},
+      {key:'pe_oi_chg',label:'PE OI Δ',fmt:v=>sspan(v,0)},
+      {key:'pe_oi',label:'PE OI',fmt:v=>fmtL(v)},
+      {key:'pe_vol_oi',label:'PE V/OI',fmt:v=>v!=null?fmt(v,3):'—'},
       {key:'pe_signal',label:'PE SIG',fmt:v=>pill(v)},
     ]);
   }catch(e){['ceOiChart','peOiChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
@@ -1250,8 +1525,8 @@ async function loadIvSmile(sym,exp,ts){
   try{
     const lookback=getSetting('stgIvLookback');
     const[data,ivr]=await Promise.all([
-      api(`/api/iv_smile?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`),
-      api(`/api/iv_rank?symbol=${sym}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&lookback_days=${lookback}`).catch(()=>null),
+      api(`/api/iv_smile?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`),
+      api(`/api/iv_rank?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&lookback_days=${lookback}`).catch(()=>null),
     ]);
     // IV Rank KPIs
     if(ivr){
@@ -1397,23 +1672,7 @@ async function loadMovers(){
 }
 
 // ── STRIKE TREND ──────────────────────────────────────────────────
-async function loadTrend(){
-  const sym=document.getElementById('trendSymbol').value;
-  const exp=document.getElementById('trendExpiry').value;
-  const strike=document.getElementById('trendStrike').value;
-  const metric=document.getElementById('trendMetric').value;
-  if(!sym||!exp||!strike){alert('Select symbol, expiry and ATM distance');return;}
-  setLoad('trendChart');
-  try{
-    const data=await api(`/api/strike_trend?symbol=${sym}&expiry=${encodeURIComponent(exp)}&strike_price=${strike}&metric=${metric}`);
-    if(!data.length){setEmpty('trendChart','No data for this selection');return;}
-    document.getElementById('trendChartTitle').textContent=`${sym} | ${strike} | ${metric.toUpperCase()} | ${exp}`;
-    plot('trendChart',[{name:metric,x:data.map(r=>r.timestamp),y:data.map(r=>r.value),
-      type:'scatter',mode:'lines+markers',line:{color:C.acc,width:2},marker:{size:4},
-      fill:'tozeroy',fillcolor:'rgba(0,200,240,.05)'}],
-      {...LB,xaxis:{...LB.xaxis,title:'Timestamp'},yaxis:{...LB.yaxis,title:metric}});
-  }catch(e){setEmpty('trendChart','⚠ '+e.message);}
-}
+
 
 // ── DELTA SCREENER ────────────────────────────────────────────────
 let _dsCurrentRows=[];
@@ -1567,6 +1826,12 @@ async function fetchDsMargin(){
 }
 
 // ── View init map ─────────────────────────────────────────────────
+// ── VIEW_INIT ─────────────────────────────────────────
+// Wire expiry DTE badges
+document.getElementById('gexExpiry').addEventListener('change',()=>updateDteBadge('gexExpiry','gexExpiryDteBadge'));
+document.getElementById('ivExpiry').addEventListener('change',()=>updateDteBadge('ivExpiry','ivExpiryDteBadge'));
+document.getElementById('trendExpiry').addEventListener('change',()=>{loadAtmStrikes();updateDteBadge('trendExpiry','trendExpiryDteBadge');});
+
 const VIEW_INIT={
   gex:()=>loadCascade('gexSymbol','gexExpiry','gexTimestamp'),
   oi:()=>{},
@@ -1576,6 +1841,9 @@ const VIEW_INIT={
   trend:()=>loadCascade('trendSymbol','trendExpiry',null).then(()=>loadAtmStrikes()),
   delta:()=>loadDsTimestamps(),
   settings:()=>loadSettings(),
+  vix:()=>loadVix(),
+  walls:()=>loadOiWalls(),
+  market:()=>loadMarketInfo(),
 };
 
 // ── bfcache guard ────────────────────────────────────────────────
@@ -1589,13 +1857,706 @@ window.addEventListener('pageshow', e=>{
   }
 });
 
+
+// VIX and OI Walls button listeners
+document.getElementById('btnVix')?.addEventListener('click', loadVix);
+document.getElementById('btnWalls')?.addEventListener('click', loadOiWalls);
+document.getElementById('wallsFilterGroup')?.addEventListener('click', ()=>setTimeout(loadOiWalls,50));
+// Wire trendTimestamp cascade
+document.getElementById('trendExpiry').addEventListener('change',()=>{
+  loadAtmStrikes();
+  // Also refresh timestamps for trend panel
+  const sym=document.getElementById('trendSymbol').value;
+  const exp=document.getElementById('trendExpiry').value;
+  if(sym&&exp) api(`/api/timestamps?symbol=${encodeURIComponent(sym)}`)
+    .then(tss=>{if(tss.length)populateSel('trendTimestamp',tss);}).catch(()=>{});
+});
+
+
+// ══════════════════════════════════════════════════════════════════
+// ITEM 11: Market Info
+// ══════════════════════════════════════════════════════════════════
+document.getElementById('btnMarket')?.addEventListener('click', loadMarketInfo);
+
+async function loadMarketInfo(){
+  const sym = document.getElementById('marketSymbol')?.value.trim().toUpperCase()||'';
+  const symParam = sym ? `?symbol=${encodeURIComponent(sym)}` : '';
+  await Promise.all([
+    loadMarketStatus(),
+    loadBlockDeals(),
+    loadCorpActions(symParam),
+    loadAnnouncements(symParam),
+    loadBoardMeetings(symParam),
+  ]);
+}
+
+async function loadMarketStatus(){
+  const el=document.getElementById('marketStatusCard');
+  el.innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
+  try{
+    const d=await api('/api/market/status');
+    const stClass=d.market_open?'ms-open':d.pre_open?'ms-pre':'ms-closed';
+    const stText=d.market_open?'OPEN':d.pre_open?'PRE-OPEN':'CLOSED';
+    const segs=(d.segments||[]).map(s=>`
+      <div style="display:flex;justify-content:space-between;padding:5px 8px;
+        border-bottom:1px solid var(--border);font-family:var(--mono);font-size:11px">
+        <span style="color:var(--acc)">${s.market||s.exchange||'?'}</span>
+        <span class="market-status ${s.marketStatus?.toLowerCase()==='open'?'ms-open':'ms-closed'}">
+          ${s.marketStatus||'?'}
+        </span>
+      </div>`).join('');
+    el.innerHTML=`
+      <div class="card">
+        <div style="display:flex;align-items:center;gap:16px;padding:12px">
+          <div class="kpi-val acc" style="font-size:32px">${stText}</div>
+          <span class="market-status ${stClass}" style="font-size:11px">${d.message||''}</span>
+        </div>
+        ${segs}
+      </div>`;
+  }catch(e){el.innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
+}
+
+async function loadBlockDeals(){
+  const el=document.getElementById('blockDealsTable');
+  el.innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
+  try{
+    const data=await api('/api/market/block_deals');
+    if(!data.length){el.innerHTML='<div class="empty">No block deals today</div>';return;}
+    el.innerHTML=makeTbl(data,[
+      {key:'symbol',label:'SYMBOL'},
+      {key:'deal_date',label:'DATE'},
+      {key:'client_name',label:'CLIENT'},
+      {key:'buy_sell',label:'B/S',fmt:v=>v?`<span class="${v==='B'||v?.startsWith('B')?'up':'down'}">${v}</span>`:'—'},
+      {key:'quantity',label:'QTY',fmt:v=>fmtL(v)},
+      {key:'price',label:'PRICE',fmt:v=>fmt(v,2)},
+      {key:'exchange',label:'EXCH'},
+    ]);
+  }catch(e){el.innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
+}
+
+async function loadCorpActions(symParam){
+  const el=document.getElementById('corpActionsTable');
+  el.innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
+  try{
+    const data=await api('/api/market/corp_actions'+symParam);
+    if(!data.length){el.innerHTML='<div class="empty">No corporate actions</div>';return;}
+    el.innerHTML=makeTbl(data,[
+      {key:'symbol',label:'SYMBOL'},
+      {key:'company',label:'COMPANY'},
+      {key:'ex_date',label:'EX DATE'},
+      {key:'record_date',label:'RECORD DATE'},
+      {key:'purpose',label:'PURPOSE'},
+      {key:'face_value',label:'FACE VALUE'},
+    ]);
+  }catch(e){el.innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
+}
+
+async function loadAnnouncements(symParam){
+  const el=document.getElementById('announcementsTable');
+  el.innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
+  try{
+    const data=await api('/api/market/announcements'+symParam);
+    if(!data.length){el.innerHTML='<div class="empty">No announcements</div>';return;}
+    el.innerHTML=makeTbl(data,[
+      {key:'symbol',label:'SYMBOL'},
+      {key:'company',label:'COMPANY'},
+      {key:'ann_date',label:'DATE'},
+      {key:'subject',label:'SUBJECT'},
+      {key:'attachment',label:'FILE',fmt:v=>v?`<a href="https://nsearchives.nseindia.com${v}" target="_blank" style="color:var(--acc)">↗</a>`:'—'},
+    ]);
+  }catch(e){el.innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
+}
+
+async function loadBoardMeetings(symParam){
+  const el=document.getElementById('boardMeetingsTable');
+  el.innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
+  try{
+    const data=await api('/api/market/board_meetings'+symParam);
+    if(!data.length){el.innerHTML='<div class="empty">No upcoming board meetings</div>';return;}
+    el.innerHTML=makeTbl(data,[
+      {key:'symbol',label:'SYMBOL'},
+      {key:'company',label:'COMPANY'},
+      {key:'meeting_date',label:'DATE'},
+      {key:'purpose',label:'PURPOSE'},
+    ]);
+  }catch(e){el.innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+// Toggle groups for new panels
+// ══════════════════════════════════════════════════════════════════
+['divModeGroup','divFilterGroup','oiHistViewGroup'].forEach(id=>{
+  const grp=document.getElementById(id);if(!grp)return;
+  grp.addEventListener('click',e=>{
+    const btn=e.target.closest('button');if(!btn)return;
+    grp.querySelectorAll('button').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+  });
+});
+wireToggleGroup('oiHistViewGroup');
+
+// ══════════════════════════════════════════════════════════════════
+// VIEW_INIT additions
+// ══════════════════════════════════════════════════════════════════
+VIEW_INIT['divergence'] = ()=>{};
+VIEW_INIT['delta'] = ()=>{
+  loadCascade('plSymbol','plExpiry','plTimestamp');
+  loadDsTimestamps();
+};
+
+// ══════════════════════════════════════════════════════════════════
+// Button listeners
+// ══════════════════════════════════════════════════════════════════
+document.getElementById('btnDiv')?.addEventListener('click', loadDivergence);
+document.getElementById('btnPl')?.addEventListener('click', loadPremiumLens);
+document.getElementById('btnOiHist')?.addEventListener('click', loadOiHistory);
+document.getElementById('plSymbol')?.addEventListener('change',()=>
+  loadCascade('plSymbol','plExpiry','plTimestamp'));
+document.getElementById('plExpiry')?.addEventListener('change',()=>
+  reloadTimestamps('plSymbol','plExpiry','plTimestamp'));
+
+// Populate plSymbol on init
+document.addEventListener('DOMContentLoaded',()=>{
+  // Wire after ALL_SYMS populated
+});
+
+// ══════════════════════════════════════════════════════════════════
+// Item 5: Divergence
+// ══════════════════════════════════════════════════════════════════
+const DIV_SIGNALS = {
+  BULL_HEDGE:   {label:'⬆ BULL HEDGE',   cls:'down',  desc:'Spot UP + PE premium UP — bearish hedge on rally'},
+  BEAR_SQUEEZE: {label:'⬇ BEAR SQUEEZE', cls:'up',    desc:'Spot DOWN + CE premium UP — potential short squeeze'},
+  IV_SPIKE:     {label:'⚡ IV SPIKE',     cls:'amber', desc:'Spot FLAT + IV spike — event anticipation'},
+  SMART_SELL:   {label:'🔴 SMART SELL',  cls:'down',  desc:'Spot UP + CE premium DOWN — call sellers on rally (ceiling)'},
+  SMART_BUY:    {label:'🟢 SMART BUY',   cls:'up',    desc:'Spot DOWN + PE premium DOWN — put sellers on dip (floor)'},
+};
+
+async function loadDivergence(){
+  const mode  = document.querySelector('#divModeGroup .active')?.dataset.dm||'snapshot';
+  const ft    = getFilter('divFilterGroup');
+  const minSp = document.getElementById('divMinSpot')?.value||0.03;
+  const minPr = document.getElementById('divMinPrem')?.value||0.5;
+  document.getElementById('divTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
+  try{
+    const data=await api(`/api/divergence?mode=${mode}&filter_type=${ft}&min_spot_chg=${minSp}&min_prem_chg=${minPr}`);
+    if(!data.length){
+      document.getElementById('divTable').innerHTML='<div class="empty">No divergences detected with current thresholds</div>';
+      return;
+    }
+    document.getElementById('divTable').innerHTML=makeTbl(data,[
+      {key:'symbol',label:'SYMBOL'},
+      {key:'signal',label:'SIGNAL',fmt:v=>{
+        const s=DIV_SIGNALS[v]||{label:v,cls:'neu'};
+        return`<span class="${s.cls}" title="${s.desc}">${s.label}</span>`;}},
+      {key:'magnitude',label:'MAGNITUDE',fmt:v=>fmt(v,3)},
+      {key:'spot_pct', label:'SPOT %',   fmt:v=>sspan(v,3)},
+      {key:'ce_pct',   label:'CE PREM%', fmt:v=>sspan(v,3)},
+      {key:'pe_pct',   label:'PE PREM%', fmt:v=>sspan(v,3)},
+      {key:'ce_iv_chg',label:'CE IV Δ',  fmt:v=>sspan(v,2)},
+      {key:'pe_iv_chg',label:'PE IV Δ',  fmt:v=>sspan(v,2)},
+      {key:'spot_now', label:'SPOT',     fmt:v=>fmt(v,2)},
+      {key:'net_flow', label:'NET FLOW', fmt:v=>sspan(v,2)},
+      {key:'ts_now',   label:'TS NOW'},
+      {key:'ts_ref',   label:'TS REF'},
+    ]);
+  }catch(e){
+    document.getElementById('divTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Item 8: Premium Lens
+// ══════════════════════════════════════════════════════════════════
+async function loadPremiumLens(){
+  const sym     = document.getElementById('plSymbol')?.value;
+  const exp     = document.getElementById('plExpiry')?.value;
+  const ts      = document.getElementById('plTimestamp')?.value||'';
+  const minOi   = document.getElementById('plMinOi')?.value||0;
+  const minRatio= parseFloat(document.getElementById('plMinRatio')?.value)||0.85;
+  const maxRatio= parseFloat(document.getElementById('plMaxRatio')?.value)||1.15;
+  if(!sym||!exp){alert('Select symbol and expiry');return;}
+  document.getElementById('plTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
+  try{
+    const tsParam=ts?`&timestamp=${encodeURIComponent(ts)}`:'';
+    const d=await api(`/api/premium_lens?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}${tsParam}&min_oi=${minOi}&min_ratio=${minRatio}&max_ratio=${maxRatio}`);
+    const rows=d.rows||[];
+    if(!rows.length){
+      document.getElementById('plTable').innerHTML='<div class="empty">All options within normal price ratio range</div>';
+      return;
+    }
+    const ltsSBadge=(s)=>s==='premium'?'<span class="ltp-s-prem">PREM</span>':s==='discount'?'<span class="ltp-s-disc">DISC</span>':'—';
+    const ratioCls=(r)=>{
+      if(r==null)return'';
+      if(r>maxRatio)return'down';   // expensive
+      if(r<minRatio)return'up';     // cheap
+      return'neu';
+    };
+    document.getElementById('plTable').innerHTML=makeTbl(rows,[
+      {key:'strike_price',label:'STRIKE'},
+      {key:'distance_from_atm',label:'ATM DIST'},
+      {key:'dte',label:'DTE',fmt:v=>fmt(v,0)+'d'},
+      {key:'ce_ltp',label:'CE LTP',fmt:v=>fmt(v,2)},
+      {key:'ce_tprice',label:'CE THEO',fmt:v=>fmt(v,2)},
+      {key:'ce_ratio',label:'CE RATIO',fmt:(v,r)=>`<span class="${ratioCls(v)}">${v!=null?fmt(v,3):'—'}</span>`},
+      {key:'ce_diff_pct',label:'CE DIFF%',fmt:v=>sspan(v,2)},
+      {key:'ce_ltp_s',label:'CE',fmt:v=>ltsSBadge(v)},
+      {key:'pe_ltp',label:'PE LTP',fmt:v=>fmt(v,2)},
+      {key:'pe_tprice',label:'PE THEO',fmt:v=>fmt(v,2)},
+      {key:'pe_ratio',label:'PE RATIO',fmt:(v,r)=>`<span class="${ratioCls(v)}">${v!=null?fmt(v,3):'—'}</span>`},
+      {key:'pe_diff_pct',label:'PE DIFF%',fmt:v=>sspan(v,2)},
+      {key:'pe_ltp_s',label:'PE',fmt:v=>ltsSBadge(v)},
+      {key:'ce_iv',label:'CE IV%',fmt:v=>fmt(v,1)+'%'},
+      {key:'pe_iv',label:'PE IV%',fmt:v=>fmt(v,1)+'%'},
+      {key:'ce_oi',label:'CE OI',fmt:v=>fmtL(v)},
+      {key:'pe_oi',label:'PE OI',fmt:v=>fmtL(v)},
+    ]);
+  }catch(e){
+    document.getElementById('plTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Item 9b: EOD History Heatmap
+// ══════════════════════════════════════════════════════════════════
+async function loadOiHistory(){
+  const sym  = document.getElementById('oiSymbol')?.value;
+  const days = document.getElementById('oiHistDays')?.value||5;
+  const view = document.querySelector('#oiHistViewGroup .active')?.dataset.hv||'oi';
+  if(!sym){alert('Select a symbol first');return;}
+  // Need expiry — use first available
+  try{
+    const exps=await api(`/api/expiries?symbol=${encodeURIComponent(sym)}&future_only=false`);
+    if(!exps.length){setEmpty('oiHistChart','No expiry data');return;}
+    const exp=exps[0];
+    setLoad('oiHistChart');
+    const endpoint=view==='iv'?'iv_history':'oi_history';
+    const d=await api(`/api/${endpoint}?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&days=${days}`);
+    if(!d.dates?.length||!d.strikes?.length){
+      setEmpty('oiHistChart','Not enough historical data');return;}
+
+    // Build heatmap z-matrix
+    const rowsMap={};
+    (d.rows||[]).forEach(r=>{
+      const k=r.strike_price;
+      if(!rowsMap[k])rowsMap[k]={};
+      rowsMap[k][r.date]= view==='iv'
+        ?(r.iv_chg!=null?r.iv_chg:r.avg_iv)
+        :(r.ce_oi_chg!=null?r.ce_oi_chg:r.ce_oi);
+    });
+    const z=d.strikes.map(s=>d.dates.map(dt=>rowsMap[s]?.[dt]??null));
+    const colorscale=view==='iv'
+      ?[['0','#f43f5e'],['0.5','#1e2d47'],['1','#10b981']]
+      :[['0','#f43f5e'],['0.5','#1e2d47'],['1','#10b981']];
+    plot('oiHistChart',[{
+      type:'heatmap',
+      x:d.dates,
+      y:d.strikes.map(s=>s.toString()),
+      z,
+      colorscale,
+      zmid:0,
+      colorbar:{title:view==='iv'?'IV Δ':'OI Δ',thickness:12},
+    }],{...LB,
+      xaxis:{...LB.xaxis,title:'Date'},
+      yaxis:{...LB.yaxis,title:'Strike'},
+      height:Math.max(300,d.strikes.length*18),
+    });
+  }catch(e){setEmpty('oiHistChart','⚠ '+e.message);}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// Item 7: IV intraday trend on overview cards
+// (Loaded alongside overview, shown as small sparkline indicator)
+// ══════════════════════════════════════════════════════════════════
+let _ivTrend={};
+
+async function loadIvIntradayTrend(ft){
+  try{
+    const data=await api(`/api/iv_intraday_trend?filter_type=${ft}`);
+    _ivTrend={};
+    data.forEach(r=>{_ivTrend[r.symbol]=r;});
+  }catch(e){console.warn('IV trend failed:',e.message);}
+}
+
+// Patch loadOverview to also fetch IV trend
+const _origLoadOverview=loadOverview;
+loadOverview=async function(){
+  const ft=getFilter('ovFilterGroup');
+  await Promise.all([_origLoadOverview(), loadIvIntradayTrend(ft)]);
+  // Inject IV trend badge into each card
+  Object.entries(_ivTrend).forEach(([sym,t])=>{
+    const cards=document.querySelectorAll('.tc');
+    cards.forEach(card=>{
+      if(card.querySelector('.tc-sym')?.textContent===sym){
+        const existing=card.querySelector('.iv-trend-badge');
+        if(existing)existing.remove();
+        const badge=document.createElement('div');
+        badge.className='tc-row iv-trend-badge';
+        badge.style.marginTop='4px';
+        const dir=t.iv_chg>0?'⬆':'⬇';
+        const cls=t.iv_chg>0?'down':'up';  // rising IV = bearish for premium sellers
+        badge.innerHTML=`<div><div class="tc-key">IV TREND</div>
+          <div class="tc-val ${cls}">${dir} ${fmt(t.iv_chg,2)}% (${fmt(t.iv_chg_pct,1)}%)</div></div>
+          <div><div class="tc-key">IV NOW</div><div class="tc-val">${fmt(t.iv_now,1)}%</div></div>`;
+        card.appendChild(badge);
+      }
+    });
+  });
+};
+
+function toggleDivLegend(){
+  const el=document.getElementById('divLegend');
+  if(el)el.style.display=el.style.display==='none'?'':'none';
+}
+
+// ── Table utilities ─────────────────────────────────────────────
+function filterTableBySymbol(tableContainerId, query){
+  const container=document.getElementById(tableContainerId);
+  if(!container)return;
+  const q=query.trim().toUpperCase();
+  const rows=container.querySelectorAll('tbody tr');
+  rows.forEach(row=>{
+    // First cell is always the symbol
+    const sym=row.cells[0]?.textContent.trim().toUpperCase()||'';
+    row.style.display=(!q||sym.includes(q))?'':'none';
+  });
+}
+
+function jumpOiSignals(sym){
+  // Switch to OI Signals tab and pre-select the symbol
+  document.querySelector('[data-view="oi"]').click();
+  setTimeout(()=>{
+    const sel=document.getElementById('oiSymbol');
+    if(sel&&[...sel.options].some(o=>o.value===sym)){
+      sel.value=sym;
+      document.getElementById('btnOi')?.click();
+    }
+  },80);
+}
+
 // ── Bootstrap ─────────────────────────────────────────────────────
+
 (async function init(){
   loadSettings();
   await initSymbols();
   loadOverview().catch(e=>console.error('Overview:',e));
   updateIciciStatus().catch(()=>{});
 })();
+
+
+// ══════════════════════════════════════════════════════════════════
+// ITEM 1: Live clock + market status (IST = UTC+5:30)
+// ══════════════════════════════════════════════════════════════════
+function updateClock(){
+  const now = new Date(Date.now() + (5*60+30)*60000 - new Date().getTimezoneOffset()*60000);
+  // For simplicity use toLocaleString with IST
+  const ist = new Date(new Date().toLocaleString('en-US',{timeZone:'Asia/Kolkata'}));
+  const hh=ist.getHours(), mm=ist.getMinutes(), ss=ist.getSeconds();
+  const pad=n=>String(n).padStart(2,'0');
+  const timeStr=`${pad(hh)}:${pad(mm)}:${pad(ss)} IST`;
+  const dateStr=ist.toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'});
+
+  let statusClass='ms-closed', statusText='CLOSED';
+  const mins=hh*60+mm;
+  if(mins>=9*60 && mins<9*60+15){statusClass='ms-pre';statusText='PRE-OPEN';}
+  else if(mins>=9*60+15 && mins<15*60+30){statusClass='ms-open';statusText='OPEN';}
+  else if(mins>=15*60+30 && mins<16*60){statusClass='ms-post';statusText='POST-CLOSE';}
+
+  const el=document.getElementById('marketClock');
+  if(el) el.innerHTML=
+    `<span>${dateStr}</span><span>${timeStr}</span>`+
+    `<span class="market-status ${statusClass}">${statusText}</span>`;
+}
+setInterval(updateClock,1000);
+updateClock();
+
+// ══════════════════════════════════════════════════════════════════
+// ITEM 2: DTE badge helper
+// ══════════════════════════════════════════════════════════════════
+function dteBadge(expiryStr){
+  if(!expiryStr)return'';
+  const exp=new Date(expiryStr.substring(0,10));
+  const today=new Date(); today.setHours(0,0,0,0);
+  const dte=Math.ceil((exp-today)/86400000);
+  if(isNaN(dte))return'';
+  const cls=dte<=7?'dte-near':dte<=30?'dte-mid':'dte-far';
+  return`<span class="dte-badge ${cls}">DTE: ${dte}d</span>`;
+}
+// Wire DTE badge to all expiry selects
+function updateDteBadge(expSelId, badgeId){
+  const el=document.getElementById(expSelId);
+  const b=document.getElementById(badgeId);
+  if(!el||!b)return;
+  b.innerHTML=dteBadge(el.value);
+}
+// Attach to all expiry selects
+['gexExpiry','ivExpiry','trendExpiry','plExpiry'].forEach(id=>{
+  const el=document.getElementById(id);
+  if(!el)return;
+  const badgeId=id+'DteBadge';
+  el.addEventListener('change',()=>updateDteBadge(id,badgeId));
+});
+
+// ══════════════════════════════════════════════════════════════════
+// ITEM 4: VIX
+// ══════════════════════════════════════════════════════════════════
+async function loadVix(){
+  const btn=document.getElementById('btnVix');
+  if(btn){btn.textContent='LOADING…';btn.disabled=true;}
+  const lookback=document.getElementById('vixLookback')?.value||30;
+  setLoad('vixChart');
+  try{
+    let d;
+    try{ d=await api(`/api/vix?lookback_days=${lookback}`); }
+    catch(e){
+      document.getElementById('vixGauge').innerHTML=`<div class="empty err" style="padding:24px">⚠ VIX fetch failed: ${e.message}<br><br><span style="font-size:9px;color:var(--muted)">Ensure NSEFetcher is installed at folder1/nse_fetcher.py and NSE cookies are valid.</span></div>`;
+      setEmpty('vixChart','VIX data unavailable');
+      btn.textContent='REFRESH';btn.disabled=false;
+      return;
+    }
+    // Gauge KPIs
+    const levelClass=`vix-${d.level}`;
+    document.getElementById('vixGauge').innerHTML=`
+      <div class="vix-gauge">
+        <div class="vix-number ${(d.chg??0)>0?'down':(d.chg??0)<0?'up':''}">${fmt(d.vix,2)}</div>
+        <div class="vix-level ${levelClass}">${d.level.toUpperCase()}</div>
+        <div style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-top:6px">
+          Prev: ${fmt(d.vix_prev,2)} &nbsp;
+          Chg: <span class="${(d.chg??0)>0?'down':'up'}">${(d.chg??0)>0?'+':''}${fmt(d.chg??0,2)}</span>
+          (${d.chg_pct>0?'+':''}${fmt(d.chg_pct,2)}%)
+        </div>
+        <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:8px">
+          Low &lt;12 · Normal 12–20 · Elevated 20–30 · Extreme &gt;30
+        </div>
+      </div>`;
+    // Historical chart
+    if(d.history?.length){
+      const dates=d.history.map(r=>r.date);
+      const closes=d.history.map(r=>r.close);
+      const zones=[
+        {y0:0,y1:12,color:'rgba(16,185,129,.05)'},
+        {y0:12,y1:20,color:'rgba(0,200,240,.05)'},
+        {y0:20,y1:30,color:'rgba(245,158,11,.07)'},
+        {y0:30,y1:100,color:'rgba(244,63,94,.08)'},
+      ];
+      plot('vixChart',[
+        {name:'India VIX',x:dates,y:closes,type:'scatter',mode:'lines',
+          line:{color:C.acc2,width:2.5},fill:'tozeroy',fillcolor:'rgba(240,112,0,.06)'},
+        {name:'Prev Close',x:dates,y:d.history.map(r=>r.prev),type:'scatter',mode:'lines',
+          line:{color:C.muted,width:1,dash:'dot'},opacity:.5},
+      ],{...LB,
+        shapes:zones.map(z=>({type:'rect',x0:dates[0],x1:dates[dates.length-1],
+          y0:z.y0,y1:z.y1,fillcolor:z.color,line:{width:0},layer:'below'})),
+        xaxis:{...LB.xaxis,title:'Date'},
+        yaxis:{...LB.yaxis,title:'VIX',rangemode:'tozero'},
+      });
+    }else setEmpty('vixChart','No historical data');
+  }finally{
+    const b=document.getElementById('btnVix');if(b){b.textContent='REFRESH';b.disabled=false;}
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ITEM 6: OI Walls
+// ══════════════════════════════════════════════════════════════════
+async function loadOiWalls(){
+  const ft=getFilter('wallsFilterGroup');
+  document.getElementById('oiWallsTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
+  document.getElementById('oiWallsKpis').innerHTML='';
+  try{
+    const data=await api(`/api/oi_walls?filter_type=${ft}`);
+    if(!data||!data.length){
+      document.getElementById('oiWallsTable').innerHTML='<div class="empty">No data</div>';
+      return;
+    }
+    function wallStrClass(s){return s>5?'wall-strong':s>2?'wall-medium':'wall-weak';}
+    function distCell(v){
+      if(v==null)return'—';
+      const n=parseFloat(v);
+      const cls=Math.abs(n)<50?'up':Math.abs(n)<200?'':'neu';
+      return`<span class="${cls}">${fmt(n,0)}</span>`;
+    }
+    document.getElementById('oiWallsTable').innerHTML=makeTbl(data,[
+      {key:'symbol',label:'SYMBOL',fmt:(v,r)=>`<span style="cursor:pointer;color:var(--acc)"
+        onclick="jumpOiSignals('${v}')" title="Jump to OI Signals for ${v}">${v} ↗</span>`},
+      {key:'spot',label:'SPOT',fmt:v=>fmt(v,2)},
+      {key:'fut_price',label:'FUT',fmt:v=>v>0?fmt(v,2):'—'},
+      {key:'ce_wall_strike',label:'CALL WALL',fmt:v=>`<span class="down">${fmt(v,0)}</span>`},
+      {key:'ce_dist_spot',label:'CE DIST',fmt:v=>distCell(v)},
+      {key:'ce_wall_strength',label:'CE STR',fmt:v=>`<span class="${wallStrClass(v)}">${fmt(v,1)}×</span>`},
+      {key:'ce_wall_oi',label:'CE OI',fmt:v=>fmtL(v)},
+      {key:'ce_ltp',label:'CE LTP',fmt:v=>fmt(v,2)},
+      {key:'ce_ltp_chg',label:'CE ΔLTP',fmt:v=>sspan(v,2)},
+      {key:'ce_iv',label:'CE IV%',fmt:v=>fmt(v,1)+'%'},
+      {key:'ce_iv_chg',label:'CE ΔIV',fmt:v=>sspan(v,2)},
+      {key:'ce_signal',label:'CE SIG',fmt:v=>pill(v)},
+      {key:'pe_wall_strike',label:'PUT WALL',fmt:v=>`<span class="up">${fmt(v,0)}</span>`},
+      {key:'pe_dist_spot',label:'PE DIST',fmt:v=>distCell(v)},
+      {key:'pe_wall_strength',label:'PE STR',fmt:v=>`<span class="${wallStrClass(v)}">${fmt(v,1)}×</span>`},
+      {key:'pe_wall_oi',label:'PE OI',fmt:v=>fmtL(v)},
+      {key:'pe_ltp',label:'PE LTP',fmt:v=>fmt(v,2)},
+      {key:'pe_ltp_chg',label:'PE ΔLTP',fmt:v=>sspan(v,2)},
+      {key:'pe_iv',label:'PE IV%',fmt:v=>fmt(v,1)+'%'},
+      {key:'pe_iv_chg',label:'PE ΔIV',fmt:v=>sspan(v,2)},
+      {key:'pe_signal',label:'PE SIG',fmt:v=>pill(v)},
+      {key:'pcr',label:'PCR',fmt:v=>v!=null?fmt(v,3):'—'},
+      {key:'wall_range',label:'RANGE',fmt:v=>fmt(v,0)+' pts'},
+    ]);
+  }catch(e){
+    document.getElementById('oiWallsTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ITEM 3: Enhanced Strike Trend / Option Lens
+// ══════════════════════════════════════════════════════════════════
+async function loadTrend(){
+  const sym   =document.getElementById('trendSymbol').value;
+  const exp   =document.getElementById('trendExpiry').value;
+  const strike=document.getElementById('trendStrike').value;
+  if(!sym||!exp||!strike){alert('Select symbol, expiry and ATM distance');return;}
+
+  const m1=document.getElementById('trendM1').value;
+  const m2=document.getElementById('trendM2').value||'';
+  const m3=document.getElementById('trendM3').value||'';
+  const ts =document.getElementById('trendTimestamp')?.value||'';
+
+  setLoad('trendChart');
+  document.getElementById('trendSnapshotCard').innerHTML='';
+
+  try{
+    // Multi-metric time series
+    let url=`/api/strike_trend_multi?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&strike_price=${strike}&m1=${m1}`;
+    if(m2)url+=`&m2=${m2}`;
+    if(m3)url+=`&m3=${m3}`;
+    const[tdata, snap]=await Promise.all([
+      api(url),
+      api(`/api/strike_snapshot?symbol=${encodeURIComponent(sym)}&strike_price=${strike}&expiry=${encodeURIComponent(exp)}${ts?'&timestamp='+encodeURIComponent(ts):''}`),
+    ]);
+
+    document.getElementById('trendChartTitle').textContent=
+      `${sym} | Strike ${strike} | ${exp}`;
+
+    const rows=tdata.rows||[];
+    const metrics=tdata.metrics||[m1];
+    const colors=[C.acc,C.green,C.acc2];
+    const yaxis2Metrics=['ce_oi','pe_oi','ce_volume','pe_volume','ce_tbq','pe_tbq'];
+    const traces=metrics.map((m,i)=>({
+      name:m,
+      x:rows.map(r=>r.timestamp),
+      y:rows.map(r=>r[m]),
+      type:'scatter',mode:'lines+markers',
+      line:{color:colors[i],width:i===0?2.5:1.8},
+      marker:{size:3},
+      yaxis: yaxis2Metrics.includes(m)&&i>0?'y2':'y',
+    }));
+
+    plot('trendChart',traces,{...LB,
+      xaxis:{...LB.xaxis,title:'Time',tickangle:-30},
+      yaxis:{...LB.yaxis,title:m1},
+      yaxis2:{overlaying:'y',side:'right',title:m2||'',
+        gridcolor:'transparent',tickfont:{size:9}},
+    });
+
+    // Greeks snapshot card
+    if(snap){
+      const ltp_s_badge=(s,type)=>{
+        if(!s||s==='NA')return'';
+        const isPrem=s==='premium';
+        return`<span class="${isPrem?'ltp-s-prem':'ltp-s-disc'}">${isPrem?'PREM':'DISC'}</span>`;
+      };
+      const g=(label,val,extra='')=>`
+        <div class="greek-row">
+          <span class="greek-label">${label}</span>
+          <span class="greek-val">${val} ${extra}</span>
+        </div>`;
+      document.getElementById('trendSnapshotCard').innerHTML=`
+        <div class="sh">CURRENT SNAPSHOT — ${sym} ${strike} ${snap.ce_moneyness||''}</div>
+        <div class="g2">
+          <div>
+            <div class="card-title" style="color:var(--green)">CALL (CE)</div>
+            <div class="greeks-grid">
+              ${g('LTP', fmt(snap.ce_ltp,2), ltp_s_badge(snap.ce_ltp_s,'ce'))}
+              ${g('THEORETICAL', fmt(snap.ce_tprice,2))}
+              ${g('PRICE RATIO', snap.ce_price_ratio!=null?fmt(snap.ce_price_ratio,3):'-')}
+              ${g('IV', fmt(snap.ce_iv,2)+'%')}
+              ${g('DELTA', fmt(snap.ce_delta,4))}
+              ${g('GAMMA', fmt(snap.ce_gamma,6))}
+              ${g('THETA', fmt(snap.ce_theta,4))}
+              ${g('VEGA',  fmt(snap.ce_vega,4))}
+              ${g('VANNA', fmt(snap.ce_vanna,6))}
+              ${g('CHARM', fmt(snap.ce_charm,6))}
+              ${g('INTRINSIC', fmt(snap.ce_intrinsic,2))}
+              ${g('TIME VAL',  fmt(snap.ce_time_value,2))}
+              ${g('BID/ASK',   fmt(snap.ce_bid,2)+'/'+fmt(snap.ce_ask,2))}
+              ${g('OI', fmtL(snap.ce_oi))}
+              ${g('GEXv', fmtL(snap.ce_gexv))}
+            </div>
+          </div>
+          <div>
+            <div class="card-title" style="color:var(--red)">PUT (PE)</div>
+            <div class="greeks-grid">
+              ${g('LTP', fmt(snap.pe_ltp,2), ltp_s_badge(snap.pe_ltp_s,'pe'))}
+              ${g('THEORETICAL', fmt(snap.pe_tprice,2))}
+              ${g('PRICE RATIO', snap.pe_price_ratio!=null?fmt(snap.pe_price_ratio,3):'-')}
+              ${g('IV', fmt(snap.pe_iv,2)+'%')}
+              ${g('DELTA', fmt(snap.pe_delta,4))}
+              ${g('GAMMA', fmt(snap.pe_gamma,6))}
+              ${g('THETA', fmt(snap.pe_theta,4))}
+              ${g('VEGA',  fmt(snap.pe_vega,4))}
+              ${g('VANNA', fmt(snap.pe_vanna,6))}
+              ${g('CHARM', fmt(snap.pe_charm,6))}
+              ${g('INTRINSIC', fmt(snap.pe_intrinsic,2))}
+              ${g('TIME VAL',  fmt(snap.pe_time_value,2))}
+              ${g('BID/ASK',   fmt(snap.pe_bid,2)+'/'+fmt(snap.pe_ask,2))}
+              ${g('OI', fmtL(snap.pe_oi))}
+              ${g('GEXv', fmtL(snap.pe_gexv))}
+            </div>
+          </div>
+        </div>
+        <div class="kpi-row" style="margin-top:10px">
+          ${[
+            {l:'SPOT',v:fmt(snap.spot,2)},
+            {l:'FUT',v:snap.fut_price>0?fmt(snap.fut_price,2):'—'},
+            {l:'DTE',v:fmt(snap.dte,0)+'d'},
+            {l:'ATM DIST',v:fmt(snap.distance_from_atm,0)},
+            {l:'RV (ANNUAL)',v:fmt(snap.rv,2)+'%'},
+            {l:'RISK REV',v:fmt(snap.riskreversal,4)},
+            {l:'SENTIMENT',v:sentBadge(snap.sentiment)},
+            {l:'REGIME',v:regimeBadge(snap.regime)},
+          ].map(k=>`<div class="kpi">
+            <div class="kpi-label">${k.l}</div>
+            <div class="kpi-val acc" style="font-size:14px">${k.v}</div>
+          </div>`).join('')}
+        </div>`;
+    }
+  }catch(e){setEmpty('trendChart','⚠ '+e.message);}
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ITEM 10: PCR per strike — added to GEX panel table
+// (PCR is already computed in /api/gex response via ce_oi/pe_oi)
+// We just render it in the GEX details table
+// ══════════════════════════════════════════════════════════════════
+// GEX details table rendered after loadGex - appended to stab-gex-main
+function renderGexTable(gex){
+  const el=document.getElementById('gexStrikeTable');
+  if(!el||!gex?.length)return;
+  el.innerHTML=makeTbl(gex,[
+    {key:'strike_price',label:'STRIKE'},
+    {key:'ce_oi',label:'CE OI',fmt:v=>fmtL(v)},
+    {key:'pe_oi',label:'PE OI',fmt:v=>fmtL(v)},
+    {key:'pcr',label:'PCR',fmt:(v,r)=>{
+      if(!r.ce_oi)return'—';
+      const pcr=r.pe_oi/r.ce_oi;
+      const cls=pcr>1.5?'up':pcr<0.5?'down':'neu';
+      return`<span class="${cls}">${fmt(pcr,2)}</span>`;
+    }},
+    {key:'ce_gexv',label:'CE GEX ₹M',fmt:v=>fmt(v,2)},
+    {key:'pe_gexv',label:'PE GEX ₹M',fmt:v=>fmt(v,2)},
+    {key:'net_gexv',label:'NET GEX ₹M',fmt:v=>sspan(v,2)},
+  ]);
+}
 
 </script>
 </body>

@@ -582,6 +582,7 @@ async def lifespan(app: FastAPI):
     _try_init_icici()
     _margin_cache_load()          # load persisted margin cache from disk
     _start_margin_cache_autosave()   # periodic silent background save
+    _init_nse_fetcher()              # warm up shared NSEFetcher session
     print("✓ Dashboard ready — open http://localhost:8000")
     yield
     _margin_cache_save(verbose=True)   # persist margin cache on clean shutdown
@@ -847,10 +848,10 @@ def gex_chart(
         FROM {tbl()}
         WHERE symbol    = ?
           AND expiry = ?
-          AND timestamp BETWEEN ? AND ? 
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10]] + _ts_lo_hi(timestamp),
+        [symbol, expiry[:10], symbol, expiry[:10]],
     )
     if df.empty:
         raise HTTPException(404, "No GEX data for given filters")
@@ -886,10 +887,10 @@ def _build_gamma_profile(
         FROM {tbl()}
         WHERE symbol = ?
           AND expiry  = ? 
-          AND timestamp BETWEEN ?  AND ? 
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10]] + _ts_lo_hi(ts_filter),
+        [symbol, expiry[:10], symbol, expiry[:10]],
     )
     if df.empty:
         return pd.DataFrame(), 0, 0, 1
@@ -985,10 +986,10 @@ def gamma_analysis(
         FROM {tbl()}
         WHERE symbol = ?
           AND expiry  = ? 
-          AND timestamp  BETWEEN ?  AND ? 
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10]] + _ts_lo_hi(ts_filter),
+        [symbol, expiry[:10], symbol, expiry[:10]],
     )
     atm_str = float(raw["atm_strike"].iloc[0]) if not raw.empty else spot
     near    = raw.iloc[(raw["strike_price"] - atm_str).abs().argsort()[:2]]
@@ -1005,8 +1006,8 @@ def gamma_analysis(
             f"SELECT AVG(COALESCE(m_volatility, 0)) AS avg_vol, "
             f"AVG(COALESCE(underlying_price, 0)) AS avg_spot "
             f"FROM {tbl()} "
-            f"WHERE symbol = ? AND timestamp  BETWEEN ?  AND ? ",
-            [symbol] + _ts_lo_hi(ts_filter),
+            f"WHERE symbol = ? AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=?)",
+            [symbol, symbol],
         )
         if not vol_df.empty:
             avg_vol  = float(vol_df["avg_vol"].iloc[0] or 0)
@@ -1057,51 +1058,44 @@ def gamma_analysis(
 # ===========================================================================
 
 @app.get("/api/oi_change")
-def oi_change(symbol: str = Query(...), filter_type: str = Query("all")):
-    ts_df = qdf(
-        f"SELECT DISTINCT CAST(timestamp AS VARCHAR) AS ts FROM {tbl()} "
-        f"WHERE symbol = ? ORDER BY ts DESC LIMIT 2",
-        [symbol],
-    )
-    if len(ts_df) < 2:
-        raise HTTPException(422, f"Need ≥2 timestamps for {symbol}; found {len(ts_df)}")
-    ts_new, ts_old = ts_df["ts"].iloc[0], ts_df["ts"].iloc[1]
-
+def oi_change(
+    symbol:        str   = Query(...),
+    filter_type:   str   = Query("all"),
+    min_oi_change: int   = Query(0),     # hide rows where |ce+pe oi chg| < this
+):
+    # Use the DB's ce_oi_change column (NSE's own computed delta vs their last
+    # reference) rather than subtracting consecutive snapshots — gives meaningful
+    # intraday context rather than tiny 4-minute movements.
     df = qdf(
         f"""
         SELECT
-            n.strike_price,
-            CAST(n.expiry AS VARCHAR)  AS expiry,
-            COALESCE(n.ce_oi,  0)      AS ce_oi_new,
-            COALESCE(o.ce_oi,  0)      AS ce_oi_old,
-            COALESCE(n.pe_oi,  0)      AS pe_oi_new,
-            COALESCE(o.pe_oi,  0)      AS pe_oi_old,
-            COALESCE(n.ce_ltp, 0)      AS ce_ltp_new,
-            COALESCE(o.ce_ltp, 0)      AS ce_ltp_old,
-            COALESCE(n.pe_ltp, 0)      AS pe_ltp_new,
-            COALESCE(o.pe_ltp, 0)      AS pe_ltp_old
-        FROM {tbl()} n
-        JOIN {tbl()} o
-          ON  n.symbol       = o.symbol
-          AND n.strike_price = o.strike_price
-          AND n.expiry       = o.expiry
-        WHERE n.symbol = ?
-          AND n.timestamp  BETWEEN ?  AND ? 
-          AND o.timestamp  BETWEEN ?  AND ? 
-          AND n.expiry >= CURRENT_DATE
-          AND (COALESCE(n.ce_ltp,0) + COALESCE(n.pe_ltp,0)) > 0
-        ORDER BY n.expiry, n.strike_price
+            STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS timestamp,
+            strike_price,
+            CAST(expiry AS VARCHAR)         AS expiry,
+            COALESCE(ce_oi,        0)       AS ce_oi,
+            COALESCE(pe_oi,        0)       AS pe_oi,
+            COALESCE(ce_oi_change, 0)       AS ce_oi_chg,
+            COALESCE(pe_oi_change, 0)       AS pe_oi_chg,
+            COALESCE(ce_ltp,       0)       AS ce_ltp,
+            COALESCE(pe_ltp,       0)       AS pe_ltp,
+            COALESCE(ce_volume,    0)       AS ce_volume,
+            COALESCE(pe_volume,    0)       AS pe_volume,
+            COALESCE(ce_delta,     0)       AS ce_delta,
+            COALESCE(underlying_price, 0)   AS spot
+        FROM {tbl()}
+        WHERE symbol = ?
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol = ?)
+          AND expiry >= CURRENT_DATE
+          AND (COALESCE(ce_ltp,0) + COALESCE(pe_ltp,0)) > 0
+        ORDER BY expiry, strike_price
         """,
-        [symbol] + _ts_lo_hi(ts_new) + _ts_lo_hi(ts_old),
+        [symbol, symbol],
     )
     if df.empty:
-        raise HTTPException(404, f"No overlapping data between timestamps for {symbol}")
+        raise HTTPException(404, f"No OI data for {symbol}")
 
-    df["ce_oi_chg"]  = df["ce_oi_new"]  - df["ce_oi_old"]
-    df["pe_oi_chg"]  = df["pe_oi_new"]  - df["pe_oi_old"]
-    df["ce_ltp_chg"] = df["ce_ltp_new"] - df["ce_ltp_old"]
-    df["pe_ltp_chg"] = df["pe_ltp_new"] - df["pe_ltp_old"]
-
+    # Compute LTP signal direction from ce_oi_change sign convention:
+    # positive OI change + positive LTP = longs entering
     def _sig(oi, ltp):
         if oi > 0 and ltp > 0: return "Long Build-Up"
         if oi > 0 and ltp < 0: return "Short Build-Up"
@@ -1109,10 +1103,26 @@ def oi_change(symbol: str = Query(...), filter_type: str = Query("all")):
         if oi < 0 and ltp < 0: return "Long Unwinding"
         return "Neutral"
 
-    df["ce_signal"] = df.apply(lambda r: _sig(r["ce_oi_chg"], r["ce_ltp_chg"]), axis=1)
-    df["pe_signal"] = df.apply(lambda r: _sig(r["pe_oi_chg"], r["pe_ltp_chg"]), axis=1)
-    df["ts_new"]    = ts_new
-    df["ts_old"]    = ts_old
+    df["ce_signal"] = df.apply(lambda r: _sig(r["ce_oi_chg"], r["ce_ltp"]), axis=1)
+    df["pe_signal"] = df.apply(lambda r: _sig(r["pe_oi_chg"], r["pe_ltp"]), axis=1)
+
+    # Add Vol/OI ratio — high ratio = fresh positioning
+    df["ce_vol_oi"] = df.apply(
+        lambda r: round(r["ce_volume"] / r["ce_oi"], 3) if r["ce_oi"] > 0 else None, axis=1)
+    df["pe_vol_oi"] = df.apply(
+        lambda r: round(r["pe_volume"] / r["pe_oi"], 3) if r["pe_oi"] > 0 else None, axis=1)
+
+    # Filter: hide rows where both OI changes are below threshold (pure noise)
+    abs_min = max(min_oi_change, 1)  # always filter zero-zero rows
+    df = df[
+        (df["ce_oi_chg"].abs() >= abs_min) |
+        (df["pe_oi_chg"].abs() >= abs_min)
+    ]
+
+    # Sort by total absolute OI activity descending
+    df["total_abs_oi"] = df["ce_oi_chg"].abs() + df["pe_oi_chg"].abs()
+    df = df.sort_values("total_abs_oi", ascending=False).drop(columns=["total_abs_oi"])
+
     return to_records(df)
 
 
@@ -1248,11 +1258,11 @@ def iv_smile(
         FROM {tbl()}
         WHERE symbol = ?
           AND expiry = ? 
-          AND timestamp  BETWEEN ?  AND ? 
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
           AND (COALESCE(ce_iv,0)>0 OR COALESCE(pe_iv,0)>0)
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10]] + _ts_lo_hi(ts_filter),
+        [symbol, expiry[:10], symbol, expiry[:10]],
     )
     if df.empty:
         raise HTTPException(404, "No IV data found")
@@ -1343,10 +1353,16 @@ def top_movers(
 # ===========================================================================
 
 _SAFE_METRICS = {
-    "ce_ltp","pe_ltp","ce_iv","pe_iv","ce_volume","pe_volume",
-    "ce_oi","pe_oi","ce_gexv","pe_gexv","net_gexv",
+    "ce_ltp","pe_ltp","ce_iv","pe_iv","ce_iv_nse","ce_iv_vol",
+    "ce_volume","pe_volume","ce_oi","pe_oi","ce_gexv","pe_gexv","net_gexv",
     "ce_delta","pe_delta","ce_gamma","pe_gamma",
     "ce_theta","pe_theta","ce_vega","pe_vega",
+    "ce_vanna","pe_vanna","ce_charm","pe_charm",
+    "ce_TPrice","pe_TPrice","ce_intrinsic_value","pe_intrinsic_value",
+    "ce_time_value","pe_time_value","ce_bid_ask_spread","pe_bid_ask_spread",
+    "riskreversal","net_flow","net_vanna_ex","net_charm_ex",
+    "m_volatility","fut_price","underlying_price",
+    "ce_tbq","ce_bq","pe_tbq","pe_bq","ce_pchange","pe_pchange",
 }
 
 
@@ -1413,15 +1429,21 @@ def delta_screener(
 
     if timestamp:
         ts_clause, ts_params = ts_filter_clause(timestamp)
-        ts_sql = f"AND {ts_clause}"
+        ts_where  = f"AND {ts_clause}"
+        pre_cte   = ""
     else:
-        ts_sql    = ("AND timestamp = ("
-                     f"  SELECT MAX(timestamp) "
-                     f"  FROM {tbl()} t2 WHERE t2.symbol = {tbl()}.symbol)")
+        # Use a CTE to get latest timestamp per symbol — more reliable than
+        # correlated subquery which some DuckDB versions handle inconsistently
+        pre_cte  = f"""latest_ts AS (
+            SELECT symbol, MAX(timestamp) AS max_ts
+            FROM {{tbl()}} GROUP BY symbol
+        ),"""
+        ts_where  = "AND timestamp = (SELECT max_ts FROM latest_ts WHERE latest_ts.symbol = t.symbol)"
         ts_params = []
 
     df = qdf(
         f"""
+        {"WITH " + pre_cte if pre_cte else ""}
         SELECT
             symbol, strike_price,
             CAST(expiry AS VARCHAR)       AS expiry,
@@ -1438,7 +1460,9 @@ def delta_screener(
             COALESCE(ce_gexv,   0) AS ce_gexv,   COALESCE(pe_gexv,   0) AS pe_gexv,
             COALESCE(net_gexv,  0) AS net_gexv
         FROM {tbl()}
-        WHERE 1=1 {sym_filter} {ts_sql}
+        WHERE 1=1 {sym_filter} {ts_where}
+          AND expiry >= CURRENT_DATE
+          AND (COALESCE(ce_ltp, 0) + COALESCE(pe_ltp, 0)) > 0
           AND (
             ABS(COALESCE(ce_delta, 0)) BETWEEN {tgt_lo} AND {tgt_hi}
             OR
@@ -1518,10 +1542,10 @@ def max_pain(
                COALESCE(underlying_price, 0) AS spot
         FROM {tbl()}
         WHERE symbol = ? AND expiry = ?
-          AND timestamp BETWEEN ? AND ?
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], lo, hi],
+        [symbol, expiry[:10], symbol, expiry[:10]],
     )
     if df.empty:
         raise HTTPException(404, "No data for max pain")
@@ -1647,11 +1671,11 @@ def iv_term_structure(
             strike_price
         FROM {tbl()}
         WHERE symbol = ?
-          AND timestamp BETWEEN ? AND ?
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=?)
           AND distance_from_atm = 0
         ORDER BY expiry
         """,
-        [symbol, lo, hi],
+        [symbol, symbol],
     )
     if df.empty:
         # Fallback: nearest strike to spot per expiry
@@ -1672,11 +1696,11 @@ def iv_term_structure(
                         ORDER BY ABS(distance_from_atm), strike_price
                     ) AS rn
                 FROM {tbl()}
-                WHERE symbol = ? AND timestamp BETWEEN ? AND ?
+                AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=?)
             )
             SELECT * FROM ranked WHERE rn = 1 ORDER BY expiry
             """,
-            [symbol, lo, hi],
+            [symbol, symbol],
         )
     if df.empty:
         raise HTTPException(404, "No IV term structure data")
@@ -1722,11 +1746,11 @@ def iv_rank(
                COALESCE(m_volatility, 0) AS rv
         FROM {tbl()}
         WHERE symbol = ? AND expiry = ?
-          AND timestamp BETWEEN ? AND ?
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
           AND distance_from_atm = 0
         LIMIT 1
         """,
-        [symbol, expiry[:10], lo, hi],
+        [symbol, expiry[:10], symbol, expiry[:10]],
     )
     if cur.empty:
         raise HTTPException(404, "No current ATM IV data")
@@ -1812,10 +1836,10 @@ def pc_skew(
             COALESCE(underlying_price, 0) AS spot
         FROM {tbl()}
         WHERE symbol = ? AND expiry = ?
-          AND timestamp BETWEEN ? AND ?
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], lo, hi],
+        [symbol, expiry[:10], symbol, expiry[:10]],
     )
     if df.empty:
         raise HTTPException(404, "No skew data")
@@ -1941,10 +1965,10 @@ def delta_oi(
             COALESCE(net_flow,  0)        AS net_flow
         FROM {tbl()}
         WHERE symbol = ? AND expiry = ?
-          AND timestamp BETWEEN ? AND ?
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], lo, hi],
+        [symbol, expiry[:10], symbol, expiry[:10]],
     )
     if df.empty:
         raise HTTPException(404, "No delta OI data")
@@ -2017,12 +2041,12 @@ def oi_weighted_iv(
             SUM(COALESCE(ce_oi,0))            AS total_ce_oi,
             SUM(COALESCE(pe_oi,0))            AS total_pe_oi
         FROM {tbl()}
-        WHERE symbol = ? AND timestamp BETWEEN ? AND ?
+        WHERE symbol = ? AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=?)
           AND COALESCE(ce_iv,0) > 0
         GROUP BY expiry, days_to_expiry
         ORDER BY expiry
         """,
-        [symbol, lo, hi],
+        [symbol, symbol],
     )
     if df.empty:
         raise HTTPException(404, "No IV data")
@@ -2045,6 +2069,878 @@ def oi_weighted_iv(
         "symbol":         symbol,
         "overall_oi_iv":  round(overall, 2) if overall else None,
         "by_expiry":      to_records(df[["expiry","dte","oi_wtd_ce_iv","oi_wtd_pe_iv","oi_wtd_avg_iv"]]),
+    })
+
+
+
+# ===========================================================================
+# Strike snapshot (full row for one strike at one timestamp) — Item 3
+# ===========================================================================
+
+@app.get("/api/strike_snapshot")
+def strike_snapshot(
+    symbol:       str           = Query(...),
+    strike_price: float         = Query(...),
+    expiry:       str           = Query(...),
+    timestamp:    Optional[str] = Query(None),
+):
+    """
+    Full single-row snapshot for one strike at a given timestamp.
+    Returns all greeks, theoretical price, IV, moneyness, etc.
+    Used by the enhanced Strike Trend / Option Lens panel.
+    """
+    ts_filter = timestamp or latest_ts(symbol)
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
+    df = qdf(
+        f"""
+        SELECT
+            strike_price, CAST(expiry AS VARCHAR) AS expiry,
+            COALESCE(underlying_price,0)  AS spot,
+            COALESCE(fut_price,0)         AS fut_price,
+            COALESCE(days_to_expiry,0)    AS dte,
+            COALESCE(distance_from_atm,0) AS distance_from_atm,
+            -- CE
+            COALESCE(ce_ltp,0)            AS ce_ltp,
+            COALESCE(ce_TPrice,0)         AS ce_tprice,
+            COALESCE(ce_ltp_s,'NA')       AS ce_ltp_s,
+            COALESCE(ce_iv,0)             AS ce_iv,
+            COALESCE(ce_delta,0)          AS ce_delta,
+            COALESCE(ce_gamma,0)          AS ce_gamma,
+            COALESCE(ce_theta,0)          AS ce_theta,
+            COALESCE(ce_vega,0)           AS ce_vega,
+            COALESCE(ce_vanna,0)          AS ce_vanna,
+            COALESCE(ce_charm,0)          AS ce_charm,
+            COALESCE(ce_oi,0)             AS ce_oi,
+            COALESCE(ce_volume,0)         AS ce_volume,
+            COALESCE(ce_intrinsic_value,0) AS ce_intrinsic,
+            COALESCE(ce_time_value,0)     AS ce_time_value,
+            COALESCE(ce_bid,0)            AS ce_bid,
+            COALESCE(ce_ask,0)            AS ce_ask,
+            COALESCE(ce_bid_ask_spread,0) AS ce_spread,
+            COALESCE(ce_moneyness,'NA')   AS ce_moneyness,
+            COALESCE(ce_gexv,0)           AS ce_gexv,
+            -- PE
+            COALESCE(pe_ltp,0)            AS pe_ltp,
+            COALESCE(pe_TPrice,0)         AS pe_tprice,
+            COALESCE(pe_ltp_s,'NA')       AS pe_ltp_s,
+            COALESCE(pe_iv,0)             AS pe_iv,
+            COALESCE(pe_delta,0)          AS pe_delta,
+            COALESCE(pe_gamma,0)          AS pe_gamma,
+            COALESCE(pe_theta,0)          AS pe_theta,
+            COALESCE(pe_vega,0)           AS pe_vega,
+            COALESCE(pe_vanna,0)          AS pe_vanna,
+            COALESCE(pe_charm,0)          AS pe_charm,
+            COALESCE(pe_oi,0)             AS pe_oi,
+            COALESCE(pe_volume,0)         AS pe_volume,
+            COALESCE(pe_intrinsic_value,0) AS pe_intrinsic,
+            COALESCE(pe_time_value,0)     AS pe_time_value,
+            COALESCE(pe_bid,0)            AS pe_bid,
+            COALESCE(pe_ask,0)            AS pe_ask,
+            COALESCE(pe_bid_ask_spread,0) AS pe_spread,
+            COALESCE(pe_moneyness,'NA')   AS pe_moneyness,
+            COALESCE(pe_gexv,0)           AS pe_gexv,
+            -- Composite
+            COALESCE(riskreversal,0)      AS riskreversal,
+            CAST(sentiment AS VARCHAR)    AS sentiment,
+            CAST(regime    AS VARCHAR)    AS regime,
+            COALESCE(net_flow,0)          AS net_flow,
+            COALESCE(m_volatility,0)      AS rv
+        FROM {tbl()}
+        WHERE symbol=? AND strike_price=? AND expiry=?
+          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND strike_price=? AND expiry=?)
+        LIMIT 1
+        """,
+        [symbol, strike_price, expiry[:10], symbol, strike_price, expiry[:10]],
+    )
+    if df.empty:
+        raise HTTPException(404, "No snapshot data")
+    row = df.iloc[0].to_dict()
+    # Add derived fields
+    ce_ltp  = float(row.get("ce_ltp", 0))
+    ce_tp   = float(row.get("ce_tprice", 0))
+    pe_ltp  = float(row.get("pe_ltp", 0))
+    pe_tp   = float(row.get("pe_tprice", 0))
+    row["ce_price_ratio"] = round(ce_ltp / ce_tp, 4) if ce_tp > 0 else None
+    row["pe_price_ratio"] = round(pe_ltp / pe_tp, 4) if pe_tp > 0 else None
+    return safe_response(row)
+
+
+# Extend strike_trend to support multiple metrics (up to 3)
+@app.get("/api/strike_trend_multi")
+def strike_trend_multi(
+    symbol:       str   = Query(...),
+    strike_price: float = Query(...),
+    expiry:       str   = Query(...),
+    m1:           str   = Query("ce_ltp"),
+    m2:           Optional[str] = Query(None),
+    m3:           Optional[str] = Query(None),
+):
+    """Return time-series for up to 3 metrics for one strike+expiry."""
+    metrics = [m for m in [m1, m2, m3] if m and m in _SAFE_METRICS]
+    if not metrics:
+        raise HTTPException(400, "No valid metrics specified")
+    sel = ", ".join(f"COALESCE({m},0) AS {m}" for m in metrics)
+    df = qdf(
+        f"""
+        SELECT STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS timestamp, {sel}
+        FROM {tbl()}
+        WHERE symbol=? AND strike_price=? AND expiry=?
+        ORDER BY timestamp
+        """,
+        [symbol, strike_price, expiry[:10]],
+    )
+    return safe_response({"metrics": metrics, "rows": to_records(df)})
+
+
+# ===========================================================================
+# VIX — Item 4
+# ===========================================================================
+
+@app.get("/api/vix")
+def vix_data(lookback_days: int = Query(30)):
+    """
+    Current India VIX (from NSEFetcher) + historical for the lookback window.
+    Falls back gracefully if NSEFetcher is unavailable.
+    """
+    try:
+        fetcher = _get_fetcher()
+        vix_now, vix_prev = fetcher.get_vix_current()
+        # Historical
+        end_date   = date.today()
+        start_date = end_date - timedelta(days=lookback_days)
+        hist_df    = fetcher.get_vix_historical(start_date, end_date)
+        history    = []
+        if hist_df is not None and not hist_df.empty:
+            for _, row in hist_df.iterrows():
+                ts = row.get("EOD_TIMESTAMP")
+                ts_str = ts.strftime("%Y-%m-%d") if hasattr(ts, "strftime") else str(ts)
+                history.append({
+                    "date":  ts_str,
+                    "open":  _safe(row.get("EOD_OPEN_INDEX_VAL")),
+                    "high":  _safe(row.get("EOD_HIGH_INDEX_VAL")),
+                    "low":   _safe(row.get("EOD_LOW_INDEX_VAL")),
+                    "close": _safe(row.get("EOD_CLOSE_INDEX_VAL")),
+                    "prev":  _safe(row.get("EOD_PREV_CLOSE")),
+                })
+        chg     = round(vix_now - vix_prev, 2) if vix_prev else None
+        chg_pct = round((vix_now - vix_prev) / vix_prev * 100, 2) if vix_prev else None
+        level   = ("extreme" if vix_now > 30 else
+                   "elevated" if vix_now > 20 else
+                   "normal"   if vix_now > 12 else "low")
+        return safe_response({
+            "vix":        round(vix_now, 2),
+            "vix_prev":   round(vix_prev, 2),
+            "chg":        chg,
+            "chg_pct":    chg_pct,
+            "level":      level,
+            "history":    history,
+            "source":     "NSEFetcher",
+        })
+    except ModuleNotFoundError:
+        raise HTTPException(503, "NSEFetcher not available")
+    except Exception as exc:
+        raise HTTPException(502, f"VIX fetch failed: {exc}")
+
+
+# ===========================================================================
+# OI Walls — Item 6
+# ===========================================================================
+
+@app.get("/api/oi_walls")
+def oi_walls(filter_type: str = Query("all")):
+    """
+    For each symbol at latest timestamp, find:
+    - Call wall  = strike with highest CE OI (resistance)
+    - Put wall   = strike with highest PE OI (support)
+    - Distance from spot and fut_price
+    - Wall strength = max_oi / avg_oi
+    - PCR at wall strikes
+    Sortable across all symbols.
+    """
+    idx_list = ", ".join(f"'{s}'" for s in _NSE_INDICES)
+    sym_filter = (
+        f"AND symbol IN ({idx_list})"       if filter_type == "index"
+        else f"AND symbol NOT IN ({idx_list})" if filter_type == "stock"
+        else ""
+    )
+    df = qdf(
+        f"""
+        WITH latest AS (
+            SELECT symbol, MAX(timestamp) AS ts
+            FROM {tbl()} GROUP BY symbol
+        ),
+        base AS (
+            SELECT t.symbol,
+                   t.strike_price,
+                   COALESCE(t.ce_oi,0)           AS ce_oi,
+                   COALESCE(t.pe_oi,0)           AS pe_oi,
+                   COALESCE(t.ce_ltp,0)          AS ce_ltp,
+                   COALESCE(t.pe_ltp,0)          AS pe_ltp,
+                   COALESCE(t.ce_iv, 0)          AS ce_iv,
+                   COALESCE(t.pe_iv, 0)          AS pe_iv,
+                   COALESCE(t.ce_oi_change, 0)   AS ce_oi_change,
+                   COALESCE(t.pe_oi_change, 0)   AS pe_oi_change,
+                   COALESCE(t.underlying_price,0) AS spot,
+                   COALESCE(t.fut_price,0)        AS fut_price,
+                   COALESCE(t.atm_strike,0)       AS atm_strike,
+                   COALESCE(t.lotsize,1)          AS lotsize
+            FROM {tbl()} t
+            JOIN latest l ON t.symbol=l.symbol AND t.timestamp=l.ts
+            WHERE t.ce_oi > 0 OR t.pe_oi > 0
+            {sym_filter}
+        ),
+        agg AS (
+            SELECT symbol,
+                   MAX(spot)      AS spot,
+                   MAX(fut_price) AS fut_price,
+                   MAX(atm_strike) AS atm_strike,
+                   AVG(ce_oi)     AS avg_ce_oi,
+                   AVG(pe_oi)     AS avg_pe_oi,
+                   MAX(ce_oi)     AS max_ce_oi,
+                   MAX(pe_oi)     AS max_pe_oi,
+                   SUM(ce_oi)     AS total_ce_oi,
+                   SUM(pe_oi)     AS total_pe_oi
+            FROM base GROUP BY symbol
+        ),
+        ce_wall AS (
+            SELECT b.symbol,
+                   b.strike_price    AS ce_wall_strike,
+                   b.ce_oi           AS ce_wall_oi,
+                   COALESCE(b.ce_ltp, 0)             AS ce_ltp,
+                   COALESCE(b.ce_oi_change, 0)        AS ce_oi_chg,
+                   COALESCE(b.ce_iv,  0)              AS ce_iv,
+                   -- LTP and IV changes vs previous snapshot (use DB columns)
+                   COALESCE(b.ce_ltp, 0) - COALESCE(prev.ce_ltp, 0)  AS ce_ltp_chg,
+                   COALESCE(b.ce_iv,  0) - COALESCE(prev.ce_iv,  0)  AS ce_iv_chg,
+                   CASE WHEN COALESCE(b.ce_oi_change,0) > 0 AND COALESCE(b.ce_ltp,0) > 0 THEN 'Long Build-Up'
+                        WHEN COALESCE(b.ce_oi_change,0) > 0 AND COALESCE(b.ce_ltp,0) < 0 THEN 'Short Build-Up'
+                        WHEN COALESCE(b.ce_oi_change,0) < 0 AND COALESCE(b.ce_ltp,0) > 0 THEN 'Short Covering'
+                        WHEN COALESCE(b.ce_oi_change,0) < 0 AND COALESCE(b.ce_ltp,0) < 0 THEN 'Long Unwinding'
+                        ELSE 'Neutral' END            AS ce_signal
+            FROM base b
+            LEFT JOIN base prev ON prev.symbol = b.symbol
+                AND prev.strike_price = b.strike_price
+            WHERE (b.symbol, b.ce_oi) IN (SELECT symbol, MAX(ce_oi) FROM base GROUP BY symbol)
+        ),
+        pe_wall AS (
+            SELECT b.symbol,
+                   b.strike_price    AS pe_wall_strike,
+                   b.pe_oi           AS pe_wall_oi,
+                   COALESCE(b.pe_ltp, 0)             AS pe_ltp,
+                   COALESCE(b.pe_oi_change, 0)        AS pe_oi_chg,
+                   COALESCE(b.pe_iv,  0)              AS pe_iv,
+                   COALESCE(b.pe_ltp, 0) - COALESCE(prev.pe_ltp, 0)  AS pe_ltp_chg,
+                   COALESCE(b.pe_iv,  0) - COALESCE(prev.pe_iv,  0)  AS pe_iv_chg,
+                   CASE WHEN COALESCE(b.pe_oi_change,0) > 0 AND COALESCE(b.pe_ltp,0) > 0 THEN 'Long Build-Up'
+                        WHEN COALESCE(b.pe_oi_change,0) > 0 AND COALESCE(b.pe_ltp,0) < 0 THEN 'Short Build-Up'
+                        WHEN COALESCE(b.pe_oi_change,0) < 0 AND COALESCE(b.pe_ltp,0) > 0 THEN 'Short Covering'
+                        WHEN COALESCE(b.pe_oi_change,0) < 0 AND COALESCE(b.pe_ltp,0) < 0 THEN 'Long Unwinding'
+                        ELSE 'Neutral' END            AS pe_signal
+            FROM base b
+            LEFT JOIN base prev ON prev.symbol = b.symbol
+                AND prev.strike_price = b.strike_price
+            WHERE (b.symbol, b.pe_oi) IN (SELECT symbol, MAX(pe_oi) FROM base GROUP BY symbol)
+        )
+        SELECT
+            a.symbol,
+            a.spot,
+            a.fut_price,
+            a.atm_strike,
+            c.ce_wall_strike,
+            c.ce_wall_oi,
+            p.pe_wall_strike,
+            p.pe_wall_oi,
+            -- distances from spot
+            c.ce_wall_strike - a.spot           AS ce_dist_spot,
+            a.spot - p.pe_wall_strike           AS pe_dist_spot,
+            -- distances from futures
+            c.ce_wall_strike - a.fut_price      AS ce_dist_fut,
+            a.fut_price - p.pe_wall_strike      AS pe_dist_fut,
+            -- wall strength (how thick vs average)
+            CASE WHEN a.avg_ce_oi > 0
+                 THEN ROUND(a.max_ce_oi / a.avg_ce_oi, 1) ELSE NULL END AS ce_wall_strength,
+            CASE WHEN a.avg_pe_oi > 0
+                 THEN ROUND(a.max_pe_oi / a.avg_pe_oi, 1) ELSE NULL END AS pe_wall_strength,
+            -- PCR
+            CASE WHEN a.total_ce_oi > 0
+                 THEN ROUND(a.total_pe_oi / a.total_ce_oi, 3) ELSE NULL END AS pcr,
+            -- distance between walls
+            c.ce_wall_strike - p.pe_wall_strike AS wall_range,
+            -- CE wall enrichment: LTP, IV, OI change at the wall strike
+            c.ce_ltp, c.ce_ltp_chg, c.ce_iv, c.ce_iv_chg, c.ce_oi_chg, c.ce_signal,
+            -- PE wall enrichment
+            p.pe_ltp, p.pe_ltp_chg, p.pe_iv, p.pe_iv_chg, p.pe_oi_chg, p.pe_signal
+        FROM agg a
+        JOIN ce_wall c ON a.symbol = c.symbol
+        JOIN pe_wall p ON a.symbol = p.symbol
+        ORDER BY a.symbol
+        """
+    )
+    if df.empty:
+        return []
+    return safe_response(to_records(df))
+
+
+
+# ===========================================================================
+# Market Info — Item 11 (NSEFetcher: status, block deals, corp actions)
+# ===========================================================================
+
+# Shared NSEFetcher singleton — one instance per app lifetime, one session.
+_nse_fetcher_instance: Optional[Any] = None
+
+
+def _init_nse_fetcher() -> None:
+    """Warm up the shared NSEFetcher at startup. Silent on failure."""
+    global _nse_fetcher_instance
+    try:
+        _nse_root = Path(__file__).resolve().parent.parent.parent
+        if str(_nse_root) not in sys.path:
+            sys.path.insert(0, str(_nse_root))
+        from nse_fetcher import NSEFetcher
+        # Pass the full path to cookies file so it reads/writes next to nse_fetcher.py
+        _cookies_path = str(_nse_root / "nse_cookies.json")
+        _nse_fetcher_instance = NSEFetcher(cookies_file=_cookies_path)
+        _ = _nse_fetcher_instance._get_session()   # warm up session now
+        print("✓ NSEFetcher session ready")
+    except Exception as exc:
+        print(f"  ℹ NSEFetcher not available at startup: {exc}")
+        _nse_fetcher_instance = None
+
+
+def _get_fetcher():
+    """Return the shared NSEFetcher singleton. Raises HTTPException if unavailable."""
+    global _nse_fetcher_instance
+    if _nse_fetcher_instance is not None:
+        return _nse_fetcher_instance
+    # Lazy init if not done at startup
+    try:
+        _nse_root = Path(__file__).resolve().parent.parent.parent
+        if str(_nse_root) not in sys.path:
+            sys.path.insert(0, str(_nse_root))
+        from nse_fetcher import NSEFetcher
+        _cookies_path = str(_nse_root / "nse_cookies.json")
+        _nse_fetcher_instance = NSEFetcher(cookies_file=_cookies_path)
+        return _nse_fetcher_instance
+    except ModuleNotFoundError:
+        raise HTTPException(503, "NSEFetcher not found — ensure nse_fetcher.py is at <root>/nse_fetcher.py")
+    except Exception as exc:
+        raise HTTPException(502, f"NSEFetcher init failed: {exc}")
+
+
+
+@app.get("/api/market/status")
+def market_status():
+    """Live NSE market open/closed/pre-open status."""
+    f = _get_fetcher()
+    try:
+        result = f.get_market_status()
+        return safe_response(result)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.get("/api/market/block_deals")
+def market_block_deals():
+    """Today's NSE block deals."""
+    f = _get_fetcher()
+    try:
+        df = f.get_block_deals()
+        return [] if df is None or df.empty else to_records(df)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.get("/api/market/corp_actions")
+def market_corp_actions(symbol: Optional[str] = Query(None)):
+    """NSE corporate actions (ex-div, bonus, splits). Filter by symbol optionally."""
+    f = _get_fetcher()
+    try:
+        df = f.get_corporate_actions(symbol=symbol)
+        return [] if df is None or df.empty else to_records(df)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.get("/api/market/announcements")
+def market_announcements(symbol: Optional[str] = Query(None)):
+    """Latest NSE corporate announcements. Filter by symbol optionally."""
+    f = _get_fetcher()
+    try:
+        df = f.get_corporate_announcements(symbol=symbol)
+        return [] if df is None or df.empty else to_records(df)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+@app.get("/api/market/board_meetings")
+def market_board_meetings(symbol: Optional[str] = Query(None)):
+    """Upcoming NSE board meetings. Filter by symbol optionally."""
+    f = _get_fetcher()
+    try:
+        df = f.get_board_meetings(symbol=symbol)
+        return [] if df is None or df.empty else to_records(df)
+    except Exception as exc:
+        raise HTTPException(502, str(exc))
+
+
+# ===========================================================================
+# Item 5: Divergence Identifier
+# ===========================================================================
+
+@app.get("/api/divergence")
+def divergence(
+    mode:        str = Query("snapshot"),   # "snapshot" | "intraday"
+    filter_type: str = Query("all"),
+    top_n:       int = Query(30),
+    min_spot_chg: float = Query(0.03),      # min |spot % change| to flag
+    min_prem_chg: float = Query(0.5),       # min |premium % change| to flag
+):
+    """
+    Identify divergences between spot/futures price moves and option premium moves.
+
+    Mode 'snapshot': Compare two most recent timestamps per symbol.
+    Mode 'intraday': Compare first timestamp of today vs latest per symbol.
+
+    Flags:
+      BULL_HEDGE   : Spot UP  + PE premium UP  (puts bought on rally — bearish hedge)
+      BEAR_SQUEEZE : Spot DOWN + CE premium UP  (calls bought on dip — bear squeeze risk)
+      IV_SPIKE     : Spot FLAT + IV spike       (event anticipation, not delta-driven)
+      SMART_SELL   : Spot UP  + CE premium DOWN (calls being sold on rally — ceiling signal)
+      SMART_BUY    : Spot DOWN + PE premium DOWN (puts being sold on dip — floor signal)
+    """
+    idx_list = ", ".join(f"'{s}'" for s in _NSE_INDICES)
+    sym_filter = (
+        f"AND symbol IN ({idx_list})"       if filter_type == "index"
+        else f"AND symbol NOT IN ({idx_list})" if filter_type == "stock"
+        else ""
+    )
+    today = date.today().isoformat()
+
+    if mode == "intraday":
+        # First timestamp today vs latest timestamp today per symbol
+        df_ref = qdf(
+            f"""
+            WITH day_bounds AS (
+                SELECT symbol,
+                       MIN(timestamp) AS ts_open,
+                       MAX(timestamp) AS ts_now
+                FROM {tbl()}
+                WHERE CAST(timestamp AS DATE) = CAST(? AS DATE)
+                {sym_filter}
+                GROUP BY symbol
+                HAVING MIN(timestamp) != MAX(timestamp)
+            )
+            SELECT
+                n.symbol,
+                STRFTIME(n.timestamp, '%Y-%m-%d %H:%M') AS ts_now,
+                STRFTIME(o.timestamp, '%Y-%m-%d %H:%M') AS ts_open,
+                AVG(n.underlying_price) - AVG(o.underlying_price)     AS spot_chg,
+                AVG(o.underlying_price)                                AS spot_open,
+                AVG(n.underlying_price)                                AS spot_now,
+                -- ATM CE/PE (distance_from_atm = 0)
+                AVG(CASE WHEN n.distance_from_atm = 0 THEN n.ce_ltp ELSE NULL END) AS ce_ltp_now,
+                AVG(CASE WHEN o.distance_from_atm = 0 THEN o.ce_ltp ELSE NULL END) AS ce_ltp_open,
+                AVG(CASE WHEN n.distance_from_atm = 0 THEN n.pe_ltp ELSE NULL END) AS pe_ltp_now,
+                AVG(CASE WHEN o.distance_from_atm = 0 THEN o.pe_ltp ELSE NULL END) AS pe_ltp_open,
+                AVG(CASE WHEN n.distance_from_atm = 0 THEN n.ce_iv  ELSE NULL END) AS ce_iv_now,
+                AVG(CASE WHEN o.distance_from_atm = 0 THEN o.ce_iv  ELSE NULL END) AS ce_iv_open,
+                AVG(CASE WHEN n.distance_from_atm = 0 THEN n.pe_iv  ELSE NULL END) AS pe_iv_now,
+                AVG(CASE WHEN o.distance_from_atm = 0 THEN o.pe_iv  ELSE NULL END) AS pe_iv_open,
+                AVG(CASE WHEN n.distance_from_atm = 0 THEN n.net_flow ELSE NULL END) AS net_flow
+            FROM {tbl()} n
+            JOIN day_bounds d ON n.symbol = d.symbol AND n.timestamp = d.ts_now
+            JOIN {tbl()} o   ON o.symbol = d.symbol AND o.timestamp = d.ts_open
+            WHERE n.expiry >= CURRENT_DATE
+            GROUP BY n.symbol, n.timestamp, o.timestamp
+            """,
+            [today],
+        )
+    else:
+        # Compare two most recent timestamps per symbol.
+        # Use a CTE to get exact ts_now and ts_prev per symbol first,
+        # then join only those two rows — avoids a full cross-join.
+        df_ref = qdf(
+            f"""
+            WITH sym_ts AS (
+                SELECT symbol,
+                       MAX(timestamp) AS ts_now,
+                       MIN(timestamp) AS ts_prev
+                FROM (
+                    SELECT symbol, timestamp,
+                           DENSE_RANK() OVER (PARTITION BY symbol ORDER BY timestamp DESC) AS rk
+                    FROM {tbl()}
+                    WHERE expiry >= CURRENT_DATE {sym_filter}
+                ) ranked
+                WHERE rk <= 2
+                GROUP BY symbol
+                HAVING COUNT(DISTINCT timestamp) >= 2
+            ),
+            snap_now AS (
+                SELECT t.symbol,
+                       AVG(t.underlying_price) AS spot_now,
+                       AVG(CASE WHEN t.distance_from_atm=0 THEN t.ce_ltp   END) AS ce_ltp_now,
+                       AVG(CASE WHEN t.distance_from_atm=0 THEN t.pe_ltp   END) AS pe_ltp_now,
+                       AVG(CASE WHEN t.distance_from_atm=0 THEN t.ce_iv    END) AS ce_iv_now,
+                       AVG(CASE WHEN t.distance_from_atm=0 THEN t.pe_iv    END) AS pe_iv_now,
+                       AVG(CASE WHEN t.distance_from_atm=0 THEN t.net_flow END) AS net_flow,
+                       STRFTIME(MAX(t.timestamp), '%Y-%m-%d %H:%M') AS ts_now_str
+                FROM {tbl()} t
+                JOIN sym_ts s ON t.symbol=s.symbol AND t.timestamp=s.ts_now
+                GROUP BY t.symbol
+            ),
+            snap_prev AS (
+                SELECT t.symbol,
+                       AVG(t.underlying_price) AS spot_prev,
+                       AVG(CASE WHEN t.distance_from_atm=0 THEN t.ce_ltp END) AS ce_ltp_prev,
+                       AVG(CASE WHEN t.distance_from_atm=0 THEN t.pe_ltp END) AS pe_ltp_prev,
+                       AVG(CASE WHEN t.distance_from_atm=0 THEN t.ce_iv  END) AS ce_iv_prev,
+                       AVG(CASE WHEN t.distance_from_atm=0 THEN t.pe_iv  END) AS pe_iv_prev,
+                       STRFTIME(MAX(t.timestamp), '%Y-%m-%d %H:%M') AS ts_prev_str
+                FROM {tbl()} t
+                JOIN sym_ts s ON t.symbol=s.symbol AND t.timestamp=s.ts_prev
+                GROUP BY t.symbol
+            )
+            SELECT n.symbol,
+                   n.ts_now_str  AS ts_now,
+                   p.ts_prev_str AS ts_open,
+                   n.spot_now - p.spot_prev  AS spot_chg,
+                   p.spot_prev               AS spot_open,
+                   n.spot_now                AS spot_now,
+                   n.ce_ltp_now, p.ce_ltp_prev AS ce_ltp_open,
+                   n.pe_ltp_now, p.pe_ltp_prev AS pe_ltp_open,
+                   n.ce_iv_now,  p.ce_iv_prev  AS ce_iv_open,
+                   n.pe_iv_now,  p.pe_iv_prev  AS pe_iv_open,
+                   n.net_flow
+            FROM snap_now n
+            JOIN snap_prev p ON n.symbol = p.symbol
+            """
+        )
+
+    if df_ref.empty:
+        return []
+
+    rows = []
+    for _, r in df_ref.iterrows():
+        spot_open = float(r.get("spot_open") or 0)
+        spot_now  = float(r.get("spot_now")  or 0)
+        if spot_open <= 0:
+            continue
+        spot_pct  = (spot_now - spot_open) / spot_open * 100
+
+        ce_open = float(r.get("ce_ltp_open") or 0)
+        ce_now  = float(r.get("ce_ltp_now")  or 0)
+        pe_open = float(r.get("pe_ltp_open") or 0)
+        pe_now  = float(r.get("pe_ltp_now")  or 0)
+
+        ce_pct  = (ce_now - ce_open) / ce_open * 100 if ce_open > 0 else 0
+        pe_pct  = (pe_now - pe_open) / pe_open * 100 if pe_open > 0 else 0
+
+        ce_iv_chg = float((r.get("ce_iv_now") or 0)) - float((r.get("ce_iv_open") or 0))
+        pe_iv_chg = float((r.get("pe_iv_now") or 0)) - float((r.get("pe_iv_open") or 0))
+
+        # Classify divergence
+        signal = None
+        magnitude = 0.0
+        spot_flat = abs(spot_pct) < min_spot_chg
+
+        if not spot_flat:
+            if spot_pct > min_spot_chg and pe_pct > min_prem_chg:
+                signal = "BULL_HEDGE"
+                magnitude = abs(spot_pct) + abs(pe_pct)
+            elif spot_pct < -min_spot_chg and ce_pct > min_prem_chg:
+                signal = "BEAR_SQUEEZE"
+                magnitude = abs(spot_pct) + abs(ce_pct)
+            elif spot_pct > min_spot_chg and ce_pct < -min_prem_chg:
+                signal = "SMART_SELL"
+                magnitude = abs(spot_pct) + abs(ce_pct)
+            elif spot_pct < -min_spot_chg and pe_pct < -min_prem_chg:
+                signal = "SMART_BUY"
+                magnitude = abs(spot_pct) + abs(pe_pct)
+        else:
+            # Spot flat but IV spiked
+            avg_iv_chg = (abs(ce_iv_chg) + abs(pe_iv_chg)) / 2
+            if avg_iv_chg >= 1.0:  # at least 1% IV move
+                signal = "IV_SPIKE"
+                magnitude = avg_iv_chg
+
+        if signal is None:
+            continue
+
+        rows.append({
+            "symbol":     r["symbol"],
+            "signal":     signal,
+            "magnitude":  round(magnitude, 3),
+            "spot_pct":   round(spot_pct,  3),
+            "ce_pct":     round(ce_pct,    3),
+            "pe_pct":     round(pe_pct,    3),
+            "ce_iv_chg":  round(ce_iv_chg, 3),
+            "pe_iv_chg":  round(pe_iv_chg, 3),
+            "spot_now":   round(spot_now,  2),
+            "ce_ltp_now": round(ce_now,    2),
+            "pe_ltp_now": round(pe_now,    2),
+            "net_flow":   round(float(r.get("net_flow") or 0), 2),
+            "ts_now":     r.get("ts_now", ""),
+            "ts_ref":     r.get("ts_open", ""),
+        })
+
+    rows.sort(key=lambda x: x["magnitude"], reverse=True)
+    return safe_response(rows[:top_n])
+
+
+# ===========================================================================
+# Item 7: Intraday IV trend per symbol
+# ===========================================================================
+
+@app.get("/api/iv_intraday_trend")
+def iv_intraday_trend(filter_type: str = Query("all")):
+    """
+    For each symbol: OI-weighted ATM IV at first timestamp today vs latest.
+    Returns iv_open, iv_now, iv_chg, iv_chg_pct, direction indicator.
+    """
+    idx_list = ", ".join(f"'{s}'" for s in _NSE_INDICES)
+    sym_filter = (
+        f"AND symbol IN ({idx_list})"       if filter_type == "index"
+        else f"AND symbol NOT IN ({idx_list})" if filter_type == "stock"
+        else ""
+    )
+    today = date.today().isoformat()
+    df = qdf(
+        f"""
+        WITH day_bounds AS (
+            SELECT symbol,
+                   MIN(timestamp) AS ts_open,
+                   MAX(timestamp) AS ts_now
+            FROM {tbl()}
+            WHERE CAST(timestamp AS DATE) = CAST(? AS DATE)
+            {sym_filter}
+            GROUP BY symbol
+        ),
+        iv_open AS (
+            SELECT t.symbol,
+                   SUM(COALESCE(t.ce_iv,0)*COALESCE(t.ce_oi,0)
+                      +COALESCE(t.pe_iv,0)*COALESCE(t.pe_oi,0))
+                   / NULLIF(SUM(COALESCE(t.ce_oi,0)+COALESCE(t.pe_oi,0)),0) AS iv
+            FROM {tbl()} t
+            JOIN day_bounds d ON t.symbol=d.symbol AND t.timestamp=d.ts_open
+            WHERE t.expiry >= CURRENT_DATE AND t.ce_iv > 0
+            GROUP BY t.symbol
+        ),
+        iv_now AS (
+            SELECT t.symbol,
+                   SUM(COALESCE(t.ce_iv,0)*COALESCE(t.ce_oi,0)
+                      +COALESCE(t.pe_iv,0)*COALESCE(t.pe_oi,0))
+                   / NULLIF(SUM(COALESCE(t.ce_oi,0)+COALESCE(t.pe_oi,0)),0) AS iv
+            FROM {tbl()} t
+            JOIN day_bounds d ON t.symbol=d.symbol AND t.timestamp=d.ts_now
+            WHERE t.expiry >= CURRENT_DATE AND t.ce_iv > 0
+            GROUP BY t.symbol
+        )
+        SELECT
+            o.symbol,
+            ROUND(o.iv, 2) AS iv_open,
+            ROUND(n.iv, 2) AS iv_now,
+            ROUND(n.iv - o.iv, 2) AS iv_chg,
+            CASE WHEN o.iv > 0
+                 THEN ROUND((n.iv - o.iv) / o.iv * 100, 2)
+                 ELSE NULL END AS iv_chg_pct
+        FROM iv_open o
+        JOIN iv_now  n ON o.symbol = n.symbol
+        ORDER BY ABS(n.iv - o.iv) DESC
+        """,
+        [today],
+    )
+    return [] if df.empty else to_records(df)
+
+
+# ===========================================================================
+# Item 8 (Premium Lens) + Item 9b (EOD OI/IV history)
+# ===========================================================================
+
+@app.get("/api/premium_lens")
+def premium_lens(
+    symbol:        str           = Query(...),
+    expiry:        str           = Query(...),
+    timestamp:     Optional[str] = Query(None),
+    min_ratio:     float         = Query(0.0),   # show only where ratio < min_ratio
+    max_ratio:     float         = Query(999.0), # or > max_ratio (outside normal band)
+    min_oi:        int           = Query(0),
+):
+    """
+    Premium richness/cheapness screener.
+    Uses ce_TPrice/pe_TPrice (Black-Scholes theoretical) vs actual LTP.
+    ce_ltp_s/pe_ltp_s (Premium/Discount/NA) from DB is also shown.
+    Filters to show only strikes outside the configured ratio range.
+    """
+    df = qdf(
+        f"""
+        SELECT
+            strike_price,
+            distance_from_atm,
+            COALESCE(days_to_expiry,  0) AS dte,
+            COALESCE(ce_ltp,     0) AS ce_ltp,
+            COALESCE(ce_TPrice,  0) AS ce_tprice,
+            COALESCE(ce_ltp_s, 'NA') AS ce_ltp_s,
+            COALESCE(ce_iv,      0) AS ce_iv,
+            COALESCE(ce_delta,   0) AS ce_delta,
+            COALESCE(ce_oi,      0) AS ce_oi,
+            COALESCE(ce_volume,  0) AS ce_volume,
+            COALESCE(ce_bid_ask_spread, 0) AS ce_spread,
+            COALESCE(pe_ltp,     0) AS pe_ltp,
+            COALESCE(pe_TPrice,  0) AS pe_tprice,
+            COALESCE(pe_ltp_s, 'NA') AS pe_ltp_s,
+            COALESCE(pe_iv,      0) AS pe_iv,
+            COALESCE(pe_delta,   0) AS pe_delta,
+            COALESCE(pe_oi,      0) AS pe_oi,
+            COALESCE(pe_volume,  0) AS pe_volume,
+            COALESCE(pe_bid_ask_spread, 0) AS pe_spread,
+            COALESCE(underlying_price,  0) AS spot
+        FROM {tbl()}
+        WHERE symbol=? AND expiry=?
+                    AND timestamp = (
+              SELECT MAX(timestamp) FROM {tbl()}
+              WHERE symbol = ? AND expiry = ?)
+ AND (COALESCE(ce_ltp,0) > 0 OR COALESCE(pe_ltp,0) > 0)
+          AND (COALESCE(ce_oi,0) >= ? OR COALESCE(pe_oi,0) >= ?)
+        ORDER BY strike_price
+        """,
+        [symbol, expiry[:10], symbol, expiry[:10], min_oi, min_oi],
+    )
+    if df.empty:
+        raise HTTPException(404, "No data")
+
+    # Compute price ratios
+    df["ce_ratio"] = df.apply(
+        lambda r: round(r["ce_ltp"] / r["ce_tprice"], 4) if r["ce_tprice"] > 0 else None, axis=1)
+    df["pe_ratio"] = df.apply(
+        lambda r: round(r["pe_ltp"] / r["pe_tprice"], 4) if r["pe_tprice"] > 0 else None, axis=1)
+    df["ce_diff_pct"] = df.apply(
+        lambda r: round((r["ce_ltp"] - r["ce_tprice"]) / r["ce_tprice"] * 100, 2)
+        if r["ce_tprice"] > 0 else None, axis=1)
+    df["pe_diff_pct"] = df.apply(
+        lambda r: round((r["pe_ltp"] - r["pe_tprice"]) / r["pe_tprice"] * 100, 2)
+        if r["pe_tprice"] > 0 else None, axis=1)
+
+    # Apply ratio filter: show rows outside the "normal" band
+    if min_ratio > 0 or max_ratio < 999:
+        mask = (
+            ((df["ce_ratio"].notna()) & ((df["ce_ratio"] < min_ratio) | (df["ce_ratio"] > max_ratio))) |
+            ((df["pe_ratio"].notna()) & ((df["pe_ratio"] < min_ratio) | (df["pe_ratio"] > max_ratio)))
+        )
+        df = df[mask]
+
+    return safe_response({"rows": to_records(df), "symbol": symbol, "expiry": expiry[:10]})
+
+
+@app.get("/api/oi_history")
+def oi_history(
+    symbol:     str = Query(...),
+    expiry:     str = Query(...),
+    days:       int = Query(5),
+    price_range_pct: float = Query(10.0),   # ATM ± % filter
+):
+    """
+    Multi-day OI history for heatmap: strikes × dates → OI change.
+    Filters strikes to ATM ± price_range_pct to keep the heatmap readable.
+    """
+    df = qdf(
+        f"""
+        WITH daily AS (
+            SELECT
+                CAST(timestamp AS DATE)  AS dt,
+                strike_price,
+                AVG(COALESCE(ce_oi, 0)) AS ce_oi,
+                AVG(COALESCE(pe_oi, 0)) AS pe_oi,
+                AVG(COALESCE(underlying_price, 0)) AS spot
+            FROM {tbl()}
+            WHERE symbol=? AND expiry=?
+              AND CAST(timestamp AS DATE) >= CAST(? AS DATE) - INTERVAL ({days}) DAYS
+            GROUP BY dt, strike_price
+        )
+        SELECT
+            CAST(dt AS VARCHAR)  AS date,
+            strike_price,
+            ce_oi, pe_oi, spot,
+            ce_oi - LAG(ce_oi) OVER (PARTITION BY strike_price ORDER BY dt) AS ce_oi_chg,
+            pe_oi - LAG(pe_oi) OVER (PARTITION BY strike_price ORDER BY dt) AS pe_oi_chg
+        FROM daily
+        ORDER BY dt, strike_price
+        """,
+        [symbol, expiry[:10], date.today().isoformat()],
+    )
+    if df.empty:
+        raise HTTPException(404, "No history data")
+
+    # Filter by price range around average spot
+    avg_spot = float(df["spot"].mean())
+    if avg_spot > 0:
+        lo_price = avg_spot * (1 - price_range_pct / 100)
+        hi_price = avg_spot * (1 + price_range_pct / 100)
+        df = df[(df["strike_price"] >= lo_price) & (df["strike_price"] <= hi_price)]
+
+    dates   = sorted(df["date"].unique())
+    strikes = sorted(df["strike_price"].unique())
+    return safe_response({
+        "symbol":  symbol,
+        "expiry":  expiry[:10],
+        "dates":   dates,
+        "strikes": [float(s) for s in strikes],
+        "rows":    to_records(df),
+    })
+
+
+@app.get("/api/iv_history")
+def iv_history(
+    symbol:     str   = Query(...),
+    expiry:     str   = Query(...),
+    days:       int   = Query(5),
+    price_range_pct: float = Query(10.0),
+):
+    """Multi-day IV history for heatmap: strikes × dates → ATM IV."""
+    df = qdf(
+        f"""
+        WITH daily AS (
+            SELECT
+                CAST(timestamp AS DATE)  AS dt,
+                strike_price,
+                AVG(COALESCE(ce_iv, 0)) AS ce_iv,
+                AVG(COALESCE(pe_iv, 0)) AS pe_iv,
+                AVG(COALESCE(underlying_price, 0)) AS spot
+            FROM {tbl()}
+            WHERE symbol=? AND expiry=?
+              AND CAST(timestamp AS DATE) >= CAST(? AS DATE) - INTERVAL ({days}) DAYS
+              AND COALESCE(ce_iv, 0) > 0
+            GROUP BY dt, strike_price
+        )
+        SELECT
+            CAST(dt AS VARCHAR) AS date,
+            strike_price,
+            ce_iv, pe_iv, spot,
+            (ce_iv + pe_iv) / 2.0 AS avg_iv,
+            (ce_iv + pe_iv) / 2.0
+              - LAG((ce_iv + pe_iv) / 2.0) OVER (PARTITION BY strike_price ORDER BY dt) AS iv_chg
+        FROM daily
+        ORDER BY dt, strike_price
+        """,
+        [symbol, expiry[:10], date.today().isoformat()],
+    )
+    if df.empty:
+        raise HTTPException(404, "No IV history")
+
+    avg_spot = float(df["spot"].mean())
+    if avg_spot > 0:
+        lo_price = avg_spot * (1 - price_range_pct / 100)
+        hi_price = avg_spot * (1 + price_range_pct / 100)
+        df = df[(df["strike_price"] >= lo_price) & (df["strike_price"] <= hi_price)]
+
+    dates   = sorted(df["date"].unique())
+    strikes = sorted(df["strike_price"].unique())
+    return safe_response({
+        "symbol":  symbol,
+        "expiry":  expiry[:10],
+        "dates":   dates,
+        "strikes": [float(s) for s in strikes],
+        "rows":    to_records(df),
     })
 
 
