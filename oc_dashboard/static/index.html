@@ -11,7 +11,7 @@
   --bg:#080b12;--surf:#0e1320;--card:#131b2a;--card2:#182035;
   --border:#1e2d47;--border2:#243550;--acc:#00c8f0;--acc2:#f07000;
   --acc3:#8b5cf6;--green:#10b981;--red:#f43f5e;--amber:#f59e0b;
-  --text:#dde4f0;--muted:#a8b4c7;
+  --text:#dde4f0;--muted:#5a7090;
   --mono:'JetBrains Mono',monospace;--sans:'DM Sans',sans-serif;
 }
 *{box-sizing:border-box;margin:0;padding:0}
@@ -622,7 +622,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       <button data-ft="index">INDEX</button>
       <button data-ft="stock">STOCK</button>
     </div>
-    <span class="fl">TIMESTAMP</span><select id="dsTimestamp" style="min-width:140px"></select>
+    <span class="fl">TIMESTAMP</span><select id="dsTimestamp" style="min-width:140px"></select><span id="dsTimestampSym" style="font-family:var(--mono);font-size:9px;color:var(--muted)"></span>
     <button class="btn" id="btnDs">LOAD</button>
   </div>
   <div class="kpi-row" id="dsKpis"></div>
@@ -1072,6 +1072,8 @@ async function refreshDbCache(){
     await fetch('/api/cache/refresh',{method:'POST'});
     btn.textContent='✓ DB';btn.style.color='var(--green)';
     await initSymbols();
+    await loadDsTimestamps();  // refresh option screener timestamp
+    loadCascade('plSymbol','plExpiry','plTimestamp').catch(()=>{});  // refresh premium lens timestamp
     loadOverview().catch(()=>{});
   }catch(e){btn.textContent='✗ DB';btn.style.color='var(--red)';}
   setTimeout(()=>{btn.textContent='↻ DB';btn.style.color='';},3000);
@@ -1203,10 +1205,20 @@ async function loadAtmStrikes(){
 // ── DS timestamps ─────────────────────────────────────────────────
 async function loadDsTimestamps(){
   if(!ALL_SYMS.length)return;
+  // Use NIFTY if available (most timestamps), else first index, else first symbol.
+  // This gives timestamps that reflect actual OC import cadence rather than
+  // an arbitrary stock that may have fewer snapshots.
+  const preferred=['NIFTY','BANKNIFTY','FINNIFTY'];
+  const sym=preferred.find(s=>ALL_SYMS.includes(s))||ALL_SYMS.find(s=>NSE_IDX.has(s))||ALL_SYMS[0];
   try{
-    const tss=await api(`/api/timestamps?symbol=${encodeURIComponent(ALL_SYMS[0])}`);
-    if(tss.length)populateSel('dsTimestamp',tss);
-  }catch(e){}
+    const tss=await api(`/api/timestamps?symbol=${encodeURIComponent(sym)}`);
+    if(tss.length){
+      populateSel('dsTimestamp',tss);
+      // Show which symbol the timestamps came from
+      const lbl=document.getElementById('dsTimestampSym');
+      if(lbl)lbl.textContent=`(${sym})`;
+    }
+  }catch(e){console.warn('loadDsTimestamps:',e.message);}
 }
 
 // ── OVERVIEW ──────────────────────────────────────────────────────
@@ -2001,8 +2013,11 @@ wireToggleGroup('oiHistViewGroup');
 // ══════════════════════════════════════════════════════════════════
 VIEW_INIT['divergence'] = ()=>{};
 VIEW_INIT['delta'] = ()=>{
-  loadCascade('plSymbol','plExpiry','plTimestamp');
-  loadDsTimestamps();
+  loadDsTimestamps();  // populates dsTimestamp using best available symbol
+  // For premium lens: if plSymbol already has a selection, cascade it;
+  // otherwise it will populate once user picks a symbol.
+  const plSym=document.getElementById('plSymbol')?.value;
+  if(plSym) loadCascade('plSymbol','plExpiry','plTimestamp');
 };
 
 // ══════════════════════════════════════════════════════════════════
