@@ -394,6 +394,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   <div class="subtabs">
     <button class="subtab active" data-stab="oi-signals">SIGNALS</button>
     <button class="subtab" data-stab="oi-history">EOD HISTORY</button>
+    <button class="subtab" data-stab="oi-flow">FLOW ANALYSIS</button>
   </div>
   <div class="subtab-panel active" id="stab-oi-signals">
   <div class="card">
@@ -405,7 +406,8 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </div>
   <div class="subtab-panel" id="stab-oi-history">
     <div class="filter-bar">
-      <span class="fl">DAYS</span><input type="number" id="oiHistDays" value="5" min="2" max="30" style="width:55px">
+      <span class="fl">EXPIRY</span><select id="oiHistExpiry" style="min-width:110px"></select>
+      <span class="fl">DAYS</span><input type="number" id="oiHistDays" value="1" min="1" max="30" style="width:55px" title="1 = intraday snapshots today, >1 = daily aggregation">
       <span class="fl">VIEW</span>
       <div class="toggle-group" id="oiHistViewGroup">
         <button class="active" data-hv="oi">OI</button>
@@ -418,6 +420,74 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       <div id="oiHistChart" class="chart-lg"><div class="empty">Click LOAD first</div></div>
     </div>
   </div>
+
+  <div class="subtab-panel" id="stab-oi-flow">
+    <div class="filter-bar">
+      <span class="fl">EXPIRY</span>
+      <select id="flowExpiry" style="min-width:120px">
+        <option value="all">ALL EXPIRIES</option>
+      </select>
+      <label class="chk-label"><input type="checkbox" id="flowExpiryShowPast"> PAST</label>
+      <span class="fl">DATE FROM</span>
+      <input type="date" id="flowDateFrom" style="width:130px">
+      <span class="fl">TO</span>
+      <input type="date" id="flowDateTo" style="width:130px">
+      <button class="btn sec" id="btnFlowToday" style="font-size:9px;padding:4px 10px">TODAY</button>
+      <span class="fl">MIN VOL</span>
+      <input type="number" id="flowMinVol" value="100" style="width:60px">
+      <button class="btn" id="btnFlowLoad">LOAD</button>
+    </div>
+
+    <!-- DTE regime banner -->
+    <div id="flowDteBanner" style="display:none;padding:6px 12px;margin-bottom:8px;border-radius:4px;font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.07em"></div>
+
+    <!-- Crossing signal -->
+    <div id="flowCrossSignal" style="display:none;margin-bottom:8px;padding:8px 12px;border-radius:4px;border:1px solid var(--amber);background:rgba(245,158,11,.08);font-family:var(--mono);font-size:10px;color:var(--amber)"></div>
+
+    <!-- Main OI flow chart -->
+    <div class="card">
+      <div class="card-title">
+        CUMULATIVE OI FLOW BY DELTA BUCKET
+        <span class="badge" style="margin-left:6px">CE solid · PE dashed · PCR dots (Y2)</span>
+        <span style="margin-left:auto;display:flex;gap:6px">
+          <span class="fl">VIEW</span>
+          <div class="toggle-group" id="flowViewGroup">
+            <button class="active" data-fv="oi">OI FLOW</button>
+            <button data-fv="gex">GEX FLOW</button>
+            <button data-fv="velocity">VELOCITY</button>
+          </div>
+        </span>
+      </div>
+      <div id="flowMainChart" class="chart-lg"><div class="empty">Select filters and click LOAD</div></div>
+    </div>
+
+    <!-- Velocity / Acceleration subplot -->
+    <div class="card" style="margin-top:10px" id="flowVelCard" style="display:none">
+      <div class="card-title">OI VELOCITY &amp; ACCELERATION <span class="badge">per bucket</span></div>
+      <div id="flowVelChart" class="chart"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Buy/sell imbalance bar -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">BUY/SELL QUEUE IMBALANCE AT LATEST SNAPSHOT
+        <span class="badge">ce_tbq – pe_tbq per bucket</span></div>
+      <div id="flowImbalChart" class="chart" style="min-height:200px"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Bucket signal table -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">BUCKET FLOW SIGNALS</div>
+      <div class="tw" id="flowSignalTable"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Migrated strikes -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">DELTA-MIGRATED STRIKES
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:6px">strikes whose current delta bucket differs from opening bucket</span>
+      </div>
+      <div class="tw" id="flowMigTable"><div class="empty">Load data first</div></div>
+    </div>
+  </div><!-- /stab-oi-flow -->
 </div>
 
 <!-- ══ SHOCKERS ══════════════════════════════════════════════════ -->
@@ -730,6 +800,15 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       <div class="stg-row"><label>BID-ASK BAD THRESHOLD (%)</label><input type="number" id="stgBaqBad" value="15" step="1"></div>
     </div>
     <div class="card">
+      <div class="card-title">OI FLOW BUCKETS</div>
+      <div class="stg-row"><label>DEEP ITM / ATM BOUNDARY (|δ|)</label><input type="number" id="stgBktAtm"  value="0.50" step="0.05" min="0.1" max="1.0"></div>
+      <div class="stg-row"><label>ATM / NEAR OTM BOUNDARY (|δ|)</label><input type="number" id="stgBktNear" value="0.30" step="0.05" min="0.05" max="0.6"></div>
+      <div class="stg-row"><label>NEAR OTM / FAR OTM BOUNDARY (|δ|)</label><input type="number" id="stgBktFar"  value="0.15" step="0.05" min="0.02" max="0.4"></div>
+      <div class="stg-row"><label>FAR OTM / DEEP OTM BOUNDARY (|δ|)</label><input type="number" id="stgBktDeep" value="0.05" step="0.01" min="0.01" max="0.2"></div>
+      <div class="stg-row"><label>STABLE TOTAL OI % (crossing signal)</label><input type="number" id="stgBktStable" value="1.0" step="0.5"></div>
+      <div class="stg-row"><label>BUCKET CROSS SHIFT % (crossing signal)</label><input type="number" id="stgBktCross" value="5.0" step="0.5"></div>
+    </div>
+    <div class="card">
       <div class="card-title">IV RANK / ANALYTICS</div>
       <div class="stg-row"><label>IV RANK LOOKBACK DAYS</label><input type="number" id="stgIvLookback" value="90" step="10" min="10"></div>
       <div class="stg-row"><label>GAMMA PRICE RANGE % (DEFAULT)</label><input type="number" id="stgGammaRange" value="5" step="0.5"></div>
@@ -977,6 +1056,7 @@ function getFilter(id){
 // ── Subtabs ──────────────────────────────────────────────────────
 document.querySelectorAll('.subtab').forEach(tab=>{
   tab.addEventListener('click',()=>{
+    if(tab.dataset.stab==='oi-flow') refreshFlowExpiries().catch(()=>{});
     const container=tab.closest('.view');
     container.querySelectorAll('.subtab').forEach(t=>t.classList.remove('active'));
     container.querySelectorAll('.subtab-panel').forEach(p=>p.classList.remove('active'));
@@ -1015,6 +1095,8 @@ const SETTINGS_DEFAULTS={
   stgDsMinOi:0,stgDsMinVol:0,stgBaqWarn:5,stgBaqBad:15,
   stgIvLookback:90,stgGammaRange:5,stgMagnetThr:0.75,stgLambda:0.1,
   stgMinOiChange:10,  // hide OI signals rows where |ce+pe oi change| < this
+  stgBktAtm:0.50, stgBktNear:0.30, stgBktFar:0.15, stgBktDeep:0.05,
+  stgBktStable:1.0, stgBktCross:5.0,
 };
 function loadSettings(){
   try{
@@ -1130,8 +1212,16 @@ async function initSymbols(){
         loadCascade('gexSymbol','gexExpiry','gexTimestamp'),
         loadCascade('ivSymbol','ivExpiry','ivTimestamp'),
         loadCascade('trendSymbol','trendExpiry','trendTimestamp'),
-      ]),
-      api('/api/lot_sizes').catch(()=>({})),
+    ]),
+    // Populate EOD history expiry selector on init using a reliable index
+    Promise.resolve().then(async()=>{
+      const refSym=(['NIFTY','BANKNIFTY'].find(s=>ALL_SYMS.includes(s)))||ALL_SYMS[0];
+      if(refSym){
+        const exps=await api(`/api/expiries?symbol=${encodeURIComponent(refSym)}&future_only=false`).catch(()=>[]);
+        if(exps.length)populateSel('oiHistExpiry',exps);
+      }
+    }),
+    api('/api/lot_sizes').catch(()=>({})),
     ]);
     LOT_SIZES=lotData||{};
     await loadAtmStrikes();
@@ -1157,6 +1247,16 @@ document.getElementById('trendAtmDist').addEventListener('change',()=>{
 document.getElementById('oiFilterGroup').addEventListener('click',e=>{
   const ft=e.target.dataset.ft;if(!ft)return;
   populateSel('oiSymbol',ALL_SYMS.filter(s=>ft==='index'?NSE_IDX.has(s):ft==='stock'?!NSE_IDX.has(s):true));
+});
+document.getElementById('oiSymbol')?.addEventListener('change',async()=>{
+  refreshFlowExpiries().catch(()=>{});
+  // Also refresh EOD history expiry selector
+  const sym=document.getElementById('oiSymbol')?.value;
+  if(!sym) return;
+  try{
+    const exps=await api(`/api/expiries?symbol=${encodeURIComponent(sym)}&future_only=false`);
+    populateSel('oiHistExpiry',exps);
+  }catch(e){}
 });
 document.getElementById('gexFilterGroup').addEventListener('click',e=>{
   const ft=e.target.dataset.ft;if(!ft)return;
@@ -2136,19 +2236,17 @@ async function loadPremiumLens(){
 // ══════════════════════════════════════════════════════════════════
 async function loadOiHistory(){
   const sym  = document.getElementById('oiSymbol')?.value;
-  const days = document.getElementById('oiHistDays')?.value||5;
+  const days = document.getElementById('oiHistDays')?.value||1;
   const view = document.querySelector('#oiHistViewGroup .active')?.dataset.hv||'oi';
-  if(!sym){alert('Select a symbol first');return;}
-  // Need expiry — use first available
+  const exp  = document.getElementById('oiHistExpiry')?.value;
+  if(!sym){alert('Select a symbol in the OI Signals filter bar');return;}
+  if(!exp){alert('Select an expiry');return;}
+  setLoad('oiHistChart');
   try{
-    const exps=await api(`/api/expiries?symbol=${encodeURIComponent(sym)}&future_only=false`);
-    if(!exps.length){setEmpty('oiHistChart','No expiry data');return;}
-    const exp=exps[0];
-    setLoad('oiHistChart');
     const endpoint=view==='iv'?'iv_history':'oi_history';
     const d=await api(`/api/${endpoint}?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&days=${days}`);
     if(!d.dates?.length||!d.strikes?.length){
-      setEmpty('oiHistChart','Not enough historical data');return;}
+      setEmpty('oiHistChart','Not enough historical data — try days=1 for intraday');return;}
 
     // Build heatmap z-matrix
     const rowsMap={};
@@ -2247,6 +2345,373 @@ function jumpOiSignals(sym){
       document.getElementById('btnOi')?.click();
     }
   },80);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+// OI Flow Bucket Analysis
+// ══════════════════════════════════════════════════════════════════
+const BUCKET_NAMES  = ['DEEP_ITM','ATM','NEAR_OTM','FAR_OTM','DEEP_OTM'];
+const BUCKET_LABELS = {
+  DEEP_ITM:'DEEP ITM (|δ|≥0.5)',
+  ATM:'ATM (|δ| 0.3-0.5)',
+  NEAR_OTM:'NEAR OTM (|δ| 0.15-0.3)',
+  FAR_OTM:'FAR OTM (|δ| 0.05-0.15)',
+  DEEP_OTM:'DEEP OTM (|δ|<0.05)',
+};
+const BUCKET_COLORS = {
+  DEEP_ITM: C.acc2,
+  ATM:      C.acc,
+  NEAR_OTM: C.green,
+  FAR_OTM:  C.pur,
+  DEEP_OTM: C.muted,
+};
+const DTE_REGIME_STYLE = {
+  expiry: {bg:'rgba(244,63,94,.12)',color:'var(--red)',  label:'⚠ EXPIRY DAY — delta unstable, interpret with caution'},
+  short:  {bg:'rgba(245,158,11,.10)',color:'var(--amber)',label:'SHORT TERM (1–7 DTE) — gamma dominant'},
+  medium: {bg:'rgba(0,200,240,.06)', color:'var(--acc)',  label:'MEDIUM TERM (8–21 DTE)'},
+  long:   {bg:'rgba(139,92,246,.08)',color:'var(--pur)',  label:'LONG TERM (>21 DTE) — vega dominant'},
+};
+const FLOW_TYPE_COLORS = {
+  'Speculative':'var(--acc2)',
+  'Hedging':'var(--green)',
+  'Squeeze Setup':'var(--amber)',
+  'Panic Flow':'var(--red)',
+  'Dealer Positioning':'var(--muted)',
+  'Mixed':'var(--text)',
+};
+
+// Wire toggle group
+wireToggleGroup('flowViewGroup');
+document.getElementById('flowViewGroup')?.addEventListener('click',()=>{
+  if(_flowLastData) renderFlowCharts(_flowLastData);
+});
+
+// Set default dates to today
+(()=>{
+  const today=new Date().toLocaleDateString('sv-SE'); // YYYY-MM-DD
+  const df=document.getElementById('flowDateFrom');
+  const dt=document.getElementById('flowDateTo');
+  if(df&&!df.value) df.value=today;
+  if(dt&&!dt.value) dt.value=today;
+})();
+
+document.getElementById('btnFlowToday')?.addEventListener('click',()=>{
+  const today=new Date().toLocaleDateString('sv-SE');
+  document.getElementById('flowDateFrom').value=today;
+  document.getElementById('flowDateTo').value=today;
+});
+document.getElementById('btnFlowLoad')?.addEventListener('click', loadFlowBuckets);
+document.getElementById('oiSymbol')?.addEventListener('change', async()=>{
+  const sym=document.getElementById('flowSymbol').value;
+  if(!sym) return;
+  const showPast=document.getElementById('flowExpiryShowPast')?.checked;
+  try{
+    const exps=await api(`/api/expiries?symbol=${encodeURIComponent(sym)}&future_only=${!showPast}`);
+    const sel=document.getElementById('flowExpiry');
+    sel.innerHTML='<option value="all">ALL EXPIRIES</option>';
+    exps.forEach(e=>{sel.innerHTML+=`<option value="${e}">${e}</option>`;});
+  }catch(e){}
+});
+
+let _flowLastData=null;
+
+async function loadFlowBuckets(){
+  const sym    = document.getElementById('oiSymbol')?.value;
+  const expiry = document.getElementById('flowExpiry')?.value||'all';
+  const dFrom  = document.getElementById('flowDateFrom')?.value;
+  const dTo    = document.getElementById('flowDateTo')?.value;
+  const minVol = document.getElementById('flowMinVol')?.value||0;
+  if(!sym){alert('Select a symbol');return;}
+
+  const bAtm   = getSetting('stgBktAtm');
+  const bNear  = getSetting('stgBktNear');
+  const bFar   = getSetting('stgBktFar');
+  const bDeep  = getSetting('stgBktDeep');
+  const stable = getSetting('stgBktStable');
+  const cross  = getSetting('stgBktCross');
+  const minOi  = getSetting('stgDsMinOi')||0;
+  const maxBaq = getSetting('stgBaqBad')||15;
+
+  setLoad('flowMainChart');
+  ['flowVelChart','flowImbalChart'].forEach(id=>setLoad(id));
+  document.getElementById('flowSignalTable').innerHTML=
+    '<div class="loading"><div class="spinner"></div>Computing…</div>';
+  document.getElementById('flowMigTable').innerHTML='';
+  document.getElementById('flowDteBanner').style.display='none';
+  document.getElementById('flowCrossSignal').style.display='none';
+
+  try{
+    const params=new URLSearchParams({
+      symbol:sym, expiry, date_from:dFrom||'', date_to:dTo||'',
+      min_oi:minOi, min_volume:minVol, max_baq_pct:maxBaq,
+      b_atm:bAtm, b_near:bNear, b_far:bFar, b_deep:bDeep,
+      stable_pct:stable, cross_pct:cross,
+    });
+    const d=await api(`/api/oi_flow_buckets?${params}`);
+    _flowLastData=d;
+    renderFlowCharts(d);
+  }catch(e){
+    setEmpty('flowMainChart','⚠ '+e.message);
+  }
+}
+
+function renderFlowCharts(d){
+  if(!d||!d.buckets) return;
+
+  // ── DTE regime banner ──
+  const reg=DTE_REGIME_STYLE[d.dte_regime]||DTE_REGIME_STYLE.medium;
+  const banner=document.getElementById('flowDteBanner');
+  banner.style.display='';
+  banner.style.background=reg.bg;
+  banner.style.color=reg.color;
+  banner.textContent=`DTE: ${d.dte} — ${reg.label}`;
+
+  // ── Crossing signal ──
+  const cs=d.crossing_signal;
+  const csEl=document.getElementById('flowCrossSignal');
+  if(cs&&cs.fired){
+    csEl.style.display='';
+    csEl.textContent='⚡ CROSSING SIGNAL: '+cs.description;
+  } else {
+    csEl.style.display='none';
+  }
+
+  const view=document.querySelector('#flowViewGroup .active')?.dataset.fv||'oi';
+
+  // ── Main chart ──
+  const traces=[];
+  const anyTs=d.timestamps||[];
+
+  BUCKET_NAMES.forEach(bname=>{
+    const b=d.buckets[bname];
+    if(!b||!b.timestamps?.length) return;
+    const col=BUCKET_COLORS[bname];
+    const lbl=BUCKET_LABELS[bname];
+
+    let yce, ype, yname;
+    if(view==='gex'){
+      // Scale GEX to same visual range as OI by using Y2 axis
+      yce=b.ce_gexv; ype=b.pe_gexv; yname='GEX ₹M';
+    } else if(view==='velocity'){
+      yce=b.ce_velocity; ype=b.pe_velocity; yname='Velocity';
+    } else {
+      yce=b.ce_cum_flow; ype=b.pe_cum_flow; yname='Cumulative OI';
+    }
+
+    // CE solid line
+    traces.push({
+      name:`CE ${lbl}`,
+      x:b.timestamps, y:yce,
+      type:'scatter',mode:'lines',
+      line:{color:col,width:2,dash:'solid'},
+      legendgroup:bname,
+    });
+    // PE dashed line
+    traces.push({
+      name:`PE ${lbl}`,
+      x:b.timestamps, y:ype,
+      type:'scatter',mode:'lines',
+      line:{color:col,width:1.5,dash:'dash'},
+      legendgroup:bname,
+      showlegend:false,
+    });
+
+    // Red fill where CE cum flow goes negative
+    if(view==='oi'&&yce){
+      const negX=[], negY=[];
+      b.timestamps.forEach((t,i)=>{
+        if((yce[i]||0)<0){negX.push(t);negY.push(yce[i]);}
+      });
+      if(negX.length){
+        traces.push({
+          name:'CE exits',x:negX,y:negY,type:'scatter',mode:'none',
+          fill:'tozeroy',fillcolor:'rgba(244,63,94,.15)',
+          showlegend:false,legendgroup:bname,hoverinfo:'skip',
+        });
+      }
+    }
+  });
+
+  // PCR for ATM and NEAR_OTM on Y2
+  ['ATM','NEAR_OTM'].forEach(bname=>{
+    const b=d.buckets[bname];
+    if(!b?.pcr?.length) return;
+    traces.push({
+      name:`PCR ${bname}`,
+      x:b.timestamps, y:b.pcr,
+      type:'scatter',mode:'lines+markers',
+      line:{color:BUCKET_COLORS[bname],width:1,dash:'dot'},
+      marker:{size:3},
+      yaxis:'y2',
+      legendgroup:bname+'pcr',
+    });
+  });
+
+  plot('flowMainChart', traces, {
+    ...LB,
+    xaxis:{...LB.xaxis,title:'Time',tickangle:-30},
+    yaxis:{...LB.yaxis,title:view==='gex'?'GEX ₹M':view==='velocity'?'Velocity':'Cumulative OI'},
+    yaxis2:{overlaying:'y',side:'right',title:'PCR',
+      gridcolor:'transparent',tickfont:{size:9},range:[0,3]},
+    legend:{...LB.legend,orientation:'h',y:-0.2},
+    height:480,
+  });
+
+  // ── Velocity / Acceleration chart ──
+  const velTraces=[];
+  BUCKET_NAMES.forEach(bname=>{
+    const b=d.buckets[bname];
+    if(!b?.ce_velocity?.length) return;
+    velTraces.push({
+      name:`Vel ${BUCKET_LABELS[bname]}`,
+      x:b.timestamps,y:b.ce_velocity,
+      type:'bar',marker:{color:BUCKET_COLORS[bname],opacity:.7},
+      legendgroup:'v'+bname,showlegend:true,
+    });
+    velTraces.push({
+      name:`Acc ${BUCKET_LABELS[bname]}`,
+      x:b.timestamps,y:b.ce_acceleration,
+      type:'scatter',mode:'lines+markers',
+      line:{color:BUCKET_COLORS[bname],width:1.5,dash:'dot'},
+      marker:{size:3,symbol:'circle'},
+      yaxis:'y2',legendgroup:'v'+bname,showlegend:true,
+    });
+  });
+  if(velTraces.length){
+    plot('flowVelChart',velTraces,{
+      ...LB,barmode:'group',
+      xaxis:{...LB.xaxis,title:'Time',tickangle:-30},
+      yaxis:{...LB.yaxis,title:'CE Velocity (bars)'},
+      yaxis2:{overlaying:'y',side:'right',title:'CE Accel (dots)',
+        gridcolor:'transparent',tickfont:{size:9}},
+      legend:{...LB.legend,orientation:'h',y:-0.35,font:{size:8}},
+      height:260,
+      margin:{...LB.margin,b:80},
+    });
+  }
+
+  // ── Buy/sell imbalance bars ──
+  const imbTraces=BUCKET_NAMES.map(bname=>{
+    const b=d.buckets[bname];
+    const lastCe=b?.ce_tbq?.[b.ce_tbq.length-1]||0;
+    const lastPe=b?.pe_tbq?.[b.pe_tbq.length-1]||0;
+    const imb=lastCe-lastPe;
+    return {bname,imb,col:BUCKET_COLORS[bname]};
+  });
+  plot('flowImbalChart',[{
+    x:imbTraces.map(t=>BUCKET_LABELS[t.bname]),
+    y:imbTraces.map(t=>t.imb),
+    type:'bar',
+    marker:{color:imbTraces.map(t=>t.imb>=0?C.green:C.red),opacity:.8},
+    text:imbTraces.map(t=>t.imb>=0?'BUYER DOM':'SELLER DOM'),
+    textposition:'outside',
+    textfont:{size:8,family:"'JetBrains Mono',monospace"},
+  }],{
+    ...LB,
+    xaxis:{...LB.xaxis,tickangle:-20,automargin:true},
+    yaxis:{...LB.yaxis,title:'CE TBQ – PE TBQ'},
+    shapes:[{type:'line',x0:-0.5,x1:4.5,y0:0,y1:0,
+      line:{color:C.muted,width:1,dash:'dot'}}],
+    height:220,
+  });
+
+  // ── Signal table ──
+  const sigRows=BUCKET_NAMES.map(bname=>{
+    const s=d.flow_signals?.[bname]||{};
+    return {
+      bucket:    BUCKET_LABELS[bname],
+      ce_signal: s.ce_signal||'—',
+      pe_signal: s.pe_signal||'—',
+      flow_type: s.flow_type||'—',
+      buy_imb:   s.buy_imbalance!=null?s.buy_imbalance:null,
+      ce_cum:    s.ce_cum_flow!=null?s.ce_cum_flow:null,
+      pe_cum:    s.pe_cum_flow!=null?s.pe_cum_flow:null,
+      net_cum:   s.net_cum_flow!=null?s.net_cum_flow:null,
+      pcr:       s.pcr!=null?s.pcr:null,
+      n_strikes: s.strike_count||0,
+      migrated:  s.migrated_count||0,
+      min_strike: s.min_strike??null,
+      max_strike: s.max_strike??null,
+    };
+  });
+  document.getElementById('flowSignalTable').innerHTML=makeTbl(sigRows,[
+    {key:'bucket',    label:'BUCKET'},
+    {key:'ce_signal', label:'CE SIGNAL', fmt:v=>pill(v)},
+    {key:'pe_signal', label:'PE SIGNAL', fmt:v=>pill(v)},
+    {key:'flow_type', label:'FLOW TYPE', fmt:v=>{
+      const col=FLOW_TYPE_COLORS[v]||'var(--text)';
+      return`<span style="font-family:var(--mono);font-size:9px;font-weight:600;color:${col}">${v}</span>`;}},
+    {key:'ce_cum',    label:'CE CUM OI', fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'pe_cum',    label:'PE CUM OI', fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'net_cum',   label:'NET FLOW',  fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'pcr',       label:'PCR',       fmt:v=>v!=null?fmt(v,3):'—'},
+    {key:'buy_imb',   label:'BUY IMB',   fmt:v=>v!=null?sspan(v,3):'—'},
+    {key:'min_strike', label:'MIN STRIKE', fmt:v=>v!=null?fmt(v,0):'—'},
+    {key:'max_strike', label:'MAX STRIKE', fmt:v=>v!=null?fmt(v,0):'—'},
+    {key:'n_strikes', label:'N STRIKES'},
+    {key:'migrated',  label:'MIGRATED',  fmt:v=>v>0?`<span class="down">${v}</span>`:v},
+  ]);
+
+  // ── Migrated strikes table ──
+  const migEl=document.getElementById('flowMigTable');
+  if(d.migrated_strikes?.length){
+    migEl.innerHTML=makeTbl(d.migrated_strikes,[
+      // "SIDE" column — shows which side actually crossed a bucket boundary
+      {key:'ce_migrated', label:'SIDE',
+        fmt:(v,r)=>{
+          const ce=r.ce_migrated, pe=r.pe_migrated;
+          if(ce&&pe) return'<span class="down">CE+PE</span>';
+          if(ce)     return'<span class="down">CE</span>';
+          if(pe)     return'<span class="down">PE</span>';
+          return'—';
+        }},
+      {key:'strike',         label:'STRIKE'},
+      // CE side — dim the whole CE section if CE did NOT migrate
+      {key:'ce_delta',       label:'CE |δ|',
+        fmt:(v,r)=>`<span style="opacity:${r.ce_migrated?1:0.45}">${fmt(v,3)}</span>`},
+      {key:'ce_bucket_open', label:'CE OPEN',
+        fmt:(v,r)=>r.ce_migrated
+          ?`<span style="color:var(--muted)">${v}</span>`
+          :`<span style="opacity:0.45">${v}</span>`},
+      {key:'ce_bucket_cur',  label:'CE NOW',
+        fmt:(v,r)=>r.ce_migrated
+          ?`<span style="color:var(--amber)">→ ${v}</span>`
+          :`<span style="color:var(--green);opacity:0.45">${v}</span>`},
+      {key:'ce_oi',          label:'CE OI',   fmt:v=>fmtL(v)},
+      {key:'ce_oi_chg',      label:'CE ΔOI',  fmt:v=>sspan(v,0)},
+      // PE side — dim if PE did NOT migrate
+      {key:'pe_delta',       label:'PE |δ|',
+        fmt:(v,r)=>`<span style="opacity:${r.pe_migrated?1:0.45}">${fmt(v,3)}</span>`},
+      {key:'pe_bucket_open', label:'PE OPEN',
+        fmt:(v,r)=>r.pe_migrated
+          ?`<span style="color:var(--muted)">${v}</span>`
+          :`<span style="opacity:0.45">${v}</span>`},
+      {key:'pe_bucket_cur',  label:'PE NOW',
+        fmt:(v,r)=>r.pe_migrated
+          ?`<span style="color:var(--amber)">→ ${v}</span>`
+          :`<span style="color:var(--green);opacity:0.45">${v}</span>`},
+      {key:'pe_oi',          label:'PE OI',   fmt:v=>fmtL(v)},
+      {key:'pe_oi_chg',      label:'PE ΔOI',  fmt:v=>sspan(v,0)},
+    ]);
+  } else {
+    migEl.innerHTML='<div class="empty">No migrations — all strikes in opening bucket</div>';
+  }
+}
+
+// Populate flowSymbol on init
+
+async function refreshFlowExpiries(){
+  const sym=document.getElementById('oiSymbol')?.value;
+  if(!sym) return;
+  const showPast=document.getElementById('flowExpiryShowPast')?.checked;
+  try{
+    const exps=await api(`/api/expiries?symbol=${encodeURIComponent(sym)}&future_only=${!showPast}`);
+    const sel=document.getElementById('flowExpiry');
+    if(!sel) return;
+    sel.innerHTML='<option value="all">ALL EXPIRIES</option>';
+    exps.forEach(e=>{sel.innerHTML+=`<option value="${e}">${e}</option>`;});
+  }catch(e){console.warn('refreshFlowExpiries:',e.message);}
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────
