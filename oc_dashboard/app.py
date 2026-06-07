@@ -24,6 +24,8 @@ import math
 
 import duckdb
 import numpy as np
+from scipy.signal import find_peaks
+from scipy.ndimage import uniform_filter1d
 import pandas as pd
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query
@@ -198,8 +200,8 @@ def ts_filter_clause(ts_str: str, col: str = "timestamp") -> tuple[str, list]:
         except ValueError:
             # Last resort: cast-and-like
             return f"{col}  = ?", [f"{ts_str[:16]}"]
-    lo = (base - timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
-    hi = (base + timedelta(minutes=5)).strftime("%Y-%m-%d %H:%M:%S")
+    lo = (base - timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
+    hi = (base + timedelta(minutes=10)).strftime("%Y-%m-%d %H:%M:%S")
     # Use TIMESTAMP literals — works with DuckDB DATE/TIMESTAMP types directly
     return (
         f" {col} BETWEEN ?  AND ? ",
@@ -359,19 +361,6 @@ def _margin_cache_clear() -> int:
 
 def latest_ts(symbol: str) -> str:
     row = _qraw(f"SELECT MAX(timestamp) FROM {tbl()} WHERE symbol = ?", [symbol])
-    if not row or row[0] is None:
-        raise HTTPException(404, f"No data for {symbol}")
-    return str(row[0])
-
-def day_latest_ts(symbol: str, ftimestamp:str) -> str:
-    today = date.today().isoformat()
-    row = _qraw(f"SELECT MAX(timestamp) FROM {tbl()} WHERE symbol = ? and timestamp > ?" , [symbol, ftimestamp])
-    if not row or row[0] is None:
-        raise HTTPException(404, f"No data for {symbol}")
-    return str(row[0])
-def day_oldest_ts(symbol: str, ftimestamp:str) -> str:
-    today = date.today().isoformat()
-    row = _qraw(f"SELECT MIN(timestamp) FROM {tbl()} WHERE symbol = ? and timestamp > ?", [symbol, ftimestamp])
     if not row or row[0] is None:
         raise HTTPException(404, f"No data for {symbol}")
     return str(row[0])
@@ -787,7 +776,12 @@ def overview():
                     + COALESCE(t.pe_iv,0)*COALESCE(t.pe_oi,0))
                 / SUM(COALESCE(t.ce_oi,0)+COALESCE(t.pe_oi,0))
              ELSE NULL END                 AS oi_wtd_iv,
-        AVG(COALESCE(t.m_volatility,0)) - AVG(COALESCE(t.ce_iv,0)) AS rv_iv_spread
+        AVG(COALESCE(t.m_volatility,0)) - AVG(COALESCE(t.ce_iv,0)) AS rv_iv_spread,
+        -- Expected move from pre-computed columns (ATM row values propagated to all rows)
+        AVG(CASE WHEN t.distance_from_atm = 0
+            THEN COALESCE(t.expected_move_straddle, 0) END)      AS exp_move_straddle,
+        AVG(CASE WHEN t.distance_from_atm = 0
+            THEN COALESCE(t.expected_move_theoretical, 0) END)   AS exp_move_theoretical
     FROM {tbl()} t
     JOIN latest l
       ON  t.symbol = l.symbol
@@ -1094,6 +1088,8 @@ def oi_change(
             COALESCE(ce_volume,    0)       AS ce_volume,
             COALESCE(pe_volume,    0)       AS pe_volume,
             COALESCE(ce_delta,     0)       AS ce_delta,
+            COALESCE(ce_prem_oi_chg, 0)     AS ce_prem_oi_chg,
+            COALESCE(pe_prem_oi_chg, 0)     AS pe_prem_oi_chg,
             COALESCE(underlying_price, 0)   AS spot
         FROM {tbl()}
         WHERE symbol = ?
@@ -1465,6 +1461,7 @@ def delta_screener(
             lotsize                       AS raw_lot,
             COALESCE(ce_ltp,    0) AS ce_ltp,    COALESCE(pe_ltp,    0) AS pe_ltp,
             COALESCE(ce_delta,  0) AS ce_delta,  COALESCE(pe_delta,  0) AS pe_delta,
+            COALESCE(ce_nd2,    0) AS ce_nd2,    COALESCE(pe_nd2,    0) AS pe_nd2,
             COALESCE(ce_iv,     0) AS ce_iv,     COALESCE(pe_iv,     0) AS pe_iv,
             COALESCE(ce_oi,     0) AS ce_oi,     COALESCE(pe_oi,     0) AS pe_oi,
             COALESCE(ce_volume, 0) AS ce_volume, COALESCE(pe_volume, 0) AS pe_volume,
@@ -1910,7 +1907,7 @@ def pc_skew(
         FROM {tbl()}
         WHERE symbol = ? AND expiry = ?
           AND distance_from_atm = 0
-          AND timestamp  = ?
+          AND CAST(timestamp AS DATE) = CAST(? AS DATE)
         ORDER BY timestamp
         """,
         [symbol, expiry[:10], ts_date],
@@ -2272,8 +2269,8 @@ def oi_walls(filter_type: str = Query("all")):
     """
     idx_list = ", ".join(f"'{s}'" for s in _NSE_INDICES)
     sym_filter = (
-        f"AND symbol IN ({idx_list})"       if filter_type == "index"
-        else f"AND symbol NOT IN ({idx_list})" if filter_type == "stock"
+        f"AND t.symbol IN ({idx_list})"       if filter_type == "index"  #fixed for sql syntax t.symbol
+        else f"AND t.symbol NOT IN ({idx_list})" if filter_type == "stock" #fixed for sql syntax t.symbol
         else ""
     )
     df = qdf(
@@ -2333,7 +2330,7 @@ def oi_walls(filter_type: str = Query("all")):
             FROM base b
             LEFT JOIN base prev ON prev.symbol = b.symbol
                 AND prev.strike_price = b.strike_price
-            WHERE (b.symbol, b.ce_oi) IN (SELECT symbol, MAX(ce_oi) FROM base GROUP BY symbol)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY b.symbol ORDER BY b.ce_oi DESC) = 1
         ),
         pe_wall AS (
             SELECT b.symbol,
@@ -2352,7 +2349,7 @@ def oi_walls(filter_type: str = Query("all")):
             FROM base b
             LEFT JOIN base prev ON prev.symbol = b.symbol
                 AND prev.strike_price = b.strike_price
-            WHERE (b.symbol, b.pe_oi) IN (SELECT symbol, MAX(pe_oi) FROM base GROUP BY symbol)
+            QUALIFY ROW_NUMBER() OVER (PARTITION BY b.symbol ORDER BY b.pe_oi DESC) = 1
         )
         SELECT
             a.symbol,
@@ -2539,7 +2536,7 @@ def divergence(
                        MIN(timestamp) AS ts_open,
                        MAX(timestamp) AS ts_now
                 FROM {tbl()}
-                WHERE timestamp = ?
+                WHERE CAST(timestamp AS DATE) = CAST(? AS DATE)
                 {sym_filter}
                 GROUP BY symbol
                 HAVING MIN(timestamp) != MAX(timestamp)
@@ -2725,7 +2722,7 @@ def iv_intraday_trend(filter_type: str = Query("all")):
                    MIN(timestamp) AS ts_open,
                    MAX(timestamp) AS ts_now
             FROM {tbl()}
-            WHERE timestamp  = ?
+            WHERE CAST(timestamp AS DATE) = CAST(? AS DATE)
             {sym_filter}
             GROUP BY symbol
         ),
@@ -2872,7 +2869,7 @@ def oi_history(
                 COALESCE(underlying_price,0) AS spot
             FROM {tbl()}
             WHERE symbol=? AND expiry=?
-              AND timestamp  = ?
+              AND CAST(timestamp AS DATE) = CAST(? AS DATE)
               AND (COALESCE(ce_ltp,0) + COALESCE(pe_ltp,0)) > 0
             ORDER BY timestamp, strike_price
             """,
@@ -2923,7 +2920,7 @@ def oi_history(
                 COALESCE(underlying_price,0) AS spot
             FROM {tbl()}
             WHERE symbol=? AND expiry=?
-              AND timestamp  = ? 
+              AND CAST(timestamp AS DATE) = CAST(? AS DATE)
               AND (COALESCE(ce_ltp,0) + COALESCE(pe_ltp,0)) > 0
             ORDER BY timestamp, strike_price
             """,
@@ -3093,11 +3090,8 @@ def oi_flow_buckets(
     6. Emits crossing signal when total OI stable but bucket composition shifts.
     """
     today = date.today().isoformat()
-    d_from = date_from or today #day_oldest_ts(symbol)
-    d_to   = date_to   or  today #day_latest_ts(symbol)
-
-    d_from = day_oldest_ts(symbol, d_from)
-    d_to = day_latest_ts(symbol, d_to)
+    d_from = date_from or today
+    d_to   = date_to   or today
 
     expiry_filter = "" if expiry == "all" else "AND expiry = ?"
     expiry_params = [] if expiry == "all" else [expiry[:10]]
@@ -3138,7 +3132,7 @@ def oi_flow_buckets(
             COALESCE(lotsize, 1)                     AS lot
         FROM {tbl()}
         WHERE symbol = ?
-          AND timestamp BETWEEN ? AND ? 
+          AND CAST(timestamp AS DATE) BETWEEN CAST(? AS DATE) AND CAST(? AS DATE)
           AND expiry >= CURRENT_DATE
           {expiry_filter}
         ORDER BY timestamp, strike_price
@@ -3409,6 +3403,458 @@ def oi_flow_buckets(
         "flow_signals":     flow_signals,
         "crossing_signal":  crossing_signal,
         "migrated_strikes": migrated_list,
+    })
+
+
+
+# ===========================================================================
+# Smart Money Flow — Premium-weighted OI clustering
+# ===========================================================================
+from scipy.signal import find_peaks
+from scipy.ndimage import uniform_filter1d
+
+# ── Cluster detection ──────────────────────────────────────────────────────
+
+def _smooth(arr: np.ndarray, window: int) -> np.ndarray:
+    """Simple uniform (box) smoothing, handles edges cleanly."""
+    if window <= 1 or len(arr) < window:
+        return arr.astype(float)
+    return uniform_filter1d(arr.astype(float), size=window, mode="nearest")
+
+
+def _find_clusters(
+    strikes:       np.ndarray,   # sorted strike array
+    prem_oi:       np.ndarray,   # premium-weighted OI per strike
+    smoothing:     int   = 3,
+    min_prom_pct:  float = 10.0, # % of max value for prominence threshold
+    extra: dict          = None,  # extra per-strike arrays {name: array}
+) -> list:
+    """
+    Peak detection on the premium-weighted OI curve.
+    Returns list of cluster dicts sorted by center_strike.
+    CE and PE are called independently — this function is side-agnostic.
+    """
+    if len(strikes) < 3 or prem_oi.sum() == 0:
+        return []
+
+    smoothed = _smooth(prem_oi, smoothing)
+    prominence_threshold = smoothed.max() * min_prom_pct / 100.0
+
+    peaks, props = find_peaks(
+        smoothed,
+        prominence=prominence_threshold,
+        distance=max(1, len(strikes) // 20),   # min distance between peaks
+    )
+    if len(peaks) == 0:
+        # Fallback: treat the global maximum as one cluster
+        peaks = np.array([int(np.argmax(smoothed))])
+
+    # Build valley boundaries between adjacent peaks
+    boundaries = []
+    for i, pk in enumerate(peaks):
+        lo = 0 if i == 0 else (peaks[i-1] + pk) // 2
+        hi = len(strikes)-1 if i == len(peaks)-1 else (pk + peaks[i+1]) // 2
+        boundaries.append((lo, hi))
+
+    clusters = []
+    for i, (lo, hi) in enumerate(boundaries):
+        member_idx   = np.arange(lo, hi+1)
+        member_prem  = prem_oi[member_idx]
+        total_prem   = float(member_prem.sum())
+        if total_prem <= 0:
+            continue
+        weighted_center = float(
+            (strikes[member_idx] * member_prem).sum() / total_prem
+        )
+        top3 = float(np.sort(member_prem)[-3:].sum())
+
+        cluster = {
+            "center_strike":      round(weighted_center, 1),
+            "peak_strike":        float(strikes[peaks[i]]),
+            "min_strike":         float(strikes[lo]),
+            "max_strike":         float(strikes[hi]),
+            "total_prem_oi":      round(total_prem, 2),
+            "concentration_ratio":round(top3 / total_prem, 4) if total_prem > 0 else None,
+            "member_count":       int(len(member_idx)),
+        }
+        # Weighted averages of any extra columns
+        for colname, arr in (extra or {}).items():
+            vals = arr[member_idx]
+            cluster[colname] = round(
+                float((vals * member_prem).sum() / total_prem)
+                if total_prem > 0 else 0.0, 4
+            )
+        clusters.append(cluster)
+    return clusters
+
+
+def _match_clusters(prev: list, curr: list, spot: float, tol_pct: float = 2.0) -> dict:
+    """
+    Match clusters across two days by nearest center_strike within tolerance.
+    Returns dict mapping curr cluster index → prev cluster index (or None).
+    Label: TRACKED | EMERGING | DISSOLVED | SPLIT
+    """
+    tol = spot * tol_pct / 100.0
+    mapping = {}   # curr_idx → prev_idx | None
+    used_prev = set()
+
+    for ci, cc in enumerate(curr):
+        best_dist, best_pi = float("inf"), None
+        for pi, pc in enumerate(prev):
+            dist = abs(cc["center_strike"] - pc["center_strike"])
+            if dist < tol and dist < best_dist:
+                best_dist, best_pi = dist, pi
+        mapping[ci] = best_pi
+        if best_pi is not None:
+            used_prev.add(best_pi)
+
+    # Dissolved = prev clusters with no match in curr
+    dissolved_prev = [pi for pi in range(len(prev)) if pi not in used_prev]
+    return mapping, dissolved_prev
+
+
+# ── EOD snapshot helper ────────────────────────────────────────────────────
+
+def _eod_df(symbol: str, expiry_filter: str, exp_params: list,
+            date_from: str, date_to: str) -> "pd.DataFrame":
+    """Fetch EOD (≤15:30) snapshot per strike per date."""
+    ef = expiry_filter
+    return qdf(
+        f"""
+        WITH eod_ts AS (
+            SELECT
+                CAST(timestamp AS DATE) AS dt,
+                strike_price,
+                MAX(timestamp)          AS eod_ts
+            FROM {tbl()}
+            WHERE symbol = ?
+              AND CAST(timestamp AS DATE) >= CAST(? AS DATE)
+              AND CAST(timestamp AS DATE) <= CAST(? AS DATE)
+              AND STRFTIME(timestamp, '%H:%M') <= '15:30'
+              AND expiry >= CURRENT_DATE
+              {ef}
+            GROUP BY dt, strike_price
+        )
+        SELECT
+            CAST(e.dt AS VARCHAR)          AS dt,
+            t.strike_price,
+            CAST(t.expiry AS VARCHAR)      AS expiry,
+            COALESCE(t.ce_ltp,   0)        AS ce_ltp,
+            COALESCE(t.pe_ltp,   0)        AS pe_ltp,
+            COALESCE(t.ce_oi,    0)        AS ce_oi,
+            COALESCE(t.pe_oi,    0)        AS pe_oi,
+            COALESCE(t.ce_oi_change, 0)    AS ce_oi_chg,
+            COALESCE(t.pe_oi_change, 0)    AS pe_oi_chg,
+            COALESCE(t.ce_volume, 0)       AS ce_vol,
+            COALESCE(t.pe_volume, 0)       AS pe_vol,
+            COALESCE(t.ce_iv,    0)        AS ce_iv,
+            COALESCE(t.pe_iv,    0)        AS pe_iv,
+            ABS(COALESCE(t.ce_delta, 0))   AS ce_adelta,
+            ABS(COALESCE(t.pe_delta, 0))   AS pe_adelta,
+            COALESCE(t.ce_gamma, 0)        AS ce_gamma,
+            COALESCE(t.pe_gamma, 0)        AS pe_gamma,
+            COALESCE(t.ce_tbq,   0)        AS ce_tbq,
+            COALESCE(t.pe_tbq,   0)        AS pe_tbq,
+            COALESCE(t.ce_bid_ask_spread,0) AS ce_baq,
+            COALESCE(t.pe_bid_ask_spread,0) AS pe_baq,
+            COALESCE(t.underlying_price,0)  AS spot,
+            COALESCE(t.days_to_expiry,0)    AS dte,
+            COALESCE(t.lotsize, 1)          AS lotsize,
+            -- Pre-computed columns from oc_processor
+            COALESCE(t.ce_prem_oi,     0)   AS ce_prem_oi,
+            COALESCE(t.pe_prem_oi,     0)   AS pe_prem_oi,
+            COALESCE(t.ce_prem_oi_chg, 0)   AS ce_prem_oi_chg,
+            COALESCE(t.pe_prem_oi_chg, 0)   AS pe_prem_oi_chg,
+            COALESCE(t.ce_nd2, 0)           AS ce_nd2,
+            COALESCE(t.pe_nd2, 0)           AS pe_nd2
+        FROM {tbl()} t
+        JOIN eod_ts e
+          ON  t.symbol       = ?
+          AND t.strike_price = e.strike_price
+          AND t.timestamp    = e.eod_ts
+        WHERE 1=1 {ef}
+        ORDER BY e.dt, t.strike_price
+        """,
+        # Param order matches ? positions:
+        # 1=symbol(CTE) 2=date_from 3=date_to 4=expiry(CTE)
+        # 5=symbol(JOIN) 6=expiry(outer WHERE)
+        [symbol, date_from, date_to] + exp_params
+        + [symbol] + exp_params,
+    )
+
+
+# ── Main endpoint ──────────────────────────────────────────────────────────
+
+@app.get("/api/smart_money_flow")
+def smart_money_flow(
+    symbol:          str           = Query(...),
+    expiry:          str           = Query("all"),
+    date_from:       Optional[str] = Query(None),
+    date_to:         Optional[str] = Query(None),
+    mode:            str           = Query("multiday"),   # multiday | intraday
+    intraday_date:   Optional[str] = Query(None),
+    min_oi:          float         = Query(0),
+    min_volume:      float         = Query(100),
+    max_baq_pct:     float         = Query(15.0),
+    smoothing:       int           = Query(3),
+    min_prom_pct:    float         = Query(10.0),
+    min_oi_change:   float         = Query(0),    # filter stale positions
+):
+    today      = date.today().isoformat()
+    d_from     = date_from or (date.today() - timedelta(days=5)).isoformat()
+    d_to       = date_to   or today
+    exp_filter = "" if expiry == "all" else "AND expiry = ?"
+    exp_params = [] if expiry == "all" else [expiry[:10]]
+
+    # ── Intraday mode: single day, all snapshots ──────────────────────────
+    if mode == "intraday":
+        iday = intraday_date or today
+        df = qdf(
+            f"""
+            SELECT
+                STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS ts,
+                strike_price,
+                CAST(expiry AS VARCHAR)          AS expiry,
+                COALESCE(ce_ltp,  0)             AS ce_ltp,
+                COALESCE(pe_ltp,  0)             AS pe_ltp,
+                COALESCE(ce_oi,   0)             AS ce_oi,
+                COALESCE(pe_oi,   0)             AS pe_oi,
+                COALESCE(ce_oi_change, 0)        AS ce_oi_chg,
+                COALESCE(pe_oi_change, 0)        AS pe_oi_chg,
+                COALESCE(ce_volume, 0)           AS ce_vol,
+                COALESCE(pe_volume, 0)           AS pe_vol,
+                COALESCE(ce_iv,   0)             AS ce_iv,
+                COALESCE(pe_iv,   0)             AS pe_iv,
+                ABS(COALESCE(ce_delta, 0))       AS ce_adelta,
+                ABS(COALESCE(pe_delta, 0))       AS pe_adelta,
+                COALESCE(ce_gamma, 0)            AS ce_gamma,
+                COALESCE(pe_gamma, 0)            AS pe_gamma,
+                COALESCE(ce_tbq,  0)             AS ce_tbq,
+                COALESCE(pe_tbq,  0)             AS pe_tbq,
+                COALESCE(ce_bid_ask_spread, 0)   AS ce_baq,
+                COALESCE(pe_bid_ask_spread, 0)   AS pe_baq,
+                COALESCE(underlying_price, 0)    AS spot,
+                COALESCE(days_to_expiry, 0)      AS dte,
+                COALESCE(lotsize, 1)             AS lotsize,
+                COALESCE(ce_prem_oi,     0)      AS ce_prem_oi,
+                COALESCE(pe_prem_oi,     0)      AS pe_prem_oi,
+                COALESCE(ce_prem_oi_chg, 0)      AS ce_prem_oi_chg,
+                COALESCE(pe_prem_oi_chg, 0)      AS pe_prem_oi_chg,
+                COALESCE(ce_nd2,         0)      AS ce_nd2,
+                COALESCE(pe_nd2,         0)      AS pe_nd2
+            FROM {tbl()}
+            WHERE symbol = ?
+              AND CAST(timestamp AS DATE) = CAST(? AS DATE)
+              AND expiry >= CURRENT_DATE
+              {exp_filter}
+              AND (ce_ltp > 0 OR pe_ltp > 0)
+            ORDER BY timestamp, strike_price
+            """,
+            [symbol, iday] + exp_params,
+        )
+        if df.empty:
+            raise HTTPException(404, "No intraday data")
+        period_key = "ts"
+        periods    = sorted(df["ts"].unique())
+
+    # ── Multi-day mode: EOD snapshots ─────────────────────────────────────
+    else:
+        df = _eod_df(symbol, exp_filter, exp_params, d_from, d_to)
+        if df.empty:
+            raise HTTPException(404, "No EOD data for date range — check symbol/expiry/dates")
+        period_key = "dt"
+        periods    = sorted(df["dt"].unique())
+
+    # ── Liquidity + data quality filters ─────────────────────────────────
+    if min_oi_change > 0:
+        df = df[
+            (df["ce_oi_chg"].abs() >= min_oi_change) |
+            (df["pe_oi_chg"].abs() >= min_oi_change)
+        ]
+    df["ce_baq_pct"] = df.apply(
+        lambda r: r["ce_baq"]/r["ce_ltp"]*100 if r["ce_ltp"] > 0 else 999, axis=1)
+    df["pe_baq_pct"] = df.apply(
+        lambda r: r["pe_baq"]/r["pe_ltp"]*100 if r["pe_ltp"] > 0 else 999, axis=1)
+    df = df[
+        ((df["ce_oi"] >= min_oi) | (df["pe_oi"] >= min_oi)) &
+        ((df["ce_vol"] >= min_volume) | (df["pe_vol"] >= min_volume)) &
+        ((df["ce_baq_pct"] <= max_baq_pct) | (df["pe_baq_pct"] <= max_baq_pct)) &
+        (((df["ce_adelta"] > 0) & (df["ce_iv"] > 0)) |
+         ((df["pe_adelta"] > 0) & (df["pe_iv"] > 0)))
+    ]
+    if df.empty:
+        raise HTTPException(404, "All strikes filtered by liquidity / data quality")
+
+    # ── Run clustering per period ─────────────────────────────────────────
+    # Results: { period → { "ce": [clusters], "pe": [clusters], "spot": float } }
+    period_clusters: dict = {}
+    all_spots: dict = {}
+
+    for period in periods:
+        snap = df[df[period_key] == period].copy()
+        if snap.empty:
+            continue
+        strikes     = snap["strike_price"].values
+        spot        = float(snap["spot"].median())
+        all_spots[period] = spot
+
+        # premium-weighted OI: ltp × oi (or pre-computed col if available)
+        # Use pre-computed DB columns where available
+        ce_prem_oi = snap["ce_prem_oi"].values   # ce_ltp × ce_oi (from oc_processor)
+        pe_prem_oi = snap["pe_prem_oi"].values   # pe_ltp × pe_oi
+
+        ce_extra = {
+            "avg_delta":    snap["ce_adelta"].values,
+            "avg_iv":       snap["ce_iv"].values,
+            "avg_gamma":    snap["ce_gamma"].values,
+            "avg_nd2":      snap["ce_nd2"].values,          # P(ITM) from DB
+            "prem_flow":    snap["ce_prem_oi_chg"].values,  # ce_ltp × ce_oi_chg (from DB)
+            "oi_vol_ratio": np.where(snap["ce_vol"] > 0,
+                                snap["ce_oi_chg"] / snap["ce_vol"], 0),
+            "gamma_adj_oi": (snap["ce_oi_chg"] * snap["ce_gamma"]
+                             * snap["lotsize"]).values,
+        }
+        pe_extra = {
+            "avg_delta":    snap["pe_adelta"].values,
+            "avg_iv":       snap["pe_iv"].values,
+            "avg_gamma":    snap["pe_gamma"].values,
+            "avg_nd2":      snap["pe_nd2"].values,
+            "prem_flow":    snap["pe_prem_oi_chg"].values,
+            "oi_vol_ratio": np.where(snap["pe_vol"] > 0,
+                                snap["pe_oi_chg"] / snap["pe_vol"], 0),
+            "gamma_adj_oi": (snap["pe_oi_chg"] * snap["pe_gamma"]
+                             * snap["lotsize"]).values,
+        }
+
+        ce_clusters = _find_clusters(
+            strikes, ce_prem_oi, smoothing, min_prom_pct, ce_extra)
+        pe_clusters = _find_clusters(
+            strikes, pe_prem_oi, smoothing, min_prom_pct, pe_extra)
+
+        # Add PCR per cluster (pe_oi sum / ce_oi sum for member strikes)
+        for cl in ce_clusters:
+            mi = (snap["strike_price"] >= cl["min_strike"]) &                  (snap["strike_price"] <= cl["max_strike"])
+            ce_tot = float(snap.loc[mi, "ce_oi"].sum())
+            pe_tot = float(snap.loc[mi, "pe_oi"].sum())
+            cl["pcr"] = round(pe_tot/ce_tot, 3) if ce_tot > 0 else None
+            # Buy/sell imbalance
+            ce_tbq = float(snap.loc[mi, "ce_tbq"].sum())
+            pe_tbq = float(snap.loc[mi, "pe_tbq"].sum())
+            cl["buy_imbalance"] = round(
+                (ce_tbq - pe_tbq)/(ce_tbq + pe_tbq), 3
+            ) if (ce_tbq + pe_tbq) > 0 else 0
+
+        for cl in pe_clusters:
+            mi = (snap["strike_price"] >= cl["min_strike"]) &                  (snap["strike_price"] <= cl["max_strike"])
+            ce_tot = float(snap.loc[mi, "ce_oi"].sum())
+            pe_tot = float(snap.loc[mi, "pe_oi"].sum())
+            cl["pcr"] = round(pe_tot/ce_tot, 3) if ce_tot > 0 else None
+            pe_tbq = float(snap.loc[mi, "pe_tbq"].sum())
+            ce_tbq = float(snap.loc[mi, "ce_tbq"].sum())
+            cl["buy_imbalance"] = round(
+                (ce_tbq - pe_tbq)/(ce_tbq + pe_tbq), 3
+            ) if (ce_tbq + pe_tbq) > 0 else 0
+
+        period_clusters[period] = {
+            "ce":   ce_clusters,
+            "pe":   pe_clusters,
+            "spot": spot,
+        }
+
+    # ── Track clusters across periods (multi-day migration) ───────────────
+    ce_tracks: list = []   # list of track dicts {id, points[{period,cluster}], status}
+    pe_tracks: list = []
+
+    def _track_side(periods, period_clusters, side):
+        tracks   = []
+        track_id = 0
+        prev_cls = []
+        active   = {}   # track_id → cluster dict of prev period
+
+        for period in periods:
+            curr_cls = period_clusters.get(period, {}).get(side, [])
+            spot     = period_clusters.get(period, {}).get("spot", 0)
+            mapping, dissolved = _match_clusters(prev_cls, curr_cls, spot)
+
+            # Update active tracks
+            new_active = {}
+            for ci, cc in enumerate(curr_cls):
+                pi = mapping.get(ci)
+                cc["period"] = period
+                if pi is not None:
+                    # Find existing track for pi
+                    tid = next(
+                        (t["id"] for t in tracks
+                         if t["points"] and
+                         t["points"][-1].get("_pi") == pi and
+                         t["status"] != "DISSOLVED"),
+                        None
+                    )
+                    if tid is None:
+                        tid = track_id; track_id += 1
+                        tracks.append({"id": tid, "status": "TRACKED",
+                                       "points": []})
+                    cc["_pi"] = ci
+                    cc["status"] = "TRACKED"
+                    tracks[tid]["points"].append(cc)
+                    new_active[tid] = ci
+                else:
+                    # New cluster — EMERGING
+                    tid = track_id; track_id += 1
+                    cc["_pi"] = ci
+                    cc["status"] = "EMERGING"
+                    tracks.append({"id": tid, "status": "EMERGING",
+                                   "points": [cc]})
+                    new_active[tid] = ci
+
+            # Mark dissolved tracks
+            for tid, prev_ci in active.items():
+                if tid not in new_active:
+                    for t in tracks:
+                        if t["id"] == tid:
+                            t["status"] = "DISSOLVED"
+            active   = new_active
+            prev_cls = curr_cls
+
+        return tracks
+
+    ce_tracks = _track_side(periods, period_clusters, "ce")
+    pe_tracks = _track_side(periods, period_clusters, "pe")
+
+    # ── Velocity and acceleration per track ───────────────────────────────
+    def _add_velocity(tracks):
+        for t in tracks:
+            pts = t["points"]
+            pf  = [p.get("prem_flow", 0) for p in pts]
+            vel = [0.0] + [pf[i]-pf[i-1] for i in range(1, len(pf))]
+            acc = [0.0] + [vel[i]-vel[i-1] for i in range(1, len(vel))]
+            for i, p in enumerate(pts):
+                p["velocity"]     = round(vel[i], 2)
+                p["acceleration"] = round(acc[i], 2)
+        return tracks
+
+    ce_tracks = _add_velocity(ce_tracks)
+    pe_tracks = _add_velocity(pe_tracks)
+
+    # Clean internal keys before serialising
+    for t in ce_tracks + pe_tracks:
+        for p in t["points"]:
+            p.pop("_pi", None)
+
+    return safe_response({
+        "symbol":    symbol,
+        "expiry":    expiry,
+        "mode":      mode,
+        "date_from": d_from,
+        "date_to":   d_to,
+        "periods":   periods,
+        "spots":     all_spots,
+        "ce_tracks": ce_tracks,
+        "pe_tracks": pe_tracks,
+        "cluster_params": {
+            "smoothing":     smoothing,
+            "min_prom_pct":  min_prom_pct,
+        },
     })
 
 

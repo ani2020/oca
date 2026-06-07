@@ -230,7 +230,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   <nav class="nav">
     <button class="nav-btn active" data-view="overview">OVERVIEW</button>
     <button class="nav-btn" data-view="gex">GEX &amp; GAMMA</button>
-    <button class="nav-btn" data-view="oi">OI SIGNALS</button>
+    <button class="nav-btn" data-view="oi">OI ANALYSIS</button>
     <button class="nav-btn" data-view="shockers">SHOCKERS</button>
     <button class="nav-btn" data-view="iv">IV ANALYSIS</button>
     <button class="nav-btn" data-view="movers">MOVERS</button>
@@ -238,7 +238,6 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="nav-btn" data-view="delta">OPTION SCREENER</button>
     <button class="nav-btn" data-view="settings">SETTINGS</button>
     <button class="nav-btn" data-view="vix">VIX</button>
-    <button class="nav-btn" data-view="walls">OI WALLS</button>
     <button class="nav-btn" data-view="market">MARKET INFO</button>
     <button class="nav-btn" data-view="divergence">DIVERGENCE</button>
   </nav>
@@ -393,10 +392,982 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </div>
   <div class="subtabs">
     <button class="subtab active" data-stab="oi-signals">SIGNALS</button>
+    <button class="subtab" data-stab="oi-walls-tab">OI WALLS</button>
+    <button class="subtab" data-stab="oi-flow">FLOW — DELTA</button>
+    <button class="subtab" data-stab="oi-smart">SMART MONEY</button>
     <button class="subtab" data-stab="oi-history">EOD HISTORY</button>
-    <button class="subtab" data-stab="oi-flow">FLOW ANALYSIS</button>
   </div>
   <div class="subtab-panel active" id="stab-oi-signals">
+  <!-- Column filter bar -->
+  <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+    <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">FILTER:</span>
+    <input type="text" id="oiSigFilterExpiry" placeholder="expiry…"
+      oninput="filterOiSignals()" style="width:100px;font-size:10px;padding:2px 6px">
+    <input type="text" id="oiSigFilterStrike" placeholder="strike…"
+      oninput="filterOiSignals()" style="width:80px;font-size:10px;padding:2px 6px">
+    <input type="text" id="oiSigFilterCeSig" placeholder="CE sig…"
+      oninput="filterOiSignals()" style="width:90px;font-size:10px;padding:2px 6px">
+    <input type="text" id="oiSigFilterPeSig" placeholder="PE sig…"
+      oninput="filterOiSignals()" style="width:90px;font-size:10px;padding:2px 6px">
+    <button class="btn sec" style="font-size:9px;padding:3px 8px"
+      onclick="clearOiSigFilters()">CLEAR</button>
+  </div>
+  <div class="card">
+    <div class="card-title">BUILD-UP / COVERING SIGNALS
+      <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:8px">sorted by |ΔOI|  ·  threshold: <span id="oiThresholdLabel">10</span> lots</span>
+    </div>
+    <div class="tw" id="oiSignalTable"></div>
+  </div>
+  </div>
+
+  <div class="subtab-panel" id="stab-oi-walls-tab">
+    <div class="filter-bar">
+      <span class="fl">FILTER</span>
+      <div class="toggle-group" id="wallsFilterGroup">
+        <button class="active" data-ft="all">ALL</button>
+        <button data-ft="index">INDEX</button>
+        <button data-ft="stock">STOCK</button>
+      </div>
+      <button class="btn" id="btnWalls">REFRESH</button>
+      <input type="text" id="wallsSearch" placeholder="filter symbol…"
+        oninput="filterTableBySymbol('oiWallsTable',this.value)"
+        style="width:120px;font-size:10px;padding:3px 7px;margin-left:auto">
+    </div>
+    <div class="kpi-row" id="oiWallsKpis"></div>
+    <div class="card">
+      <div class="card-title">CALL &amp; PUT WALLS — DISTANCE FROM SPOT
+        <span class="badge" style="margin-left:6px">STRENGTH = max OI ÷ avg OI</span>
+      </div>
+      <div class="tw" id="oiWallsTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+
+  <div class="subtab-panel" id="stab-oi-history">
+    <div class="filter-bar">
+      <span class="fl">EXPIRY</span><select id="oiHistExpiry" style="min-width:110px"></select>
+      <span class="fl">DAYS</span><input type="number" id="oiHistDays" value="1" min="1" max="30" style="width:55px" title="1 = intraday snapshots today, >1 = daily aggregation">
+      <span class="fl">VIEW</span>
+      <div class="toggle-group" id="oiHistViewGroup">
+        <button class="active" data-hv="oi">OI</button>
+        <button data-hv="iv">IV</button>
+      </div>
+      <button class="btn" id="btnOiHist">LOAD</button>
+    </div>
+    <div class="card">
+      <div class="card-title">MULTI-DAY OI/IV HEATMAP <span class="badge">strike × date</span></div>
+      <div id="oiHistChart" class="chart-lg"><div class="empty">Click LOAD first</div></div>
+    </div>
+  </div>
+
+  <div class="subtab-panel" id="stab-oi-flow">
+    <div class="filter-bar">
+      <span class="fl">EXPIRY</span>
+      <select id="flowExpiry" style="min-width:120px">
+        <option value="all">ALL EXPIRIES</option>
+      </select>
+      <label class="chk-label"><input type="checkbox" id="flowExpiryShowPast"> PAST</label>
+      <span class="fl">DATE FROM</span>
+      <input type="date" id="flowDateFrom" style="width:130px">
+      <span class="fl">TO</span>
+      <input type="date" id="flowDateTo" style="width:130px">
+      <button class="btn sec" id="btnFlowToday" style="font-size:9px;padding:4px 10px">TODAY</button>
+      <span class="fl">MIN VOL</span>
+      <input type="number" id="flowMinVol" value="100" style="width:60px">
+      <button class="btn" id="btnFlowLoad">LOAD</button>
+    </div>
+
+    <!-- DTE regime banner -->
+    <div id="flowDteBanner" style="display:none;padding:6px 12px;margin-bottom:8px;border-radius:4px;font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.07em"></div>
+
+    <!-- Crossing signal -->
+    <div id="flowCrossSignal" style="display:none;margin-bottom:8px;padding:8px 12px;border-radius:4px;border:1px solid var(--amber);background:rgba(245,158,11,.08);font-family:var(--mono);font-size:10px;color:var(--amber)"></div>
+
+    <!-- Main OI flow chart -->
+    <div class="card">
+      <div class="card-title">
+        CUMULATIVE OI FLOW BY DELTA BUCKET
+        <span class="badge" style="margin-left:6px">CE solid · PE dashed · PCR dots (Y2)</span>
+        <span style="margin-left:auto;display:flex;gap:6px">
+          <span class="fl">VIEW</span>
+          <div class="toggle-group" id="flowViewGroup">
+            <button class="active" data-fv="oi">OI FLOW</button>
+            <button data-fv="gex">GEX FLOW</button>
+            <button data-fv="velocity">VELOCITY</button>
+          </div>
+        </span>
+      </div>
+      <div id="flowMainChart" class="chart-lg"><div class="empty">Select filters and click LOAD</div></div>
+    </div>
+
+    <!-- Velocity / Acceleration subplot -->
+    <div class="card" style="margin-top:10px" id="flowVelCard" style="display:none">
+      <div class="card-title">OI VELOCITY &amp; ACCELERATION <span class="badge">per bucket</span></div>
+      <div id="flowVelChart" class="chart"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Buy/sell imbalance bar -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">BUY/SELL QUEUE IMBALANCE AT LATEST SNAPSHOT
+        <span class="badge">ce_tbq – pe_tbq per bucket</span></div>
+      <div id="flowImbalChart" class="chart" style="min-height:200px"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Bucket signal table -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">BUCKET FLOW SIGNALS</div>
+      <div class="tw" id="flowSignalTable"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Migrated strikes -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">DELTA-MIGRATED STRIKES
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:6px">strikes whose current delta bucket differs from opening bucket</span>
+      </div>
+      <div class="tw" id="flowMigTable"><div class="empty">Load data first</div></div>
+    </div>
+  </div><!-- /stab-oi-flow -->
+
+  <div class="subtab-panel" id="stab-oi-smart">
+    <div class="filter-bar">
+      <span class="fl">EXPIRY</span>
+      <select id="smExpiry" style="min-width:120px">
+        <option value="all">ALL EXPIRIES</option>
+      </select>
+      <label class="chk-label"><input type="checkbox" id="smExpiryPast"> PAST</label>
+      <div class="toggle-group" id="smModeGroup" style="margin-left:8px">
+        <button class="active" data-sm="multiday">MULTI-DAY</button>
+        <button data-sm="intraday">INTRADAY</button>
+      </div>
+      <!-- Multi-day controls -->
+      <span id="smMultiDayCtrl" style="display:flex;align-items:center;gap:6px">
+        <span class="fl">FROM</span>
+        <input type="date" id="smDateFrom" style="width:130px">
+        <span class="fl">TO</span>
+        <input type="date" id="smDateTo"   style="width:130px">
+      </span>
+      <!-- Intraday controls -->
+      <span id="smIntraDayCtrl" style="display:none;align-items:center;gap:6px">
+        <span class="fl">DATE</span>
+        <input type="date" id="smIntradayDate" style="width:130px">
+      </span>
+      <span class="fl">MIN VOL</span>
+      <input type="number" id="smMinVol" value="100" style="width:60px">
+      <span class="fl">SMOOTH</span>
+      <input type="number" id="smSmoothing" value="3" min="1" max="10" style="width:50px"
+        title="Rolling window for smoothing before peak detection">
+      <span class="fl">MIN PEAK%</span>
+      <input type="number" id="smMinProm" value="10" min="1" max="50" style="width:50px"
+        title="Minimum prominence as % of max value to count as cluster">
+      <span class="fl">MIN OI CHG</span>
+      <input type="number" id="smMinOiChg" value="0" min="0" style="width:55px"
+        title="Filter out strikes with |oi_change| below this threshold">
+      <button class="btn" id="btnSmLoad">LOAD</button>
+    </div>
+
+    <!-- Multi-day cluster migration chart -->
+    <div class="card" id="smMigCard">
+      <div class="card-title">
+        SMART MONEY CLUSTER MIGRATION
+        <span class="badge">premium-weighted OI · CE solid · PE dashed · size = conviction</span>
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:8px">
+          Y-axis = strike · X-axis = date/time · line drift = repositioning
+        </span>
+      </div>
+        <div id="smMigChartCE" class="chart" style="min-height:320px"><div class="empty">Select filters and click LOAD</div></div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--muted);text-align:center;padding:2px 0">── PE CLUSTERS (put walls / support) ──</div>
+      <div id="smMigChartPE" class="chart" style="min-height:320px"><div class="empty">Select filters and click LOAD</div></div>
+    </div>
+
+    <!-- Premium flow bar chart -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">PREMIUM FLOW PER CLUSTER
+        <span class="badge">ltp × oi_change · positive = accumulating · negative = unwinding</span>
+      </div>
+      <div id="smPremFlowChart" class="chart"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- OI/Vol ratio heatmap -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">OI-CHANGE / VOLUME RATIO
+        <span class="badge">institutional fingerprint · high = held positions · low = churn</span>
+      </div>
+      <div id="smOiVolChart" class="chart"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Cluster detail table -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">CLUSTER DETAIL — LATEST PERIOD</div>
+      <div class="tw" id="smClusterTable"><div class="empty">Load data first</div></div>
+    </div>
+  </div><!-- /stab-oi-smart -->
+
+</div>
+
+<!-- ══ SHOCKERS ══════════════════════════════════════════════════ -->
+<div class="view" id="view-shockers">
+  <div class="tabs">
+    <button class="tab active" data-tab="vol-shock">VOLUME SHOCKERS</button>
+    <button class="tab" data-tab="iv-shock">IV SHOCKERS</button>
+  </div>
+  <div class="tab-panel active" id="tab-vol-shock">
+    <div class="filter-bar">
+      <span class="fl">TOP N</span><input type="number" id="volShockerN" value="30" min="5" max="100" style="width:65px">
+      <span class="fl">FILTER</span>
+      <div class="toggle-group" id="volShockFilterGroup">
+        <button class="active" data-ft="all">ALL</button>
+        <button data-ft="index">INDEX</button>
+        <button data-ft="stock">STOCK</button>
+      </div>
+      <button class="btn" id="btnVolShock">LOAD</button>
+    </div>
+    <div class="g2">
+      <div class="card"><div class="card-title">VOLUME SPIKE</div><div id="volShockChart" class="chart"></div></div>
+      <div class="card"><div class="card-title">VOLUME SHOCKER TABLE</div><div class="tw" id="volShockTable"></div></div>
+    </div>
+  </div>
+  <div class="tab-panel" id="tab-iv-shock">
+    <div class="filter-bar">
+      <span class="fl">TOP N</span><input type="number" id="ivShockerN" value="30" min="5" max="100" style="width:65px">
+      <span class="fl">FILTER</span>
+      <div class="toggle-group" id="ivShockFilterGroup">
+        <button class="active" data-ft="all">ALL</button>
+        <button data-ft="index">INDEX</button>
+        <button data-ft="stock">STOCK</button>
+      </div>
+      <button class="btn" id="btnIvShock">LOAD</button>
+    </div>
+    <div class="g2">
+      <div class="card"><div class="card-title">IV SPIKE</div><div id="ivShockChart" class="chart"></div></div>
+      <div class="card"><div class="card-title">IV SHOCKER TABLE</div><div class="tw" id="ivShockTable"></div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ IV ANALYSIS ═══════════════════════════════════════════════ -->
+<div class="view" id="view-iv">
+  <div class="filter-bar">
+    <span class="fl">SYMBOL</span><select id="ivSymbol"></select>
+    <span class="fl">EXPIRY</span><select id="ivExpiry"></select>
+    <span id="ivExpiryDteBadge"></span>
+    <label class="chk-label"><input type="checkbox" id="ivExpiryShowPast" onchange="reloadExpiries('iv')"> PAST</label>
+    <span class="fl">TIMESTAMP</span><select id="ivTimestamp"></select>
+    <span class="fl">FILTER</span>
+    <div class="toggle-group" id="ivFilterGroup">
+      <button class="active" data-ft="all">ALL</button>
+      <button data-ft="index">INDEX</button>
+      <button data-ft="stock">STOCK</button>
+    </div>
+    <button class="btn" id="btnIv">LOAD</button>
+  </div>
+
+  <div class="subtabs">
+    <button class="subtab active" data-stab="iv-smile">IV SMILE</button>
+    <button class="subtab" data-stab="iv-term">TERM STRUCTURE</button>
+    <button class="subtab" data-stab="iv-skew">PC SKEW</button>
+  </div>
+
+  <div class="subtab-panel active" id="stab-iv-smile">
+    <div class="kpi-row" id="ivRankKpis"></div>
+    <div class="g2" style="margin-bottom:12px">
+      <div class="card"><div class="card-title">CE IV SMILE <span class="badge">SPLINE + ANOMALIES</span></div>
+        <div id="ceSmileChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div></div>
+      <div class="card"><div class="card-title">PE IV SMILE <span class="badge">SPLINE + ANOMALIES</span></div>
+        <div id="peSmileChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">ANOMALOUS STRIKES <span class="badge badge-r">|Z| &gt; 2</span></div>
+      <div class="tw" id="ivAnomalyTable"></div>
+    </div>
+  </div>
+
+  <div class="subtab-panel" id="stab-iv-term">
+    <div class="kpi-row" id="termKpis"></div>
+    <div class="card">
+      <div class="card-title">ATM IV ACROSS EXPIRIES <span class="badge">CE + PE</span></div>
+      <div id="termStructureChart" class="chart-lg"><div class="empty">Click LOAD first</div></div>
+    </div>
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">TERM STRUCTURE TABLE</div>
+      <div class="tw" id="termTable"></div>
+    </div>
+  </div>
+
+  <div class="subtab-panel" id="stab-iv-skew">
+    <div class="kpi-row" id="skewKpis"></div>
+    <div class="g2">
+      <div class="card">
+        <div class="card-title">RISK REVERSAL TIME SERIES</div>
+        <div id="rrSeriesChart" class="chart"><div class="empty">Click LOAD first</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">SENTIMENT &amp; REGIME SIGNAL</div>
+        <div id="skewSignalCard" style="padding:12px"><div class="empty">Click LOAD first</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MOVERS ════════════════════════════════════════════════════ -->
+<div class="view" id="view-movers">
+  <div class="filter-bar">
+    <span class="fl">SIDE</span>
+    <select id="moverSide"><option value="CE">CALL (CE)</option><option value="PE">PUT (PE)</option></select>
+    <span class="fl">FILTER</span>
+    <div class="toggle-group" id="moverFilterGroup">
+      <button class="active" data-ft="all">ALL</button>
+      <button data-ft="index">INDEX</button>
+      <button data-ft="stock">STOCK</button>
+    </div>
+    <span class="fl">TOP N</span>
+    <input type="number" id="moverN" value="20" min="5" max="50" style="width:60px">
+    <button class="btn" id="btnMovers">LOAD</button>
+  </div>
+  <div class="g2">
+    <div class="card">
+      <div class="card-title" style="color:var(--green)">▲ TOP GAINERS</div>
+      <div id="gainersChart" class="chart"></div>
+      <div class="tw" id="gainersTable"></div>
+    </div>
+    <div class="card">
+      <div class="card-title" style="color:var(--red)">▼ TOP LOSERS</div>
+      <div id="losersChart" class="chart"></div>
+      <div class="tw" id="losersTable"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ STRIKE TREND ══════════════════════════════════════════════ -->
+<div class="view" id="view-trend">
+  <div class="filter-bar">
+    <span class="fl">SYMBOL</span><select id="trendSymbol"></select>
+    <span class="fl">EXPIRY</span><select id="trendExpiry"></select>
+    <span id="trendExpiryDteBadge"></span>
+    <label class="chk-label"><input type="checkbox" id="trendExpiryShowPast" onchange="reloadExpiries('trend')"> PAST</label>
+    <span class="fl">ATM DIST</span><select id="trendAtmDist" style="min-width:120px"></select>
+    <span id="trendStrikeDisplay" style="font-family:var(--mono);font-size:11px;color:var(--acc)"></span>
+    <input type="hidden" id="trendStrike">
+    <span class="fl">TIMESTAMP</span><select id="trendTimestamp" style="min-width:140px"></select>
+    <span class="fl">M1 (LEFT)</span>
+    <select id="trendM1">
+      <option value="ce_ltp">CE LTP</option><option value="pe_ltp">PE LTP</option>
+      <option value="ce_iv">CE IV</option><option value="pe_iv">PE IV</option>
+      <option value="ce_volume">CE Volume</option><option value="pe_volume">PE Volume</option>
+      <option value="ce_oi">CE OI</option><option value="pe_oi">PE OI</option>
+      <option value="ce_gexv">CE GEXv</option><option value="pe_gexv">PE GEXv</option>
+      <option value="net_gexv">Net GEXv</option>
+      <option value="ce_delta">CE Delta</option><option value="pe_delta">PE Delta</option>
+      <option value="ce_gamma">CE Gamma</option><option value="ce_theta">CE Theta</option>
+      <option value="pe_theta">PE Theta</option><option value="ce_vega">CE Vega</option>
+      <option value="ce_vanna">CE Vanna</option><option value="ce_charm">CE Charm</option>
+      <option value="riskreversal">Risk Reversal</option><option value="net_flow">Net Flow</option>
+    </select>
+    <span class="fl">M2 (RIGHT)</span>
+    <select id="trendM2" style="min-width:100px">
+      <option value="">— none —</option>
+      <option value="ce_oi">CE OI</option><option value="pe_oi">PE OI</option>
+      <option value="ce_volume">CE Volume</option><option value="pe_volume">PE Volume</option>
+      <option value="ce_iv">CE IV</option><option value="pe_iv">PE IV</option>
+      <option value="ce_TPrice">CE TheoPrice</option><option value="pe_TPrice">PE TheoPrice</option>
+      <option value="riskreversal">Risk Rev</option>
+    </select>
+    <span class="fl">M3</span>
+    <select id="trendM3" style="min-width:100px">
+      <option value="">— none —</option>
+      <option value="ce_oi">CE OI</option><option value="pe_oi">PE OI</option>
+      <option value="ce_volume">CE Volume</option><option value="pe_volume">PE Volume</option>
+      <option value="net_flow">Net Flow</option>
+    </select>
+    <button class="btn" id="btnTrend">LOAD</button>
+  </div>
+  <div id="trendSnapshotCard" style="margin-top:0"></div>
+  <div class="card">
+    <div class="card-title" id="trendChartTitle">STRIKE TIME-SERIES</div>
+    <div id="trendChart" class="chart-lg"><div class="loading"><div class="spinner"></div>Select filters</div></div>
+  </div>
+</div>
+
+<!-- ══ DELTA SCREENER ════════════════════════════════════════════ -->
+<div class="view" id="view-delta">
+  <div class="filter-bar">
+    <span class="fl">DELTA MAX</span>
+    <div class="delta-slider-wrap">
+      <input type="range" id="deltaSlider" min="5" max="50" value="30">
+      <span id="deltaVal">30</span>
+    </div>
+    <span class="fl">DELTA MIN</span>
+    <div class="delta-slider-wrap">
+      <input type="range" id="deltaMinSlider" min="1" max="30" value="5">
+      <span id="deltaMinVal">5</span>
+    </div>
+    <span class="fl">FILTER</span>
+    <div class="toggle-group" id="dsFilterGroup">
+      <button class="active" data-ft="all">ALL</button>
+      <button data-ft="index">INDEX</button>
+      <button data-ft="stock">STOCK</button>
+    </div>
+    <span class="fl">TIMESTAMP</span><select id="dsTimestamp" style="min-width:140px"></select><span id="dsTimestampSym" style="font-family:var(--mono);font-size:9px;color:var(--muted)"></span>
+    <button class="btn" id="btnDs">LOAD</button>
+  </div>
+  <div class="kpi-row" id="dsKpis"></div>
+  <div class="subtabs">
+    <button class="subtab active" data-stab="ds-screener">DELTA SCREENER</button>
+    <button class="subtab" data-stab="ds-premium">PREMIUM LENS</button>
+  </div>
+
+  <div class="subtab-panel active" id="stab-ds-screener">
+  <div class="card">
+    <div class="card-title">
+      OPTIONS IN Δ RANGE <span id="dsRangeLabel" class="badge">5–30</span>
+      <span style="margin-left:auto">
+        <button class="btn sec" id="btnFetchMargin" style="font-size:9px;padding:4px 10px">FETCH MARGIN (ICICI)</button>
+      </span>
+    </div>
+    <div class="tw" id="dsTable"><div class="loading"><div class="spinner"></div>Select filters and click LOAD</div></div>
+  </div>
+  </div><!-- /stab-ds-screener -->
+
+  <div class="subtab-panel" id="stab-ds-premium">
+    <div class="filter-bar">
+      <span class="fl">SYMBOL</span><select id="plSymbol"></select>
+      <span class="fl">EXPIRY</span><select id="plExpiry"></select>
+      <span id="plExpiryDteBadge"></span>
+      <label class="chk-label"><input type="checkbox" id="plExpiryShowPast" onchange="reloadExpiries('pl')"> PAST</label>
+      <span class="fl">TIMESTAMP</span><select id="plTimestamp" style="min-width:140px"></select>
+      <span class="fl">MIN OI</span><input type="number" id="plMinOi" value="0" style="width:65px">
+      <span class="fl">RATIO OUTSIDE</span>
+      <input type="number" id="plMinRatio" value="0.85" step="0.05" style="width:60px" title="Show CE/PE where ltp/theoretical < this">
+      <span style="font-family:var(--mono);font-size:10px;color:var(--muted)">–</span>
+      <input type="number" id="plMaxRatio" value="1.15" step="0.05" style="width:60px" title="or > this">
+      <button class="btn" id="btnPl">LOAD</button>
+    </div>
+    <div class="card">
+      <div class="card-title">PREMIUM RICHNESS / CHEAPNESS
+        <span class="badge badge-g">RICH &gt; max ratio</span>
+        <span class="badge badge-r" style="margin-left:4px">CHEAP &lt; min ratio</span>
+      </div>
+      <div class="tw" id="plTable"><div class="loading"><div class="spinner"></div>Select filters and click LOAD</div></div>
+    </div>
+  </div><!-- /stab-ds-premium -->
+
+</div>
+
+<!-- ══ DIVERGENCE ════════════════════════════════════════════ -->
+<div class="view" id="view-divergence">
+  <div class="filter-bar">
+    <span class="fl">MODE</span>
+    <div class="toggle-group" id="divModeGroup">
+      <button class="active" data-dm="snapshot">SNAPSHOT</button>
+      <button data-dm="intraday">INTRADAY</button>
+    </div>
+    <span class="fl">FILTER</span>
+    <div class="toggle-group" id="divFilterGroup">
+      <button class="active" data-ft="all">ALL</button>
+      <button data-ft="index">INDEX</button>
+      <button data-ft="stock">STOCK</button>
+    </div>
+    <span class="fl">MIN SPOT %</span>
+    <input type="number" id="divMinSpot" value="0.03" step="0.01" style="width:60px">
+    <span class="fl">MIN PREM %</span>
+    <input type="number" id="divMinPrem" value="0.5" step="0.1" style="width:60px">
+    <button class="btn" id="btnDiv">LOAD</button>
+  </div>
+  <div class="card">
+    <div class="card-title">DIVERGENCE SIGNALS <span class="badge">ranked by magnitude</span>
+      <span style="margin-left:8px">
+        <input type="text" id="divSearch" placeholder="filter symbol…"
+          oninput="filterTableBySymbol('divTable',this.value)"
+          style="width:120px;font-size:10px;padding:3px 7px">
+      </span>
+      <span id="divLegendBtn" onclick="toggleDivLegend()" style="margin-left:auto;font-family:var(--mono);font-size:9px;color:var(--acc);cursor:pointer">ℹ LEGEND</span>
+    </div>
+    <div id="divLegend" style="display:none;padding:10px;background:var(--surf);border:1px solid var(--border);border-radius:4px;margin-bottom:8px;font-family:var(--mono);font-size:10px;line-height:1.8">
+      <strong style="color:var(--acc)">HOW TO READ:</strong> Each row is one symbol (not one strike). ATM CE+PE options are averaged across expiries to give one signal per underlying.<br>
+      <span class="down">⬆ BULL HEDGE</span> — Spot went UP but PE (put) premium also went UP. Smart money buying puts on a rally — bearish hedge / distribution signal.<br>
+      <span class="up">⬇ BEAR SQUEEZE</span> — Spot went DOWN but CE (call) premium went UP. Call buying on a dip — potential short squeeze or bullish reversal bet.<br>
+      <span style="color:var(--amber)">⚡ IV SPIKE</span> — Spot barely moved but IV jumped ≥1%. Event anticipation — earnings, results, news not yet public.<br>
+      <span class="down">🔴 SMART SELL</span> — Spot UP but CE premium DOWN. Call sellers active on rally — strong resistance / ceiling.<br>
+      <span class="up">🟢 SMART BUY</span> — Spot DOWN but PE premium DOWN. Put sellers active on dip — strong support / floor signal.<br>
+      <strong>MAGNITUDE</strong> = |spot%| + |premium%| — higher = stronger divergence.<br>
+      <strong>MODE: SNAPSHOT</strong> = last 2 OC snapshots (minutes apart). <strong>INTRADAY</strong> = today's first snapshot vs latest.
+    </div>
+    <div class="tw" id="divTable"><div class="loading"><div class="spinner"></div>Select mode and click LOAD</div></div>
+  </div>
+</div>
+
+<!-- ══ SETTINGS ══════════════════════════════════════════════════ -->
+<div class="view" id="view-settings">
+  <div class="sh">DISPLAY THRESHOLDS</div>
+  <div class="g3">
+    <div class="card">
+      <div class="card-title">IV SMILE</div>
+      <div class="stg-row"><label>MIN IV FOR SPLINE FIT (%)</label><input type="number" id="stgIvMin" value="0.5" step="0.1"></div>
+      <div class="stg-row"><label>MAX IV FOR SPLINE FIT (%)</label><input type="number" id="stgIvMax" value="150" step="1"></div>
+      <div class="stg-row"><label>ANOMALY Z-SCORE THRESHOLD</label><input type="number" id="stgIvZscore" value="2.0" step="0.1"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">DELTA SCREENER</div>
+      <div class="stg-row"><label>MIN OI (HIDE ROWS BELOW)</label><input type="number" id="stgDsMinOi" value="0" step="100"></div>
+      <div class="stg-row"><label>MIN VOLUME (HIDE ROWS BELOW)</label><input type="number" id="stgDsMinVol" value="0" step="10"></div>
+      <div class="stg-row"><label>MIN OI CHANGE (OI SIGNALS)</label><input type="number" id="stgMinOiChange" value="10" step="5" title="Hide OI signal rows where absolute CE+PE OI change is below this threshold"></div>
+      <div class="stg-row"><label>BID-ASK WARN THRESHOLD (%)</label><input type="number" id="stgBaqWarn" value="5" step="0.5"></div>
+      <div class="stg-row"><label>BID-ASK BAD THRESHOLD (%)</label><input type="number" id="stgBaqBad" value="15" step="1"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">OI FLOW BUCKETS</div>
+      <div class="stg-row"><label>DEEP ITM / ATM BOUNDARY (|δ|)</label><input type="number" id="stgBktAtm"  value="0.50" step="0.05" min="0.1" max="1.0"></div>
+      <div class="stg-row"><label>ATM / NEAR OTM BOUNDARY (|δ|)</label><input type="number" id="stgBktNear" value="0.30" step="0.05" min="0.05" max="0.6"></div>
+      <div class="stg-row"><label>NEAR OTM / FAR OTM BOUNDARY (|δ|)</label><input type="number" id="stgBktFar"  value="0.15" step="0.05" min="0.02" max="0.4"></div>
+      <div class="stg-row"><label>FAR OTM / DEEP OTM BOUNDARY (|δ|)</label><input type="number" id="stgBktDeep" value="0.05" step="0.01" min="0.01" max="0.2"></div>
+      <div class="stg-row"><label>STABLE TOTAL OI % (crossing signal)</label><input type="number" id="stgBktStable" value="1.0" step="0.5"></div>
+      <div class="stg-row"><label>BUCKET CROSS SHIFT % (crossing signal)</label><input type="number" id="stgBktCross" value="5.0" step="0.5"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">IV RANK / ANALYTICS</div>
+      <div class="stg-row"><label>IV RANK LOOKBACK DAYS</label><input type="number" id="stgIvLookback" value="90" step="10" min="10"></div>
+      <div class="stg-row"><label>GAMMA PRICE RANGE % (DEFAULT)</label><input type="number" id="stgGammaRange" value="5" step="0.5"></div>
+      <div class="stg-row"><label>MAGNET THRESHOLD (0–1)</label><input type="number" id="stgMagnetThr" value="0.75" step="0.05"></div>
+      <div class="stg-row"><label>LAMBDA GAMMA</label><input type="number" id="stgLambda" value="0.1" step="0.01"></div>
+    </div>
+  </div>
+  <div style="margin-top:14px;display:flex;align-items:center;gap:10px">
+    <button class="btn" onclick="saveSettings()">SAVE SETTINGS</button>
+    <button class="btn sec" onclick="resetSettings()">RESET DEFAULTS</button>
+    <span id="settingsSaved" style="font-family:var(--mono);font-size:10px;color:var(--green);display:none">✓ Saved</span>
+  </div>
+</div>
+
+
+<!-- ══ VIX ═══════════════════════════════════════════════════════ -->
+<div class="view" id="view-vix">
+  <div class="filter-bar">
+    <span class="fl">LOOKBACK DAYS</span>
+    <input type="number" id="vixLookback" value="30" min="5" max="365" style="width:70px">
+    <button class="btn" id="btnVix">REFRESH</button>
+  </div>
+  <div class="g2" style="margin-bottom:12px">
+    <div class="card" style="display:flex;align-items:center;justify-content:center">
+      <div id="vixGauge"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">INDIA VIX HISTORY</div>
+      <div id="vixChart" class="chart"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ MARKET INFO="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>NSE OC Intelligence</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.27.1/plotly.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@300;400;500;600&family=DM+Sans:wght@300;400;500;600&display=swap');
+:root{
+  --bg:#080b12;--surf:#0e1320;--card:#131b2a;--card2:#182035;
+  --border:#1e2d47;--border2:#243550;--acc:#00c8f0;--acc2:#f07000;
+  --acc3:#8b5cf6;--green:#10b981;--red:#f43f5e;--amber:#f59e0b;
+  --text:#dde4f0;--muted:#5a7090;
+  --mono:'JetBrains Mono',monospace;--sans:'DM Sans',sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:13px}
+.topbar{display:flex;align-items:center;gap:14px;padding:8px 18px;background:var(--surf);
+  border-bottom:1px solid var(--border);position:sticky;top:0;z-index:200}
+.logo{font-family:var(--mono);font-size:14px;font-weight:600;color:var(--acc);letter-spacing:.12em;white-space:nowrap}
+.logo em{color:var(--muted);font-style:normal;font-weight:300}
+.nav{display:flex;gap:2px;flex-wrap:wrap}
+.nav-btn{background:none;border:1px solid transparent;color:var(--muted);font-family:var(--mono);
+  font-size:10px;padding:5px 11px;cursor:pointer;border-radius:4px;letter-spacing:.07em;
+  transition:all .15s;white-space:nowrap}
+.nav-btn:hover{color:var(--text);border-color:var(--border)}
+.nav-btn.active{color:var(--acc);border-color:var(--acc);background:rgba(0,200,240,.06)}
+.topbar-right{margin-left:auto;display:flex;align-items:center;gap:10px}
+.status-dot{width:7px;height:7px;border-radius:50%;background:var(--green);
+  box-shadow:0 0 6px var(--green);animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+#iciciStatusBadge{font-family:var(--mono);font-size:9px;padding:3px 8px;border-radius:10px;
+  cursor:pointer;border:1px solid var(--border);color:var(--muted);letter-spacing:.06em;transition:all .15s}
+#iciciStatusBadge:hover{border-color:var(--acc);color:var(--acc)}
+#iciciStatusBadge.ok{border-color:var(--green);color:var(--green)}
+.main{padding:14px 18px}
+.view{display:none}.view.active{display:block}
+.filter-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;
+  padding:9px 12px;background:var(--card);border:1px solid var(--border);border-radius:6px;margin-bottom:14px}
+.fl{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.09em;white-space:nowrap}
+select,input[type=number],input[type=text],input[type=password]{
+  background:var(--surf);border:1px solid var(--border);color:var(--text);
+  font-family:var(--mono);font-size:11px;padding:5px 9px;border-radius:4px;outline:none;min-width:110px}
+select:focus,input:focus{border-color:var(--acc)}
+.btn{background:var(--acc);color:#000;border:none;font-family:var(--mono);font-size:10px;
+  font-weight:600;padding:6px 14px;border-radius:4px;cursor:pointer;letter-spacing:.07em;
+  transition:opacity .15s;white-space:nowrap}
+.btn:hover{opacity:.85}
+.btn.sec{background:none;border:1px solid var(--border);color:var(--muted)}
+.btn.sec:hover{border-color:var(--acc);color:var(--acc)}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.toggle-group{display:flex;border:1px solid var(--border);border-radius:4px;overflow:hidden}
+.toggle-group button{background:none;border:none;color:var(--muted);font-family:var(--mono);
+  font-size:10px;padding:5px 10px;cursor:pointer;letter-spacing:.06em;transition:all .15s}
+.toggle-group button.active{background:rgba(0,200,240,.12);color:var(--acc)}
+.toggle-group button:hover:not(.active){color:var(--text)}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.g3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}
+@media(max-width:960px){.g2,.g3,.g4{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:12px}
+.card-title{font-family:var(--mono);font-size:9px;font-weight:500;color:var(--muted);
+  letter-spacing:.11em;text-transform:uppercase;margin-bottom:10px;
+  display:flex;align-items:center;gap:8px}
+.badge{font-size:8px;padding:1px 6px;border-radius:8px;background:var(--acc3);color:#fff;letter-spacing:.04em}
+.badge-g{background:rgba(16,185,129,.2);color:var(--green)}
+.badge-r{background:rgba(244,63,94,.2);color:var(--red)}
+.kpi-row{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:12px}
+.kpi{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:10px 14px;min-width:130px}
+.kpi-label{font-family:var(--mono);font-size:8px;color:var(--muted);letter-spacing:.11em;
+  text-transform:uppercase;margin-bottom:5px}
+.kpi-val{font-family:var(--mono);font-size:20px;font-weight:600;line-height:1}
+.kpi-sub{font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:3px}
+.kpi-val.up{color:var(--green)}.kpi-val.down{color:var(--red)}.kpi-val.acc{color:var(--acc)}
+.sh{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.13em;
+  text-transform:uppercase;margin:16px 0 10px;padding-bottom:5px;border-bottom:1px solid var(--border)}
+.loading{display:flex;align-items:center;justify-content:center;
+  min-height:140px;color:var(--muted);font-family:var(--mono);font-size:11px;gap:8px}
+.spinner{width:13px;height:13px;border:2px solid var(--border);border-top-color:var(--acc);
+  border-radius:50%;animation:spin .65s linear infinite;flex-shrink:0}
+@keyframes spin{to{transform:rotate(360deg)}}
+.empty{color:var(--muted);font-family:var(--mono);font-size:11px;text-align:center;padding:24px}
+.err{color:var(--red)!important}
+.tw{overflow-x:auto;max-height:520px;overflow-y:auto}
+table{width:100%;border-collapse:collapse;font-family:var(--mono);font-size:11px}
+thead th{position:sticky;top:0;background:var(--surf);color:var(--muted);font-weight:500;
+  font-size:9px;letter-spacing:.08em;text-transform:uppercase;padding:6px 9px;
+  text-align:right;border-bottom:1px solid var(--border);white-space:nowrap;
+  cursor:pointer;user-select:none}
+thead th:first-child{text-align:left}
+thead th:hover{color:var(--acc)}
+tbody tr{border-bottom:1px solid rgba(30,45,71,.5);transition:background .1s}
+tbody tr:hover{background:rgba(255,255,255,.025)}
+td{padding:5px 9px;text-align:right;color:var(--text);white-space:nowrap}
+td:first-child{text-align:left;color:var(--acc);font-weight:500}
+.up{color:var(--green)!important}.down{color:var(--red)!important}.neu{color:var(--muted)!important}
+.pill{display:inline-block;padding:1px 7px;border-radius:8px;font-size:9px;font-weight:600;
+  letter-spacing:.04em;white-space:nowrap}
+.pill-lb{background:rgba(16,185,129,.15);color:var(--green)}
+.pill-sb{background:rgba(244,63,94,.15);color:var(--red)}
+.pill-sc{background:rgba(16,185,129,.07);color:#6ee7b7}
+.pill-lu{background:rgba(244,63,94,.07);color:#fda4af}
+.pill-n{background:rgba(90,112,144,.15);color:var(--muted)}
+.chart{width:100%;min-height:320px;position:relative}
+.chart-lg{width:100%;min-height:440px}
+.tabs{display:flex;gap:0;margin-bottom:12px;border-bottom:1px solid var(--border)}
+.tab{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);
+  font-family:var(--mono);font-size:10px;padding:7px 13px;cursor:pointer;
+  letter-spacing:.07em;margin-bottom:-1px;transition:all .15s}
+.tab.active{color:var(--acc);border-bottom-color:var(--acc)}
+.tab:hover:not(.active){color:var(--text)}
+.tab-panel{display:none}.tab-panel.active{display:block}
+.ticker-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:9px}
+.tc{background:var(--card);border:1px solid var(--border);border-radius:6px;padding:11px 13px;
+  cursor:pointer;transition:border-color .15s}
+.tc:hover{border-color:var(--acc)}
+.tc-sym{font-family:var(--mono);font-size:13px;font-weight:600;color:var(--acc)}
+.tc-spot{font-family:var(--mono);font-size:19px;color:var(--text);margin:3px 0}
+.tc-row{display:flex;justify-content:space-between;margin-top:4px}
+.tc-key{font-family:var(--mono);font-size:8px;color:var(--muted);letter-spacing:.07em}
+.tc-val{font-family:var(--mono);font-size:11px}
+.ga-card{background:var(--card2);border:1px solid var(--border2);border-radius:6px;padding:14px;margin-top:12px}
+.ga-regime{display:inline-block;padding:3px 10px;border-radius:10px;
+  font-family:var(--mono);font-size:10px;font-weight:600;letter-spacing:.07em;margin-bottom:10px}
+.ga-regime.pos{background:rgba(16,185,129,.15);color:var(--green)}
+.ga-regime.neg{background:rgba(244,63,94,.15);color:var(--red)}
+.ga-row{display:flex;gap:20px;flex-wrap:wrap;margin-bottom:10px}
+.ga-item{min-width:130px}
+.ga-label{font-family:var(--mono);font-size:8px;color:var(--muted);letter-spacing:.1em;margin-bottom:2px}
+.ga-value{font-family:var(--mono);font-size:13px;font-weight:500}
+.ga-list{list-style:none;padding:0}
+.ga-list li{font-family:var(--mono);font-size:10px;color:var(--text);
+  padding:3px 0;border-bottom:1px solid rgba(30,45,71,.4)}
+.ga-list li::before{content:"▸ ";color:var(--acc);font-size:9px}
+.ga-warn li::before{content:"⚠ ";color:var(--amber)}
+.modal-bg{display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);
+  z-index:500;align-items:center;justify-content:center}
+.modal-bg.open{display:flex}
+.modal{background:var(--surf);border:1px solid var(--border);border-radius:8px;
+  padding:24px;width:420px;max-width:95vw}
+.modal h3{font-family:var(--mono);font-size:13px;color:var(--acc);letter-spacing:.08em;margin-bottom:16px}
+.modal label{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.09em;
+  display:block;margin-bottom:5px;margin-top:12px}
+.modal input{width:100%;margin-bottom:4px}
+.modal-foot{display:flex;gap:8px;margin-top:18px;justify-content:flex-end}
+.modal-note{font-family:var(--mono);font-size:9px;color:var(--muted);line-height:1.5;margin-top:8px}
+.modal a{color:var(--acc);text-decoration:none}
+.delta-slider-wrap{display:flex;align-items:center;gap:8px}
+.delta-slider-wrap input[type=range]{-webkit-appearance:none;background:var(--border);height:4px;
+  border-radius:2px;flex:1;cursor:pointer;border:none;min-width:80px}
+.delta-slider-wrap input[type=range]::-webkit-slider-thumb{-webkit-appearance:none;width:14px;
+  height:14px;border-radius:50%;background:var(--acc);cursor:pointer}
+#deltaVal,#deltaMinVal{font-family:var(--mono);font-size:12px;color:var(--acc);
+  font-weight:600;min-width:28px;text-align:center}
+.stg-row{display:flex;flex-direction:column;gap:4px;margin-bottom:10px}
+.stg-row label{font-family:var(--mono);font-size:9px;color:var(--muted);letter-spacing:.08em}
+.stg-row input{width:100px}
+.chk-label{display:flex;align-items:center;gap:5px;font-family:var(--mono);
+  font-size:9px;color:var(--muted);cursor:pointer;white-space:nowrap}
+
+/* ── Sentiment / regime badges ── */
+.sent-bull{background:rgba(16,185,129,.15);color:var(--green);padding:2px 8px;border-radius:8px;font-family:var(--mono);font-size:9px;font-weight:600}
+.sent-bear{background:rgba(244,63,94,.15);color:var(--red);padding:2px 8px;border-radius:8px;font-family:var(--mono);font-size:9px;font-weight:600}
+.sent-na{background:rgba(90,112,144,.15);color:var(--muted);padding:2px 8px;border-radius:8px;font-family:var(--mono);font-size:9px}
+.regime-pill{display:inline-block;padding:2px 8px;border-radius:8px;font-family:var(--mono);font-size:8px;font-weight:600;letter-spacing:.03em;max-width:300px;text-overflow:ellipsis;overflow:hidden;white-space:nowrap}
+.regime-r1{background:rgba(244,63,94,.15);color:var(--red)}
+.regime-r2{background:rgba(16,185,129,.15);color:var(--green)}
+.regime-r3{background:rgba(245,158,11,.15);color:var(--amber)}
+.regime-r4{background:rgba(0,200,240,.15);color:var(--acc)}
+/* ── IV Rank bar ── */
+.iv-rank-bar{height:6px;border-radius:3px;background:var(--border);position:relative;width:80px;display:inline-block}
+.iv-rank-fill{height:100%;border-radius:3px;background:var(--acc);transition:width .3s}
+/* ── Bid-ask quality ── */
+.baq-good{color:var(--green)!important}
+.baq-warn{color:var(--amber)!important}
+.baq-bad {color:var(--red)!important}
+/* ── Pain chart ── */
+.pain-strike{background:rgba(244,63,94,.1);border-left:2px solid var(--red)}
+/* ── Sub-tabs (within a view tab) ── */
+.subtabs{display:flex;gap:0;margin-bottom:10px;border-bottom:1px solid var(--border2)}
+.subtab{background:none;border:none;border-bottom:2px solid transparent;color:var(--muted);font-family:var(--mono);font-size:9px;padding:5px 11px;cursor:pointer;letter-spacing:.08em;margin-bottom:-1px;transition:all .15s}
+.subtab.active{color:var(--acc);border-bottom-color:var(--acc)}
+.subtab:hover:not(.active){color:var(--text)}
+.subtab-panel{display:none}.subtab-panel.active{display:block}
+
+/* ── VIX gauge ── */
+.vix-gauge{display:flex;flex-direction:column;align-items:center;padding:16px}
+.vix-number{font-family:var(--mono);font-size:48px;font-weight:600;line-height:1}
+.vix-level{font-family:var(--mono);font-size:11px;padding:3px 12px;border-radius:10px;margin-top:6px;letter-spacing:.08em}
+.vix-low     {background:rgba(16,185,129,.15);color:var(--green)}
+.vix-normal  {background:rgba(0,200,240,.15);color:var(--acc)}
+.vix-elevated{background:rgba(245,158,11,.15);color:var(--amber)}
+.vix-extreme {background:rgba(244,63,94,.15);color:var(--red)}
+/* ── Clock / market status ── */
+.market-clock{font-family:var(--mono);font-size:10px;color:var(--muted);display:flex;align-items:center;gap:6px}
+.market-status{padding:2px 7px;border-radius:8px;font-size:9px;font-weight:600;letter-spacing:.06em}
+.ms-open{background:rgba(16,185,129,.15);color:var(--green)}
+.ms-pre {background:rgba(245,158,11,.15);color:var(--amber)}
+.ms-post{background:rgba(0,200,240,.1);color:var(--muted)}
+.ms-closed{background:rgba(90,112,144,.1);color:var(--muted)}
+/* ── DTE badge ── */
+.dte-badge{font-family:var(--mono);font-size:9px;padding:2px 8px;border-radius:8px;font-weight:600;letter-spacing:.05em}
+.dte-far  {background:rgba(16,185,129,.15);color:var(--green)}
+.dte-mid  {background:rgba(245,158,11,.15);color:var(--amber)}
+.dte-near {background:rgba(244,63,94,.15);color:var(--red)}
+/* ── OI walls table ── */
+.wall-strong{color:var(--green);font-weight:600}
+.wall-medium{color:var(--amber)}
+.wall-weak  {color:var(--muted)}
+/* ── Option lens greeks card ── */
+.greeks-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
+.greek-row{display:flex;justify-content:space-between;padding:4px 8px;
+  border-radius:4px;background:var(--surf);border:1px solid var(--border)}
+.greek-label{font-family:var(--mono);font-size:8px;color:var(--muted);letter-spacing:.08em}
+.greek-val  {font-family:var(--mono);font-size:11px;font-weight:500}
+.ltp-s-prem{background:rgba(16,185,129,.12);color:var(--green);
+  padding:1px 6px;border-radius:6px;font-size:9px;font-family:var(--mono)}
+.ltp-s-disc{background:rgba(244,63,94,.12);color:var(--red);
+  padding:1px 6px;border-radius:6px;font-size:9px;font-family:var(--mono)}
+</style>
+</head>
+<body>
+
+</head>
+<body>
+
+<header class="topbar">
+  <div class="logo">NSE<em>/</em>OC<em>·</em>INTEL</div>
+  <nav class="nav">
+    <button class="nav-btn active" data-view="overview">OVERVIEW</button>
+    <button class="nav-btn" data-view="gex">GEX &amp; GAMMA</button>
+    <button class="nav-btn" data-view="oi">OI ANALYSIS</button>
+    <button class="nav-btn" data-view="shockers">SHOCKERS</button>
+    <button class="nav-btn" data-view="iv">IV ANALYSIS</button>
+    <button class="nav-btn" data-view="movers">MOVERS</button>
+    <button class="nav-btn" data-view="trend">STRIKE TREND</button>
+    <button class="nav-btn" data-view="delta">OPTION SCREENER</button>
+    <button class="nav-btn" data-view="settings">SETTINGS</button>
+    <button class="nav-btn" data-view="vix">VIX</button>
+    <button class="nav-btn" data-view="market">MARKET INFO</button>
+    <button class="nav-btn" data-view="divergence">DIVERGENCE</button>
+  </nav>
+  <div id="marketClock" class="market-clock" style="margin-right:8px"></div>
+  <div class="topbar-right">
+    <div class="status-dot"></div>
+    <span id="cacheRefreshBtn" onclick="refreshDbCache()" title="Clear DB cache after new import"
+      style="font-family:var(--mono);font-size:9px;padding:3px 8px;border-radius:10px;cursor:pointer;border:1px solid var(--border);color:var(--muted);letter-spacing:.06em;transition:all .15s">↻ DB</span>
+    <span id="marginRefreshBtn" onclick="refreshMarginCache()" title="Clear margin cache"
+      style="font-family:var(--mono);font-size:9px;padding:3px 8px;border-radius:10px;cursor:pointer;border:1px solid var(--border);color:var(--muted);letter-spacing:.06em;transition:all .15s">↻ MARGIN</span>
+    <span id="iciciStatusBadge" onclick="openIciciModal()">ICICI: OFF</span>
+  </div>
+</header>
+
+<!-- ICICI Modal -->
+<div class="modal-bg" id="iciciModal">
+  <div class="modal">
+    <h3>CONFIGURE ICICI BREEZE</h3>
+    <p class="modal-note">Visit the <a id="iciciLoginLink" href="https://api.icicidirect.com/apiuser/login" target="_blank">ICICI Breeze login URL</a>, log in, then copy the <code>apisession</code> value from the redirect URL.</p>
+    <label>SESSION TOKEN</label>
+    <input type="password" id="iciciTokenInput" placeholder="paste session token here">
+    <label>API KEY (optional — overrides .env)</label>
+    <input type="text" id="iciciKeyInput" placeholder="leave blank to use .env value">
+    <div id="iciciMsg" style="font-family:var(--mono);font-size:10px;margin-top:8px;min-height:18px"></div>
+    <div class="modal-foot">
+      <button class="btn sec" onclick="closeIciciModal()">CANCEL</button>
+      <button class="btn" onclick="saveIciciToken()">CONNECT</button>
+    </div>
+  </div>
+</div>
+
+<div class="main">
+
+<!-- ══ OVERVIEW ════════════════════════════════════════════════════ -->
+<div class="view active" id="view-overview">
+  <div class="filter-bar">
+    <span class="fl">FILTER</span>
+    <div class="toggle-group" id="ovFilterGroup">
+      <button class="active" data-ft="all">ALL</button>
+      <button data-ft="index">INDEX</button>
+      <button data-ft="stock">STOCK</button>
+    </div>
+    <button class="btn" id="btnRefreshOverview">↻ REFRESH</button>
+  </div>
+  <div id="overviewCards" class="ticker-grid"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+  <div class="sh">AGGREGATE OI SIGNALS</div>
+  <div class="card"><div class="tw" id="allOiTable"><div class="loading"><div class="spinner"></div>Loading…</div></div></div>
+</div>
+
+<!-- ══ GEX & GAMMA ═══════════════════════════════════════════════ -->
+<div class="view" id="view-gex">
+  <div class="filter-bar">
+    <span class="fl">SYMBOL</span><select id="gexSymbol"></select>
+    <span class="fl">EXPIRY</span><select id="gexExpiry"></select>
+    <span id="gexExpiryDteBadge"></span>
+    <label class="chk-label"><input type="checkbox" id="gexExpiryShowPast" onchange="reloadExpiries('gex')"> PAST</label>
+    <span class="fl">TIMESTAMP</span><select id="gexTimestamp"></select>
+    <span class="fl">RANGE %</span>
+    <input type="number" id="gexRange" value="5" min="1" max="20" style="width:60px">
+    <span class="fl">FILTER</span>
+    <div class="toggle-group" id="gexFilterGroup">
+      <button class="active" data-ft="all">ALL</button>
+      <button data-ft="index">INDEX</button>
+      <button data-ft="stock">STOCK</button>
+    </div>
+    <button class="btn" id="btnGex">LOAD</button>
+  </div>
+
+  <div class="subtabs">
+    <button class="subtab active" data-stab="gex-main">GEX / GAMMA</button>
+    <button class="subtab" data-stab="gex-maxpain">MAX PAIN</button>
+    <button class="subtab" data-stab="gex-mmdelta">MM DELTA</button>
+  </div>
+
+  <div class="subtab-panel active" id="stab-gex-main">
+    <div class="g2" style="margin-bottom:12px">
+      <div class="card">
+        <div class="card-title">GEX BY STRIKE <span class="badge">CE + PE STACKED</span></div>
+        <div id="gexBarChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">GAMMA PROFILE <span class="badge">DEALER EXPOSURE</span></div>
+        <div id="gammaProfileChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div>
+      </div>
+    </div>
+    <div class="kpi-row" id="gexKpis"></div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title">NET GEX ACROSS STRIKES</div>
+      <div id="netGexChart" class="chart"><div class="loading"><div class="spinner"></div>Select filters</div></div>
+    </div>
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">STRIKES TABLE <span class="badge">PCR + GEX</span></div>
+      <div class="tw" id="gexStrikeTable"></div>
+    </div>
+
+    <div id="gammaAnalysisCard" style="display:none">
+      <div class="sh">GAMMA ANALYSIS</div>
+      <div class="ga-card" id="gaContent"></div>
+    </div>
+  </div>
+
+  <div class="subtab-panel" id="stab-gex-maxpain">
+    <div class="kpi-row" id="maxPainKpis"></div>
+    <div class="g2">
+      <div class="card">
+        <div class="card-title">INTRINSIC VALUE PAIN BY STRIKE <span class="badge">₹M</span></div>
+        <div id="maxPainChart" class="chart"><div class="empty">Click LOAD first</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">MAX PAIN DRIFT OVER TIME</div>
+        <div id="maxPainSeriesChart" class="chart"><div class="empty">Click LOAD first</div></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="subtab-panel" id="stab-gex-mmdelta">
+    <div class="kpi-row" id="mmDeltaKpis"></div>
+    <div class="g2">
+      <div class="card">
+        <div class="card-title">NET MM DELTA OI BY STRIKE <span class="badge">₹M lots</span></div>
+        <div id="mmDeltaChart" class="chart"><div class="empty">Click LOAD first</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">VANNA / CHARM / FLOW</div>
+        <div id="vannaChart" class="chart"><div class="empty">Click LOAD first</div></div>
+      </div>
+    </div>
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">DELTA OI BY STRIKE TABLE</div>
+      <div class="tw" id="mmDeltaTable"></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ OI SIGNALS ════════════════════════════════════════════════ -->
+<div class="view" id="view-oi">
+  <div class="filter-bar">
+    <span class="fl">SYMBOL</span><select id="oiSymbol"></select>
+    <span class="fl">FILTER</span>
+    <div class="toggle-group" id="oiFilterGroup">
+      <button class="active" data-ft="all">ALL</button>
+      <button data-ft="index">INDEX</button>
+      <button data-ft="stock">STOCK</button>
+    </div>
+    <button class="btn" id="btnOi">LOAD</button>
+  </div>
+  <div class="g2" style="margin-bottom:12px">
+    <div class="card"><div class="card-title">CE OI CHANGE BY STRIKE</div>
+      <div id="ceOiChart" class="chart"><div class="loading"><div class="spinner"></div>Select symbol</div></div></div>
+    <div class="card"><div class="card-title">PE OI CHANGE BY STRIKE</div>
+      <div id="peOiChart" class="chart"><div class="loading"><div class="spinner"></div>Select symbol</div></div></div>
+  </div>
+  <div class="subtabs">
+    <button class="subtab active" data-stab="oi-signals">SIGNALS</button>
+    <button class="subtab" data-stab="oi-walls-tab">OI WALLS</button>
+    <button class="subtab" data-stab="oi-flow">FLOW — DELTA</button>
+    <button class="subtab" data-stab="oi-smart">SMART MONEY</button>
+    <button class="subtab" data-stab="oi-history">EOD HISTORY</button>
+  </div>
+  <div class="subtab-panel active" id="stab-oi-signals">
+  <!-- Column filter bar -->
+  <div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;flex-wrap:wrap">
+    <span style="font-family:var(--mono);font-size:9px;color:var(--muted)">FILTER:</span>
+    <input type="text" id="oiSigFilterExpiry" placeholder="expiry…"
+      oninput="filterOiSignals()" style="width:100px;font-size:10px;padding:2px 6px">
+    <input type="text" id="oiSigFilterStrike" placeholder="strike…"
+      oninput="filterOiSignals()" style="width:80px;font-size:10px;padding:2px 6px">
+    <input type="text" id="oiSigFilterCeSig" placeholder="CE sig…"
+      oninput="filterOiSignals()" style="width:90px;font-size:10px;padding:2px 6px">
+    <input type="text" id="oiSigFilterPeSig" placeholder="PE sig…"
+      oninput="filterOiSignals()" style="width:90px;font-size:10px;padding:2px 6px">
+    <button class="btn sec" style="font-size:9px;padding:3px 8px"
+      onclick="clearOiSigFilters()">CLEAR</button>
+  </div>
   <div class="card">
     <div class="card-title">BUILD-UP / COVERING SIGNALS
       <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:8px">sorted by |ΔOI|  ·  threshold: <span id="oiThresholdLabel">10</span> lots</span>
@@ -488,6 +1459,81 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       <div class="tw" id="flowMigTable"><div class="empty">Load data first</div></div>
     </div>
   </div><!-- /stab-oi-flow -->
+
+  <div class="subtab-panel" id="stab-oi-smart">
+    <div class="filter-bar">
+      <span class="fl">EXPIRY</span>
+      <select id="smExpiry" style="min-width:120px">
+        <option value="all">ALL EXPIRIES</option>
+      </select>
+      <label class="chk-label"><input type="checkbox" id="smExpiryPast"> PAST</label>
+      <div class="toggle-group" id="smModeGroup" style="margin-left:8px">
+        <button class="active" data-sm="multiday">MULTI-DAY</button>
+        <button data-sm="intraday">INTRADAY</button>
+      </div>
+      <!-- Multi-day controls -->
+      <span id="smMultiDayCtrl" style="display:flex;align-items:center;gap:6px">
+        <span class="fl">FROM</span>
+        <input type="date" id="smDateFrom" style="width:130px">
+        <span class="fl">TO</span>
+        <input type="date" id="smDateTo"   style="width:130px">
+      </span>
+      <!-- Intraday controls -->
+      <span id="smIntraDayCtrl" style="display:none;align-items:center;gap:6px">
+        <span class="fl">DATE</span>
+        <input type="date" id="smIntradayDate" style="width:130px">
+      </span>
+      <span class="fl">MIN VOL</span>
+      <input type="number" id="smMinVol" value="100" style="width:60px">
+      <span class="fl">SMOOTH</span>
+      <input type="number" id="smSmoothing" value="3" min="1" max="10" style="width:50px"
+        title="Rolling window for smoothing before peak detection">
+      <span class="fl">MIN PEAK%</span>
+      <input type="number" id="smMinProm" value="10" min="1" max="50" style="width:50px"
+        title="Minimum prominence as % of max value to count as cluster">
+      <span class="fl">MIN OI CHG</span>
+      <input type="number" id="smMinOiChg" value="0" min="0" style="width:55px"
+        title="Filter out strikes with |oi_change| below this threshold">
+      <button class="btn" id="btnSmLoad">LOAD</button>
+    </div>
+
+    <!-- Multi-day cluster migration chart -->
+    <div class="card" id="smMigCard">
+      <div class="card-title">
+        SMART MONEY CLUSTER MIGRATION
+        <span class="badge">premium-weighted OI · CE solid · PE dashed · size = conviction</span>
+        <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:8px">
+          Y-axis = strike · X-axis = date/time · line drift = repositioning
+        </span>
+      </div>
+        <div id="smMigChartCE" class="chart" style="min-height:320px"><div class="empty">Select filters and click LOAD</div></div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--muted);text-align:center;padding:2px 0">── PE CLUSTERS (put walls / support) ──</div>
+      <div id="smMigChartPE" class="chart" style="min-height:320px"><div class="empty">Select filters and click LOAD</div></div>
+    </div>
+
+    <!-- Premium flow bar chart -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">PREMIUM FLOW PER CLUSTER
+        <span class="badge">ltp × oi_change · positive = accumulating · negative = unwinding</span>
+      </div>
+      <div id="smPremFlowChart" class="chart"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- OI/Vol ratio heatmap -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">OI-CHANGE / VOLUME RATIO
+        <span class="badge">institutional fingerprint · high = held positions · low = churn</span>
+      </div>
+      <div id="smOiVolChart" class="chart"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Cluster detail table -->
+    <div class="card" style="margin-top:10px">
+      <div class="card-title">CLUSTER DETAIL — LATEST PERIOD</div>
+      <div class="tw" id="smClusterTable"><div class="empty">Load data first</div></div>
+    </div>
+  </div><!-- /stab-oi-smart -->
+
 </div>
 
 <!-- ══ SHOCKERS ══════════════════════════════════════════════════ -->
@@ -1057,6 +2103,7 @@ function getFilter(id){
 document.querySelectorAll('.subtab').forEach(tab=>{
   tab.addEventListener('click',()=>{
     if(tab.dataset.stab==='oi-flow') refreshFlowExpiries().catch(()=>{});
+    if(tab.dataset.stab==='oi-walls-tab') loadOiWalls();
     const container=tab.closest('.view');
     container.querySelectorAll('.subtab').forEach(t=>t.classList.remove('active'));
     container.querySelectorAll('.subtab-panel').forEach(p=>p.classList.remove('active'));
@@ -1348,6 +2395,11 @@ async function loadOverview(){
             <div><div class="tc-key">PE OI</div><div class="tc-val">${fmtL(d.total_pe_oi)}</div></div>
             ${rv_iv?'<div>'+rv_iv+'</div>':''}
           </div>
+          ${(d.exp_move_straddle>0||d.exp_move_theoretical>0)?`
+          <div class='tc-row' style='margin-top:4px;border-top:1px solid var(--border);padding-top:4px'>
+            <div><div class='tc-key'>EXP MOVE STR</div><div class='tc-val acc'>${d.exp_move_straddle>0?fmt(d.exp_move_straddle,1):'—'}</div></div>
+            <div><div class='tc-key'>EXP MOVE TH</div><div class='tc-val'>${d.exp_move_theoretical>0?fmt(d.exp_move_theoretical,1):'—'}</div></div>
+          </div>`:''}
         </div>`;
       }).join('');
     }
@@ -1518,7 +2570,9 @@ async function loadMmDelta(sym,exp,ts){
     document.getElementById('mmDeltaTable').innerHTML=makeTbl(d.rows,[
       {key:'strike_price',label:'STRIKE'},
       {key:'ce_delta',label:'CE Δ',fmt:v=>fmt(v,3)},
+      {key:'ce_nd2',label:'CE P(ITM)',fmt:v=>v>0?fmt(v,3):'—'},
       {key:'pe_delta',label:'PE Δ',fmt:v=>fmt(v,3)},
+      {key:'pe_nd2',label:'PE P(ITM)',fmt:v=>v>0?fmt(v,3):'—'},
       {key:'ce_oi',label:'CE OI',fmt:v=>fmtL(v)},
       {key:'pe_oi',label:'PE OI',fmt:v=>fmtL(v)},
       {key:'ce_delta_oi',label:'CE ΔOI ₹M',fmt:v=>fmt(v,3)},
@@ -1562,10 +2616,12 @@ async function loadOi(){
       {key:'ce_oi_chg',label:'CE OI Δ',fmt:v=>sspan(v,0)},
       {key:'ce_oi',label:'CE OI',fmt:v=>fmtL(v)},
       {key:'ce_vol_oi',label:'CE V/OI',fmt:v=>v!=null?fmt(v,3):'—'},
+      {key:'ce_prem_oi_chg',label:'CE ₹FLOW',fmt:v=>v!=null?sspan(v,0):'—'},
       {key:'ce_signal',label:'CE SIG',fmt:v=>pill(v)},
       {key:'pe_oi_chg',label:'PE OI Δ',fmt:v=>sspan(v,0)},
       {key:'pe_oi',label:'PE OI',fmt:v=>fmtL(v)},
       {key:'pe_vol_oi',label:'PE V/OI',fmt:v=>v!=null?fmt(v,3):'—'},
+      {key:'pe_prem_oi_chg',label:'PE ₹FLOW',fmt:v=>v!=null?sspan(v,0):'—'},
       {key:'pe_signal',label:'PE SIG',fmt:v=>pill(v)},
     ]);
   }catch(e){['ceOiChart','peOiChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
@@ -1954,7 +3010,7 @@ const VIEW_INIT={
   delta:()=>loadDsTimestamps(),
   settings:()=>loadSettings(),
   vix:()=>loadVix(),
-  walls:()=>loadOiWalls(),
+  walls:()=>{},  // walls now inside oi subtab
   market:()=>loadMarketInfo(),
 };
 
@@ -1973,6 +3029,7 @@ window.addEventListener('pageshow', e=>{
 // VIX and OI Walls button listeners
 document.getElementById('btnVix')?.addEventListener('click', loadVix);
 document.getElementById('btnWalls')?.addEventListener('click', loadOiWalls);
+wireToggleGroup('wallsFilterGroup');
 document.getElementById('wallsFilterGroup')?.addEventListener('click', ()=>setTimeout(loadOiWalls,50));
 // Wire trendTimestamp cascade
 document.getElementById('trendExpiry').addEventListener('change',()=>{
@@ -2712,6 +3769,337 @@ async function refreshFlowExpiries(){
     sel.innerHTML='<option value="all">ALL EXPIRIES</option>';
     exps.forEach(e=>{sel.innerHTML+=`<option value="${e}">${e}</option>`;});
   }catch(e){console.warn('refreshFlowExpiries:',e.message);}
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+// Smart Money Flow — Premium-weighted OI clustering
+// ══════════════════════════════════════════════════════════════════
+
+// Colour palette for cluster tracks (up to 8 CE + 8 PE clusters)
+const SM_CE_COLORS = ['#00c8f0','#10b981','#f59e0b','#8b5cf6','#f43f5e','#06b6d4','#84cc16','#fb923c'];
+const SM_PE_COLORS = ['#f43f5e','#f59e0b','#10b981','#00c8f0','#8b5cf6','#fb923c','#84cc16','#06b6d4'];
+const SM_STATUS_STYLE = {
+  TRACKED:  {dash:'solid',  opacity:1.0},
+  EMERGING: {dash:'dot',    opacity:0.8},
+  DISSOLVED:{dash:'dashdot',opacity:0.4},
+};
+
+// ── Init ──────────────────────────────────────────────────────────
+(()=>{
+  const today=new Date().toLocaleDateString('sv-SE');
+  const d5=new Date(Date.now()-5*86400000).toLocaleDateString('sv-SE');
+  ['smDateFrom'].forEach(id=>{const el=document.getElementById(id);if(el&&!el.value)el.value=d5;});
+  ['smDateTo','smIntradayDate'].forEach(id=>{const el=document.getElementById(id);if(el&&!el.value)el.value=today;});
+})();
+
+wireToggleGroup('smModeGroup');
+document.getElementById('smModeGroup')?.addEventListener('click',()=>{
+  const mode=document.querySelector('#smModeGroup .active')?.dataset.sm||'multiday';
+  document.getElementById('smMultiDayCtrl').style.display=mode==='multiday'?'flex':'none';
+  document.getElementById('smIntraDayCtrl').style.display=mode==='intraday'?'flex':'none';
+});
+document.getElementById('btnSmLoad')?.addEventListener('click', loadSmartMoney);
+
+// Populate smExpiry when oiSymbol changes (shared top-bar ticker)
+async function refreshSmExpiries(){
+  const sym=document.getElementById('oiSymbol')?.value;
+  if(!sym) return;
+  const showPast=document.getElementById('smExpiryPast')?.checked;
+  try{
+    const exps=await api(`/api/expiries?symbol=${encodeURIComponent(sym)}&future_only=${!showPast}`);
+    const sel=document.getElementById('smExpiry');
+    if(!sel) return;
+    sel.innerHTML='<option value="all">ALL EXPIRIES</option>';
+    exps.forEach(e=>{sel.innerHTML+=`<option value="${e}">${e}</option>`;});
+  }catch(e){}
+}
+
+// Wire to subtab open and oiSymbol change
+document.querySelectorAll('.subtab').forEach(tab=>{
+  if(tab.dataset.stab==='oi-smart')
+    tab.addEventListener('click',()=>refreshSmExpiries().catch(()=>{}));
+});
+
+let _smLastData=null;
+
+async function loadSmartMoney(){
+  const sym     = document.getElementById('oiSymbol')?.value;
+  const expiry  = document.getElementById('smExpiry')?.value||'all';
+  const mode    = document.querySelector('#smModeGroup .active')?.dataset.sm||'multiday';
+  const dFrom   = document.getElementById('smDateFrom')?.value||'';
+  const dTo     = document.getElementById('smDateTo')?.value||'';
+  const iDate   = document.getElementById('smIntradayDate')?.value||'';
+  const minVol  = document.getElementById('smMinVol')?.value||100;
+  const smooth  = document.getElementById('smSmoothing')?.value||3;
+  const minProm = document.getElementById('smMinProm')?.value||10;
+  const minOi   = getSetting('stgDsMinOi')||0;
+  const maxBaq  = getSetting('stgBaqBad')||15;
+
+  if(!sym){alert('Select a symbol in the OI Signals filter bar');return;}
+
+  ['smMigChart','smPremFlowChart','smOiVolChart'].forEach(id=>setLoad(id));
+  document.getElementById('smClusterTable').innerHTML=
+    '<div class="loading"><div class="spinner"></div>Clustering…</div>';
+
+  try{
+    const params=new URLSearchParams({
+      symbol:sym, expiry, mode,
+      date_from:dFrom, date_to:dTo,
+      intraday_date:iDate,
+      min_oi:minOi, min_volume:minVol,
+      max_baq_pct:maxBaq,
+      smoothing:smooth, min_prom_pct:minProm,
+    });
+    const d=await api(`/api/smart_money_flow?${params}`);
+    _smLastData=d;
+    renderSmartMoney(d);
+  }catch(e){
+    ['smMigChart','smPremFlowChart','smOiVolChart'].forEach(id=>setEmpty(id,'⚠ '+e.message));
+    document.getElementById('smClusterTable').innerHTML=
+      `<div class="empty err">⚠ ${e.message}</div>`;
+  }
+}
+
+function renderSmartMoney(d){
+  if(!d) return;
+  const periods = d.periods||[];
+  const spots   = d.spots||{};
+  const ceTracks= d.ce_tracks||[];
+  const peTracks= d.pe_tracks||[];
+
+  // ── Migration chart: strike vs period, one line per track ──────────
+  const migTraces=[];
+
+  // Spot price reference line
+  if(periods.length){
+    migTraces.push({
+      name:'Spot',
+      x:periods,
+      y:periods.map(p=>spots[p]||null),
+      type:'scatter',mode:'lines',
+      line:{color:'rgba(255,255,255,0.3)',width:1,dash:'dot'},
+      showlegend:true,
+    });
+  }
+
+  ceTracks.forEach((t,i)=>{
+    if(!t.points?.length) return;
+    const sty=SM_STATUS_STYLE[t.status]||SM_STATUS_STYLE.TRACKED;
+    const col=SM_CE_COLORS[i%SM_CE_COLORS.length];
+    // Line of center_strike over periods
+    migTraces.push({
+      name:`CE #${i+1} (${t.status})`,
+      x:t.points.map(p=>p.period),
+      y:t.points.map(p=>p.center_strike),
+      type:'scatter',mode:'lines+markers',
+      line:{color:col,width:3*sty.opacity,dash:sty.dash},
+      marker:{size:t.points.map(p=>Math.max(4,Math.min(20,
+        Math.sqrt(Math.abs(p.total_prem_oi||0))/500))),
+        color:col,opacity:sty.opacity},
+      text:t.points.map(p=>
+        `δ: ${fmt(p.avg_delta,3)}<br>IV: ${fmt(p.avg_iv,1)}%<br>`+
+        `PremOI: ${fmtL(p.total_prem_oi)}<br>`+
+        `Conc: ${fmt(p.concentration_ratio,2)}<br>`+
+        `PCR: ${p.pcr!=null?fmt(p.pcr,3):'—'}`),
+      hovertemplate:'%{text}<extra>CE #'+(i+1)+'</extra>',
+      legendgroup:'ce'+(i+1),
+    });
+    // Min-max range band
+    migTraces.push({
+      name:`CE #${i+1} range`,
+      x:[...t.points.map(p=>p.period),...t.points.map(p=>p.period).reverse()],
+      y:[...t.points.map(p=>p.max_strike),...t.points.map(p=>p.min_strike).reverse()],
+      type:'scatter',mode:'none',fill:'toself',
+      fillcolor:`rgba(${parseInt(col.slice(1,3),16)},${parseInt(col.slice(3,5),16)},${parseInt(col.slice(5,7),16)},0.08)`,
+      showlegend:false,hoverinfo:'skip',legendgroup:'ce'+(i+1),
+    });
+  });
+
+  peTracks.forEach((t,i)=>{
+    if(!t.points?.length) return;
+    const sty=SM_STATUS_STYLE[t.status]||SM_STATUS_STYLE.TRACKED;
+    const col=SM_PE_COLORS[i%SM_PE_COLORS.length];
+    migTraces.push({
+      name:`PE #${i+1} (${t.status})`,
+      x:t.points.map(p=>p.period),
+      y:t.points.map(p=>p.center_strike),
+      type:'scatter',mode:'lines+markers',
+      line:{color:col,width:2*sty.opacity,dash:'dash'},
+      marker:{size:t.points.map(p=>Math.max(4,Math.min(20,
+        Math.sqrt(Math.abs(p.total_prem_oi||0))/500))),
+        color:col,symbol:'diamond',opacity:sty.opacity},
+      text:t.points.map(p=>
+        `δ: ${fmt(p.avg_delta,3)}<br>IV: ${fmt(p.avg_iv,1)}%<br>`+
+        `PremOI: ${fmtL(p.total_prem_oi)}<br>`+
+        `Conc: ${fmt(p.concentration_ratio,2)}<br>`+
+        `PCR: ${p.pcr!=null?fmt(p.pcr,3):'—'}`),
+      hovertemplate:'%{text}<extra>PE #'+(i+1)+'</extra>',
+      legendgroup:'pe'+(i+1),
+    });
+  });
+
+  // Shared y-axis range for both CE and PE charts
+  const allY=[...(ceTracks||[]),...(peTracks||[])]
+    .flatMap(t=>t.points?.map(p=>p.center_strike)||[]).filter(Boolean);
+  const sVals=Object.values(d.spots||{}).filter(Boolean);
+  const yAll=[...allY,...sVals];
+  const yRange=yAll.length?[Math.min(...yAll)*0.995,Math.max(...yAll)*1.005]:undefined;
+  const mBase={...LB,
+    xaxis:{...LB.xaxis,title:d.mode==='intraday'?'Time':'Date',tickangle:-30},
+    yaxis:{...LB.yaxis,title:'Strike',...(yRange?{range:yRange}:{autorange:true})},
+    legend:{...LB.legend,orientation:'h',y:-0.3,font:{size:8}},height:340};
+  const ceT=migTraces.filter(t=>t.name?.startsWith('CE')||t.name==='Spot');
+  const peT=migTraces.filter(t=>t.name?.startsWith('PE')||t.name==='Spot');
+  plot('smMigChartCE',ceT.length?ceT:[{x:[],y:[],type:'scatter',name:'No CE clusters'}],{...mBase});
+  plot('smMigChartPE',peT.length?peT:[{x:[],y:[],type:'scatter',name:'No PE clusters'}],{...mBase});
+
+  // ── Premium flow bar chart (latest period only) ────────────────────
+  const latestP=periods[periods.length-1];
+  const pfData=[];
+  [...ceTracks.map((t,i)=>({t,i,side:'CE',cols:SM_CE_COLORS})),
+   ...peTracks.map((t,i)=>({t,i,side:'PE',cols:SM_PE_COLORS}))].forEach(({t,i,side,cols})=>{
+    const pt=t.points.find(p=>p.period===latestP);
+    if(!pt) return;
+    pfData.push({
+      label:`${side} #${i+1}\n${fmt(pt.center_strike,0)}`,
+      val:pt.prem_flow||0,
+      col:side==='CE'?SM_CE_COLORS[i%8]:SM_PE_COLORS[i%8],
+    });
+  });
+
+  if(pfData.length){
+    plot('smPremFlowChart',[{
+      x:pfData.map(r=>r.label),
+      y:pfData.map(r=>r.val),
+      type:'bar',
+      marker:{color:pfData.map(r=>r.val>=0?C.green:C.red),opacity:.8},
+      text:pfData.map(r=>`₹${fmtL(Math.abs(r.val))}`),
+      textposition:'outside',textfont:{size:8,family:"'JetBrains Mono',monospace"},
+    }],{...LB,
+      xaxis:{...LB.xaxis,tickangle:-20,automargin:true},
+      yaxis:{...LB.yaxis,title:'Premium Flow (ltp × ΔOI)'},
+      shapes:[{type:'line',x0:-0.5,x1:pfData.length-0.5,y0:0,y1:0,
+        line:{color:C.muted,width:1,dash:'dot'}}],
+      height:250,
+    });
+  }
+
+  // ── OI/Vol ratio heatmap across periods ───────────────────────────
+  const ovLabels=[
+    ...ceTracks.map((t,i)=>`CE #${i+1} ${fmt((t.points[0]||{}).center_strike||0,0)}`),
+    ...peTracks.map((t,i)=>`PE #${i+1} ${fmt((t.points[0]||{}).center_strike||0,0)}`),
+  ];
+  const ovZ=[];
+  ceTracks.forEach(t=>{
+    ovZ.push(periods.map(p=>{
+      const pt=t.points.find(q=>q.period===p);
+      return pt?.oi_vol_ratio??null;
+    }));
+  });
+  peTracks.forEach(t=>{
+    ovZ.push(periods.map(p=>{
+      const pt=t.points.find(q=>q.period===p);
+      return pt?.oi_vol_ratio??null;
+    }));
+  });
+
+  if(ovZ.length){
+    plot('smOiVolChart',[{
+      type:'heatmap',
+      x:periods, y:ovLabels, z:ovZ,
+      colorscale:[['0','#f43f5e'],['0.5','#1e2d47'],['1','#10b981']],
+      zmid:0,
+      colorbar:{title:'OI/Vol',thickness:12},
+      hovertemplate:'%{y}<br>%{x}<br>OI/Vol: %{z:.3f}<extra></extra>',
+    }],{...LB,
+      xaxis:{...LB.xaxis,title:'Period',tickangle:-30},
+      yaxis:{...LB.yaxis,automargin:true},
+      height:Math.max(200,(ovLabels.length)*40+80),
+    });
+  }
+
+  // ── Cluster detail table — latest period ──────────────────────────
+  const rows=[];
+  const addRows=(tracks,side,cols)=>{
+    tracks.forEach((t,i)=>{
+      const pt=t.points.find(p=>p.period===latestP);
+      if(!pt) return;
+      rows.push({
+        side, id:`#${i+1}`, status:t.status,
+        peak_strike:pt.peak_strike, center:pt.center_strike, range:`${fmt(pt.min_strike,0)}–${fmt(pt.max_strike,0)}`,
+        prem_oi:pt.total_prem_oi,
+        conc:pt.concentration_ratio,
+        avg_delta:pt.avg_delta, avg_iv:pt.avg_iv,
+        prem_flow:pt.prem_flow,
+        oi_vol:pt.oi_vol_ratio,
+        gamma_adj:pt.gamma_adj_oi,
+        pcr:pt.pcr,
+        buy_imb:pt.buy_imbalance,
+        velocity:pt.velocity,
+        acceleration:pt.acceleration,
+        n_strikes:pt.member_count,
+        days_tracked:t.points.length,
+      });
+    });
+  };
+  addRows(ceTracks,'CE',SM_CE_COLORS);
+  addRows(peTracks,'PE',SM_PE_COLORS);
+
+  document.getElementById('smClusterTable').innerHTML=makeTbl(rows,[
+    {key:'side',        label:'SIDE',   fmt:v=>`<span class="${v==='CE'?'up':'down'}">${v}</span>`},
+    {key:'id',          label:'CLUSTER'},
+    {key:'status',      label:'STATUS', fmt:v=>{
+      const c={TRACKED:'var(--green)',EMERGING:'var(--amber)',DISSOLVED:'var(--muted)'};
+      const col=c[v]||'var(--text)';
+      return`<span style="color:${col};font-family:var(--mono);font-size:9px">${v}</span>`;}},
+    {key:'peak_strike', label:'PEAK STR',fmt:v=>fmt(v,0)},
+    {key:'center',      label:'CENTROID', fmt:v=>fmt(v,1)},
+    {key:'range',       label:'RANGE'},
+    {key:'prem_oi',     label:'PREM OI', fmt:v=>fmtL(v)},
+    {key:'conc',        label:'CONC',    fmt:v=>v!=null?fmt(v,3):'—'},
+    {key:'avg_delta',   label:'AVG |δ|', fmt:v=>fmt(v,3)},
+    {key:'avg_iv',      label:'AVG IV%', fmt:v=>fmt(v,1)+'%'},
+    {key:'prem_flow',   label:'PREM FLOW', fmt:v=>sspan(v,0)},
+    {key:'oi_vol',      label:'OI/VOL',  fmt:v=>v!=null?fmt(v,3):'—'},
+    {key:'gamma_adj',   label:'γ-ADJ OI', fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'pcr',         label:'PCR',     fmt:v=>v!=null?fmt(v,3):'—'},
+    {key:'buy_imb',     label:'BUY IMB', fmt:v=>v!=null?sspan(v,3):'—'},
+    {key:'velocity',    label:'VEL',     fmt:v=>sspan(v,2)},
+    {key:'acceleration',label:'ACCEL',   fmt:v=>sspan(v,2)},
+    {key:'n_strikes',   label:'N STR'},
+    {key:'days_tracked',label:'PERIODS'},
+  ]);
+}
+
+
+// ── OI Signals column filter ─────────────────────────────────────
+function filterOiSignals(){
+  const expiry = document.getElementById('oiSigFilterExpiry')?.value.trim().toUpperCase()||'';
+  const strike = document.getElementById('oiSigFilterStrike')?.value.trim()||'';
+  const ceSig  = document.getElementById('oiSigFilterCeSig')?.value.trim().toUpperCase()||'';
+  const peSig  = document.getElementById('oiSigFilterPeSig')?.value.trim().toUpperCase()||'';
+  const tbl    = document.querySelector('#oiSignalTable table');
+  if(!tbl) return;
+  // Column indices: 0=timestamp,1=strike,2=expiry,3=ce_oi_chg,4=ce_oi,5=ce_vol,6=ce_prem,7=ce_sig...
+  // Find by header text
+  const headers=[...tbl.querySelectorAll('th')].map(h=>h.textContent.trim());
+  const colIdx = name => headers.findIndex(h=>h.includes(name));
+  const iStrike=colIdx('STRIKE'), iExpiry=colIdx('EXPIRY');
+  const iCeSig=colIdx('CE SIG'), iPeSig=colIdx('PE SIG');
+  tbl.querySelectorAll('tbody tr').forEach(row=>{
+    const cells=[...row.cells];
+    const matchExpiry = !expiry || (cells[iExpiry]?.textContent||'').toUpperCase().includes(expiry);
+    const matchStrike = !strike || (cells[iStrike]?.textContent||'').includes(strike);
+    const matchCeSig  = !ceSig  || (cells[iCeSig]?.textContent||'').toUpperCase().includes(ceSig);
+    const matchPeSig  = !peSig  || (cells[iPeSig]?.textContent||'').toUpperCase().includes(peSig);
+    row.style.display=(matchExpiry&&matchStrike&&matchCeSig&&matchPeSig)?'':'none';
+  });
+}
+function clearOiSigFilters(){
+  ['oiSigFilterExpiry','oiSigFilterStrike','oiSigFilterCeSig','oiSigFilterPeSig']
+    .forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
+  filterOiSignals();
 }
 
 // ── Bootstrap ─────────────────────────────────────────────────────
