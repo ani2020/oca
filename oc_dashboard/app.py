@@ -2269,8 +2269,8 @@ def oi_walls(filter_type: str = Query("all")):
     """
     idx_list = ", ".join(f"'{s}'" for s in _NSE_INDICES)
     sym_filter = (
-        f"AND t.symbol IN ({idx_list})"       if filter_type == "index"  #fixed for sql syntax t.symbol
-        else f"AND t.symbol NOT IN ({idx_list})" if filter_type == "stock" #fixed for sql syntax t.symbol
+        f"AND symbol IN ({idx_list})"       if filter_type == "index"
+        else f"AND symbol NOT IN ({idx_list})" if filter_type == "stock"
         else ""
     )
     df = qdf(
@@ -3449,11 +3449,33 @@ def _find_clusters(
         # Fallback: treat the global maximum as one cluster
         peaks = np.array([int(np.argmax(smoothed))])
 
-    # Build valley boundaries between adjacent peaks
+    # Build valley boundaries between adjacent peaks.
+    # CRITICAL: do NOT extend the first cluster down to index 0 or the last
+    # cluster up to the final index — that sweeps in far ITM/OTM tail strikes
+    # with tiny premium OI, ballooning the range and dragging the centroid.
+    # Instead, bound each cluster by where its premium OI decays to a small
+    # fraction of its peak value (the "skirt" of the peak).
+    peak_vals  = smoothed[peaks]
     boundaries = []
     for i, pk in enumerate(peaks):
-        lo = 0 if i == 0 else (peaks[i-1] + pk) // 2
-        hi = len(strikes)-1 if i == len(peaks)-1 else (pk + peaks[i+1]) // 2
+        pk_val = smoothed[pk]
+        # decay threshold — strikes below this fraction of the peak are
+        # not considered part of the cluster
+        decay = pk_val * 0.10
+
+        # Walk left from peak until premium decays below threshold OR we
+        # reach the midpoint to the previous peak (whichever comes first)
+        left_limit = 0 if i == 0 else (peaks[i-1] + pk) // 2
+        lo = pk
+        while lo > left_limit and smoothed[lo-1] >= decay:
+            lo -= 1
+
+        # Walk right from peak similarly
+        right_limit = len(strikes)-1 if i == len(peaks)-1 else (pk + peaks[i+1]) // 2
+        hi = pk
+        while hi < right_limit and smoothed[hi+1] >= decay:
+            hi += 1
+
         boundaries.append((lo, hi))
 
     clusters = []
@@ -3473,7 +3495,7 @@ def _find_clusters(
             "peak_strike":        float(strikes[peaks[i]]),
             "min_strike":         float(strikes[lo]),
             "max_strike":         float(strikes[hi]),
-            "total_prem_oi":      round(total_prem, 2),
+            "tv_weight":          round(total_prem, 2),   # time-value-weighted (clustering basis)
             "concentration_ratio":round(top3 / total_prem, 4) if total_prem > 0 else None,
             "member_count":       int(len(member_idx)),
         }
@@ -3565,6 +3587,8 @@ def _eod_df(symbol: str, expiry_filter: str, exp_params: list,
             COALESCE(t.pe_prem_oi,     0)   AS pe_prem_oi,
             COALESCE(t.ce_prem_oi_chg, 0)   AS ce_prem_oi_chg,
             COALESCE(t.pe_prem_oi_chg, 0)   AS pe_prem_oi_chg,
+            COALESCE(t.ce_time_value,  0)   AS ce_tv,
+            COALESCE(t.pe_time_value,  0)   AS pe_tv,
             COALESCE(t.ce_nd2, 0)           AS ce_nd2,
             COALESCE(t.pe_nd2, 0)           AS pe_nd2
         FROM {tbl()} t
@@ -3640,6 +3664,8 @@ def smart_money_flow(
                 COALESCE(pe_prem_oi,     0)      AS pe_prem_oi,
                 COALESCE(ce_prem_oi_chg, 0)      AS ce_prem_oi_chg,
                 COALESCE(pe_prem_oi_chg, 0)      AS pe_prem_oi_chg,
+                COALESCE(ce_time_value,  0)      AS ce_tv,
+                COALESCE(pe_time_value,  0)      AS pe_tv,
                 COALESCE(ce_nd2,         0)      AS ce_nd2,
                 COALESCE(pe_nd2,         0)      AS pe_nd2
             FROM {tbl()}
@@ -3699,9 +3725,16 @@ def smart_money_flow(
         all_spots[period] = spot
 
         # premium-weighted OI: ltp × oi (or pre-computed col if available)
-        # Use pre-computed DB columns where available
-        ce_prem_oi = snap["ce_prem_oi"].values   # ce_ltp × ce_oi (from oc_processor)
-        pe_prem_oi = snap["pe_prem_oi"].values   # pe_ltp × pe_oi
+        # Use TIME-VALUE-weighted OI for clustering, not total premium.
+        # Total premium (ltp×oi) is dominated by deep ITM options whose
+        # intrinsic value is huge — this pushed CE clusters below spot and
+        # PE clusters above spot (backwards). Time value (extrinsic) is the
+        # genuine "bet" portion and peaks where real positioning sits.
+        ce_tv_oi = (snap["ce_tv"] * snap["ce_oi"]).values   # extrinsic × OI
+        pe_tv_oi = (snap["pe_tv"] * snap["pe_oi"]).values
+        # Keep total prem_oi for display/reporting
+        ce_prem_oi = snap["ce_prem_oi"].values
+        pe_prem_oi = snap["pe_prem_oi"].values
 
         ce_extra = {
             "avg_delta":    snap["ce_adelta"].values,
@@ -3709,6 +3742,7 @@ def smart_money_flow(
             "avg_gamma":    snap["ce_gamma"].values,
             "avg_nd2":      snap["ce_nd2"].values,          # P(ITM) from DB
             "prem_flow":    snap["ce_prem_oi_chg"].values,  # ce_ltp × ce_oi_chg (from DB)
+            "premium_oi":   snap["ce_prem_oi"].values,      # total premium OI (display)
             "oi_vol_ratio": np.where(snap["ce_vol"] > 0,
                                 snap["ce_oi_chg"] / snap["ce_vol"], 0),
             "gamma_adj_oi": (snap["ce_oi_chg"] * snap["ce_gamma"]
@@ -3720,16 +3754,18 @@ def smart_money_flow(
             "avg_gamma":    snap["pe_gamma"].values,
             "avg_nd2":      snap["pe_nd2"].values,
             "prem_flow":    snap["pe_prem_oi_chg"].values,
+            "premium_oi":   snap["pe_prem_oi"].values,      # total premium OI (display)
             "oi_vol_ratio": np.where(snap["pe_vol"] > 0,
                                 snap["pe_oi_chg"] / snap["pe_vol"], 0),
             "gamma_adj_oi": (snap["pe_oi_chg"] * snap["pe_gamma"]
                              * snap["lotsize"]).values,
         }
 
+        # Cluster on time-value-weighted OI (genuine positioning signal)
         ce_clusters = _find_clusters(
-            strikes, ce_prem_oi, smoothing, min_prom_pct, ce_extra)
+            strikes, ce_tv_oi, smoothing, min_prom_pct, ce_extra)
         pe_clusters = _find_clusters(
-            strikes, pe_prem_oi, smoothing, min_prom_pct, pe_extra)
+            strikes, pe_tv_oi, smoothing, min_prom_pct, pe_extra)
 
         # Add PCR per cluster (pe_oi sum / ce_oi sum for member strikes)
         for cl in ce_clusters:

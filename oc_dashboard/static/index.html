@@ -3895,11 +3895,11 @@ function renderSmartMoney(d){
       type:'scatter',mode:'lines+markers',
       line:{color:col,width:3*sty.opacity,dash:sty.dash},
       marker:{size:t.points.map(p=>Math.max(4,Math.min(20,
-        Math.sqrt(Math.abs(p.total_prem_oi||0))/500))),
+        Math.sqrt(Math.abs(p.tv_weight||0))/500))),
         color:col,opacity:sty.opacity},
       text:t.points.map(p=>
         `δ: ${fmt(p.avg_delta,3)}<br>IV: ${fmt(p.avg_iv,1)}%<br>`+
-        `PremOI: ${fmtL(p.total_prem_oi)}<br>`+
+        `Prem OI: ${fmtL(p.premium_oi)}<br>TV wt: ${fmtL(p.tv_weight)}<br>`+
         `Conc: ${fmt(p.concentration_ratio,2)}<br>`+
         `PCR: ${p.pcr!=null?fmt(p.pcr,3):'—'}`),
       hovertemplate:'%{text}<extra>CE #'+(i+1)+'</extra>',
@@ -3927,11 +3927,11 @@ function renderSmartMoney(d){
       type:'scatter',mode:'lines+markers',
       line:{color:col,width:2*sty.opacity,dash:'dash'},
       marker:{size:t.points.map(p=>Math.max(4,Math.min(20,
-        Math.sqrt(Math.abs(p.total_prem_oi||0))/500))),
+        Math.sqrt(Math.abs(p.tv_weight||0))/500))),
         color:col,symbol:'diamond',opacity:sty.opacity},
       text:t.points.map(p=>
         `δ: ${fmt(p.avg_delta,3)}<br>IV: ${fmt(p.avg_iv,1)}%<br>`+
-        `PremOI: ${fmtL(p.total_prem_oi)}<br>`+
+        `Prem OI: ${fmtL(p.premium_oi)}<br>TV wt: ${fmtL(p.tv_weight)}<br>`+
         `Conc: ${fmt(p.concentration_ratio,2)}<br>`+
         `PCR: ${p.pcr!=null?fmt(p.pcr,3):'—'}`),
       hovertemplate:'%{text}<extra>PE #'+(i+1)+'</extra>',
@@ -4028,7 +4028,7 @@ function renderSmartMoney(d){
       rows.push({
         side, id:`#${i+1}`, status:t.status,
         peak_strike:pt.peak_strike, center:pt.center_strike, range:`${fmt(pt.min_strike,0)}–${fmt(pt.max_strike,0)}`,
-        prem_oi:pt.total_prem_oi,
+        prem_oi:pt.premium_oi, tv_weight:pt.tv_weight,
         conc:pt.concentration_ratio,
         avg_delta:pt.avg_delta, avg_iv:pt.avg_iv,
         prem_flow:pt.prem_flow,
@@ -4057,6 +4057,7 @@ function renderSmartMoney(d){
     {key:'center',      label:'CENTROID', fmt:v=>fmt(v,1)},
     {key:'range',       label:'RANGE'},
     {key:'prem_oi',     label:'PREM OI', fmt:v=>fmtL(v)},
+    {key:'tv_weight',   label:'TV WEIGHT',fmt:v=>fmtL(v)},
     {key:'conc',        label:'CONC',    fmt:v=>v!=null?fmt(v,3):'—'},
     {key:'avg_delta',   label:'AVG |δ|', fmt:v=>fmt(v,3)},
     {key:'avg_iv',      label:'AVG IV%', fmt:v=>fmt(v,1)+'%'},
