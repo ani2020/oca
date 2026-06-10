@@ -66,15 +66,16 @@ def delta_screener(
 
     if timestamp:
         ts_clause, ts_params = ts_filter_clause(timestamp)
-        ts_where  = f"AND {ts_clause}"
+        ts_where  = ts_clause
         pre_cte   = ""
     else:
         # Use a CTE to get latest timestamp per symbol — more reliable than
         # correlated subquery which some DuckDB versions handle inconsistently
+        _t = tbl()
         pre_cte  = f"""latest_ts AS (
             SELECT symbol, MAX(timestamp) AS max_ts
-            FROM {{tbl()}} GROUP BY symbol
-        ),"""
+            FROM {_t} GROUP BY symbol
+        )"""
         ts_where  = "AND timestamp = (SELECT max_ts FROM latest_ts WHERE latest_ts.symbol = t.symbol)"
         ts_params = []
 
@@ -97,7 +98,7 @@ def delta_screener(
             COALESCE(ce_theta,  0) AS ce_theta,  COALESCE(pe_theta,  0) AS pe_theta,
             COALESCE(ce_gexv,   0) AS ce_gexv,   COALESCE(pe_gexv,   0) AS pe_gexv,
             COALESCE(net_gexv,  0) AS net_gexv
-        FROM {tbl()}
+        FROM {tbl()} t
         WHERE 1=1 {sym_filter} {ts_where}
           AND expiry >= CURRENT_DATE
           AND (COALESCE(ce_ltp, 0) + COALESCE(pe_ltp, 0)) > 0

@@ -18,7 +18,6 @@ import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-import uvicorn
 from fastapi import FastAPI
 from .db import _SafeJSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,7 +31,7 @@ from .nse import init_nse_fetcher
 # Route modules
 from .routes import (
     meta, overview, gex, oi, iv, screener, shockers,
-    divergence, flow, smartmoney, market, icici,
+    divergence, flow, smartmoney, exposure, screener_exposure, market, icici,
 )
 
 
@@ -113,6 +112,8 @@ app.include_router(shockers.router, tags=["shockers"])
 app.include_router(divergence.router, tags=["divergence"])
 app.include_router(flow.router, tags=["flow"])
 app.include_router(smartmoney.router, tags=["smartmoney"])
+app.include_router(exposure.router, tags=["exposure"])
+app.include_router(screener_exposure.router, tags=["exposure_screener"])
 app.include_router(market.router, tags=["market"])
 app.include_router(icici.router, tags=["icici"])
 
@@ -136,6 +137,7 @@ def serve_index():
 # CLI entry point
 # ---------------------------------------------------------------------------
 def main() -> None:
+    import uvicorn
     parser = argparse.ArgumentParser(description="OC Dashboard")
     parser.add_argument("--db", default=os.getenv("OC_DB", "oc.duckdb"),
                         help="Path to DuckDB file")

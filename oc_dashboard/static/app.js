@@ -263,19 +263,27 @@ async function refreshMarginCache(){
 async function loadCascade(symId,expId,tsId,futureOnly=true){
   const sym=document.getElementById(symId)?.value;if(!sym)return;
   try{
+    const expVal=expId?document.getElementById(expId)?.value:'';
     const calls=[
       expId?api(`/api/expiries?symbol=${encodeURIComponent(sym)}&future_only=${futureOnly}`):Promise.resolve([]),
-      tsId ?api(`/api/timestamps?symbol=${encodeURIComponent(sym)}`):Promise.resolve([]),
+      tsId ?api(`/api/timestamps?symbol=${encodeURIComponent(sym)}${expVal?'&expiry='+encodeURIComponent(expVal):''}`):Promise.resolve([]),
     ];
-    const[exps,tss]=await Promise.all(calls);
+    const[exps]=await Promise.all(calls.slice(0,1).concat([Promise.resolve([])]));
     if(expId&&exps.length)populateSel(expId,exps);
-    if(tsId&&tss.length)populateSel(tsId,tss);
+    // Reload timestamps AFTER expiry is populated so expiry value is current
+    if(tsId){
+      const selExp=expId?document.getElementById(expId)?.value:'';
+      const tsUrl=`/api/timestamps?symbol=${encodeURIComponent(sym)}`+(selExp?`&expiry=${encodeURIComponent(selExp)}`:'');
+      try{const tss=await api(tsUrl);if(tss.length)populateSel(tsId,tss);}catch(e){}
+    }
   }catch(e){console.error('loadCascade:',symId,e.message);}
 }
 async function reloadTimestamps(symId,expId,tsId){
   const sym=document.getElementById(symId)?.value;if(!sym||!tsId)return;
+  const exp=expId?document.getElementById(expId)?.value:'';
   try{
-    const tss=await api(`/api/timestamps?symbol=${encodeURIComponent(sym)}`);
+    const url=`/api/timestamps?symbol=${encodeURIComponent(sym)}`+(exp?`&expiry=${encodeURIComponent(exp)}`:'');
+    const tss=await api(url);
     if(tss.length)populateSel(tsId,tss);
   }catch(e){}
 }
@@ -1041,6 +1049,7 @@ document.getElementById('ivExpiry').addEventListener('change',()=>updateDteBadge
 document.getElementById('trendExpiry').addEventListener('change',()=>{loadAtmStrikes();updateDteBadge('trendExpiry','trendExpiryDteBadge');});
 
 const VIEW_INIT={
+  expscreen:()=>loadExposureScreener(),
   gex:()=>loadCascade('gexSymbol','gexExpiry','gexTimestamp'),
   oi:()=>{},
   shockers:()=>{loadVolShock();loadIvShock();},
@@ -2142,6 +2151,367 @@ function clearOiSigFilters(){
     .forEach(id=>{const el=document.getElementById(id);if(el)el.value='';});
   filterOiSignals();
 }
+
+
+// ══════════════════════════════════════════════════════════════════
+// Exposure Flow — Gamma, Delta, Vanna layers
+// ══════════════════════════════════════════════════════════════════
+
+(()=>{
+  const today=new Date().toLocaleDateString('sv-SE');
+  const d5=new Date(Date.now()-5*86400000).toLocaleDateString('sv-SE');
+  const ef=document.getElementById('expDateFrom');
+  const et=document.getElementById('expDateTo');
+  const ei=document.getElementById('expIntraDate');
+  if(ef&&!ef.value) ef.value=d5;
+  if(et&&!et.value) et.value=today;
+  if(ei&&!ei.value) ei.value=today;
+})();
+
+wireToggleGroup('expModeGroup');
+document.getElementById('expModeGroup')?.addEventListener('click',()=>{
+  const mode=document.querySelector('#expModeGroup .active')?.dataset.em||'multiday';
+  document.getElementById('expMultiCtrl').style.display=mode==='multiday'?'flex':'none';
+  document.getElementById('expIntraCtrl').style.display=mode==='intraday'?'flex':'none';
+});
+document.getElementById('btnExpLoad')?.addEventListener('click', loadExposureFlow);
+
+// Populate expExpiry when OI EXPOSURE subtab opens
+document.querySelectorAll('.subtab').forEach(tab=>{
+  if(tab.dataset.stab==='oi-exposure')
+    tab.addEventListener('click', async()=>{
+      const sym=document.getElementById('oiSymbol')?.value;
+      if(!sym) return;
+      try{
+        const showPast=document.getElementById('expExpiryPast')?.checked;
+        const exps=await api(`/api/expiries?symbol=${encodeURIComponent(sym)}&future_only=${!showPast}`);
+        const sel=document.getElementById('expExpiry');
+        if(!sel) return;
+        sel.innerHTML='<option value="all">ALL EXPIRIES</option>';
+        exps.forEach(e=>{sel.innerHTML+=`<option value="${e}">${e}</option>`;});
+      }catch(e){}
+    });
+});
+
+async function loadExposureFlow(){
+  const sym    = document.getElementById('oiSymbol')?.value;
+  const expiry = document.getElementById('expExpiry')?.value||'all';
+  const mode   = document.querySelector('#expModeGroup .active')?.dataset.em||'multiday';
+  const dFrom  = document.getElementById('expDateFrom')?.value||'';
+  const dTo    = document.getElementById('expDateTo')?.value||'';
+  const iDate  = document.getElementById('expIntraDate')?.value||'';
+  const minVol = document.getElementById('expMinVol')?.value||100;
+
+  if(!sym){alert('Select a symbol in OI Signals filter bar');return;}
+
+  ['expFlipChart','expGexProfile','expDeltaChart','expVannaChart'].forEach(id=>setLoad(id));
+  document.getElementById('expSummaryTable').innerHTML=
+    '<div class="loading"><div class="spinner"></div>Computing…</div>';
+  document.getElementById('expDivSignals').style.display='none';
+
+  try{
+    const params=new URLSearchParams({
+      symbol:sym, expiry, mode,
+      date_from:dFrom, date_to:dTo,
+      intraday_date:iDate, min_volume:minVol,
+    });
+    const d=await api(`/api/exposure_flow?${params}`);
+    renderExposureFlow(d);
+  }catch(e){
+    ['expFlipChart','expGexProfile','expDeltaChart','expVannaChart'].forEach(id=>
+      setEmpty(id,'⚠ '+e.message));
+    document.getElementById('expSummaryTable').innerHTML=
+      `<div class="empty err">⚠ ${e.message}</div>`;
+  }
+}
+
+function renderExposureFlow(d){
+  if(!d) return;
+  const P = d.periods||[];
+  const G = d.gamma||{};
+  const D = d.directional||{};
+  const V = d.vanna||{};
+  const xLabel = d.mode==='intraday'?'Time':'Date';
+
+  // ── Divergence signals ──────────────────────────────────────
+  const divEl=document.getElementById('expDivSignals');
+  const divs=d.divergence||{};
+  const divPills=Object.entries(divs)
+    .filter(([k,v])=>v)
+    .map(([k,v])=>{
+      const colors={fragile_pin:'var(--amber)',coiled_spring:'var(--amber)',
+        gamma_shift:'var(--red)',bullish_accumulation:'var(--green)',
+        bearish_distribution:'var(--red)'};
+      const col=colors[v.type]||'var(--muted)';
+      return`<span style="display:inline-block;padding:4px 10px;margin:2px;border-radius:4px;
+        border:1px solid ${col};color:${col};font-family:var(--mono);font-size:10px">
+        ⚡ ${v.label}</span>`;
+    });
+  if(divPills.length){
+    divPills.push('<span style="cursor:pointer;font-size:9px;padding:2px 8px;'
+      +'border:1px solid var(--muted);color:var(--muted);border-radius:3px;margin-left:6px"'
+      +' onclick="this.parentElement.nextElementSibling.style.display='
+      +'this.parentElement.nextElementSibling.style.display===\'none\'?\'\':\'none\'">ⓘ guide</span>');
+    divEl.innerHTML=divPills.join('');
+    divEl.style.display='';
+  } else {
+    divEl.style.display='none';
+    document.getElementById('expDivHelp').style.display='none';
+  }
+
+  // ── Gamma flip migration chart ──────────────────────────────
+  const flipTraces=[];
+  // Spot line
+  flipTraces.push({
+    name:'Spot', x:P, y:P.map(p=>G[p]?.spot||null),
+    type:'scatter',mode:'lines',
+    line:{color:'rgba(255,255,255,0.3)',width:1,dash:'dot'},
+  });
+  // Flip point line
+  flipTraces.push({
+    name:'Gamma Flip', x:P, y:P.map(p=>G[p]?.flip_strike||null),
+    type:'scatter',mode:'lines+markers',
+    line:{color:C.acc,width:2.5},marker:{size:6,color:C.acc},
+  });
+  // Peak +γ
+  flipTraces.push({
+    name:'Peak +γ (pin)', x:P, y:P.map(p=>G[p]?.peak_pos?.strike||null),
+    type:'scatter',mode:'markers',
+    marker:{size:8,color:C.green,symbol:'triangle-up'},
+  });
+  // Peak -γ
+  flipTraces.push({
+    name:'Peak -γ (amplify)', x:P, y:P.map(p=>G[p]?.peak_neg?.strike||null),
+    type:'scatter',mode:'markers',
+    marker:{size:8,color:C.red,symbol:'triangle-down'},
+  });
+  plot('expFlipChart', flipTraces, {...LB,
+    xaxis:{...LB.xaxis,title:xLabel,tickangle:-30},
+    yaxis:{...LB.yaxis,title:'Strike'},
+    legend:{...LB.legend,orientation:'h',y:-0.25,font:{size:9}},
+    height:320,
+  });
+
+  // ── GEX profile (latest vs previous) ───────────────────────
+  const profiles=d.gex_profiles||{};
+  const profPeriods=Object.keys(profiles).sort();
+  const gexTraces=[];
+  profPeriods.forEach((p,i)=>{
+    const prof=profiles[p];
+    const isCurrent = i===profPeriods.length-1;
+    gexTraces.push({
+      name:isCurrent?`GEX ${p} (current)`:`GEX ${p} (prev)`,
+      x:prof.map(r=>r.strike),
+      y:prof.map(r=>r.net_gex),
+      type:'bar',
+      marker:{color:isCurrent?C.acc:'rgba(139,92,246,0.5)',opacity:isCurrent?0.85:0.55},
+    });
+  });
+  // Zero line
+  if(gexTraces.length){
+    plot('expGexProfile', gexTraces, {...LB,
+      barmode:'overlay',
+      xaxis:{...LB.xaxis,title:'Strike'},
+      yaxis:{...LB.yaxis,title:'Net GEX ₹M'},
+      shapes:[{type:'line',x0:gexTraces[0]?.x?.[0],x1:gexTraces[0]?.x?.slice(-1)[0],
+        y0:0,y1:0,line:{color:C.muted,width:1,dash:'dot'}}],
+      legend:{...LB.legend,orientation:'h',y:-0.2},
+      height:320,
+    });
+  }
+
+  // ── Directional delta flow chart ────────────────────────────
+  const deltaTraces=[];
+  deltaTraces.push({
+    name:'CE Δ-Flow', x:P, y:P.map(p=>D[p]?.ce_delta_flow||0),
+    type:'scatter',mode:'lines+markers',
+    line:{color:C.green,width:1.5},marker:{size:4},
+  });
+  deltaTraces.push({
+    name:'PE Δ-Flow', x:P, y:P.map(p=>D[p]?.pe_delta_flow||0),
+    type:'scatter',mode:'lines+markers',
+    line:{color:C.red,width:1.5,dash:'dash'},marker:{size:4},
+  });
+  deltaTraces.push({
+    name:'Net Δ-Flow', x:P, y:P.map(p=>D[p]?.net_delta_flow||0),
+    type:'scatter',mode:'lines+markers',
+    line:{color:C.acc,width:3},marker:{size:5},
+  });
+  // Rotation peak as Y2
+  deltaTraces.push({
+    name:'Rotation Peak', x:P, y:P.map(p=>D[p]?.rotation_peak||null),
+    type:'scatter',mode:'markers',
+    marker:{size:10,color:C.pur,symbol:'star'},
+    yaxis:'y2',
+  });
+  plot('expDeltaChart', deltaTraces, {...LB,
+    xaxis:{...LB.xaxis,title:xLabel,tickangle:-30},
+    yaxis:{...LB.yaxis,title:'Delta-Adjusted OI Flow'},
+    yaxis2:{overlaying:'y',side:'right',title:'Rotation Strike',
+      gridcolor:'transparent',tickfont:{size:9}},
+    shapes:[{type:'line',x0:P[0],x1:P[P.length-1],y0:0,y1:0,
+      line:{color:C.muted,width:1,dash:'dot'}}],
+    legend:{...LB.legend,orientation:'h',y:-0.25,font:{size:9}},
+    height:280,
+  });
+
+  // ── Vanna flow chart ────────────────────────────────────────
+  const vannaTraces=[];
+  vannaTraces.push({
+    name:'Net Vanna', x:P, y:P.map(p=>V[p]?.net_vanna||0),
+    type:'bar', marker:{color:P.map(p=>(V[p]?.net_vanna||0)>=0?C.pur:C.amber),opacity:0.7},
+  });
+  vannaTraces.push({
+    name:'Peak Vanna Strike', x:P,
+    y:P.map(p=>V[p]?.peak_vanna?.strike||null),
+    type:'scatter',mode:'markers',
+    marker:{size:7,color:C.pur,symbol:'diamond'},
+    yaxis:'y2',
+  });
+  plot('expVannaChart', vannaTraces, {...LB,
+    xaxis:{...LB.xaxis,title:xLabel,tickangle:-30},
+    yaxis:{...LB.yaxis,title:'Net Vanna Exposure'},
+    yaxis2:{overlaying:'y',side:'right',title:'Peak Strike',
+      gridcolor:'transparent',tickfont:{size:9}},
+    height:220,
+  });
+
+  // ── Summary table ────────────────────────────────────────────
+  const summary=d.summary||[];
+  document.getElementById('expSummaryTable').innerHTML=makeTbl(summary,[
+    {key:'period',          label:'PERIOD'},
+    {key:'spot',            label:'SPOT',           fmt:v=>v!=null?fmt(v,2):'—'},
+    {key:'flip_strike',     label:'γ FLIP',         fmt:v=>v!=null?fmt(v,0):'—'},
+    {key:'flip_change',     label:'FLIP Δ',         fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'peak_pos_strike', label:'PEAK +γ',        fmt:v=>v!=null?fmt(v,0):'—'},
+    {key:'peak_neg_strike', label:'PEAK -γ',        fmt:v=>v!=null?fmt(v,0):'—'},
+    {key:'total_gex_m',     label:'NET GEX ₹M',     fmt:v=>v!=null?sspan(v,4):'—'},
+    {key:'gex_change',      label:'GEX Δ',          fmt:v=>v!=null?sspan(v,4):'—'},
+    {key:'net_delta_flow',  label:'NET Δ FLOW',     fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'ce_delta_flow',   label:'CE Δ FLOW',      fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'pe_delta_flow',   label:'PE Δ FLOW',      fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'rotation_peak',   label:'ROT PEAK',       fmt:v=>v!=null?fmt(v,0):'—'},
+    {key:'net_vanna',       label:'NET VANNA',       fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'peak_vanna_str',  label:'VANNA PEAK STR', fmt:v=>v!=null?fmt(v,0):'—'},
+  ]);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+// Exposure Screener — market-wide regime/signal scan
+// ══════════════════════════════════════════════════════════════════
+
+wireToggleGroup('esViewGroup');
+document.getElementById('btnEsLoad')?.addEventListener('click', loadExposureScreener);
+document.getElementById('esViewGroup')?.addEventListener('click', ()=>setTimeout(loadExposureScreener,50));
+document.getElementById('btnEsGuide')?.addEventListener('click', ()=>{
+  const g=document.getElementById('esGuide');
+  g.style.display = g.style.display==='none' ? '' : 'none';
+});
+
+let _esInit = false;
+async function initExposureScreener(){
+  if(_esInit) return;
+  _esInit = true;
+  try{
+    // Dates
+    const dd = await api('/api/exposure_screener/dates');
+    const dsel = document.getElementById('esDate');
+    dsel.innerHTML = (dd.dates||[]).map(d=>`<option value="${d}">${d}</option>`).join('');
+    // Signal filter options + guide
+    const sm = await api('/api/exposure_screener/signals_meta');
+    const ssel = document.getElementById('esSignal');
+    const guide = document.getElementById('esGuide');
+    (sm.signals||[]).forEach(s=>{
+      ssel.innerHTML += `<option value="${s.key}">${s.label}</option>`;
+    });
+    guide.innerHTML = '<b style="color:var(--text)">Signal Guide:</b><br>' +
+      (sm.signals||[]).map(s=>`<b style="color:var(--acc)">${s.label}:</b> ${s.description}`).join('<br>');
+  }catch(e){ /* table may not exist yet */ }
+}
+
+async function loadExposureScreener(){
+  await initExposureScreener();
+  const d      = document.getElementById('esDate')?.value||'';
+  const view   = document.querySelector('#esViewGroup .active')?.dataset.ev||'changed';
+  const signal = document.getElementById('esSignal')?.value||'';
+  const regime = document.getElementById('esRegime')?.value||'';
+  const conf   = document.getElementById('esConf')?.value||'medium';
+
+  document.getElementById('esTable').innerHTML='<div class="loading"><div class="spinner"></div>Scanning…</div>';
+  document.getElementById('esCounts').innerHTML='';
+
+  try{
+    const params=new URLSearchParams({view, min_confidence:conf, sort_by:'net_gex_norm'});
+    if(d) params.set('screen_date', d);
+    if(signal) params.set('signal', signal);
+    if(regime) params.set('regime', regime);
+    const data = await api(`/api/exposure_screener?${params}`);
+    renderExposureScreener(data);
+  }catch(e){
+    document.getElementById('esTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
+  }
+}
+
+function renderExposureScreener(d){
+  document.getElementById('esDateBadge').textContent = d.date||'';
+  // Signal count summary
+  const counts = d.counts||{};
+  const order = ['regime_flip_to_neg','regime_flip_to_pos','crash_risk','trend_reinforce',
+                 'pin_strengthening','instability_widening','flip_drift_up','flip_drift_down'];
+  const colors = {regime_flip_to_neg:'var(--red)',crash_risk:'var(--red)',
+    regime_flip_to_pos:'var(--green)',trend_reinforce:'var(--green)',
+    instability_widening:'var(--amber)',pin_strengthening:'var(--acc)'};
+  const cntEl=document.getElementById('esCounts');
+  cntEl.innerHTML = order.filter(k=>counts[k]).map(k=>{
+    const col=colors[k]||'var(--muted)';
+    return `<div class="kpi" style="cursor:pointer;border-color:${col}"
+      onclick="document.getElementById('esSignal').value='${k}';loadExposureScreener()">
+      <div class="kpi-label">${k.replace(/_/g,' ')}</div>
+      <div class="kpi-val" style="color:${col}">${counts[k]}</div></div>`;
+  }).join('') || '<span style="font-family:var(--mono);font-size:10px;color:var(--muted)">No signals fired on this date</span>';
+
+  const rows = d.rows||[];
+  if(!rows.length){
+    document.getElementById('esTable').innerHTML='<div class="empty">No tickers match the current filters</div>';
+    return;
+  }
+  document.getElementById('esTable').innerHTML = makeTbl(rows, [
+    {key:'symbol',      label:'SYMBOL', fmt:(v)=>`<span style="cursor:pointer;color:var(--acc);font-weight:600"
+                                        onclick="jumpGex('${v}')">${v}</span>`},
+    {key:'spot',        label:'SPOT',    fmt:v=>v!=null?fmt(v,1):'—'},
+    {key:'gex_regime',  label:'REGIME',  fmt:v=>regimePill(v)},
+    {key:'net_gex_sign',label:'AGG SIGN',fmt:v=>v||'—'},
+    {key:'net_gex_norm',label:'LOPSIDED', fmt:v=>v!=null?sspan(v,3):'—'},
+    {key:'gamma_flip',  label:'γ FLIP',  fmt:v=>v!=null?fmt(v,0):'—'},
+    {key:'flip_velocity',label:'FLIP Δ', fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'flip_norm_distance',label:'FLIP DIST',fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'transition_width_norm',label:'TRANS W', fmt:v=>v!=null?fmt(v,2):'—'},
+    {key:'neg_gamma_fraction',label:'NEG γ%', fmt:v=>v!=null?fmt(v*100,0)+'%':'—'},
+    {key:'pe_vanna',    label:'PE VANNA',fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'iv_change',   label:'IV Δ',    fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'signals',     label:'SIGNALS', fmt:v=>v?signalChips(v):'—'},
+    {key:'confidence',  label:'CONF',    fmt:v=>v||'—'},
+    {key:'next_day_realized_move',label:'NEXT MOVE%',fmt:v=>v!=null?sspan(v,2):'—'},
+  ]);
+}
+
+function regimePill(v){
+  const map={positive:'var(--green)',all_positive:'var(--green)',
+    negative:'var(--red)',all_negative:'var(--red)'};
+  const col=map[v]||'var(--muted)';
+  return `<span style="color:${col};font-family:var(--mono);font-size:10px">${(v||'').replace('_',' ')}</span>`;
+}
+function signalChips(v){
+  return String(v).split(',').map(s=>{
+    const red=['regime_flip_to_neg','crash_risk'].includes(s);
+    const grn=['regime_flip_to_pos','trend_reinforce'].includes(s);
+    const col=red?'var(--red)':grn?'var(--green)':'var(--amber)';
+    return `<span style="display:inline-block;font-size:8px;padding:1px 5px;margin:1px;
+      border:1px solid ${col};color:${col};border-radius:3px">${s.replace(/_/g,' ')}</span>`;
+  }).join('');
+}
+
 
 // ── Bootstrap ─────────────────────────────────────────────────────
 

@@ -236,6 +236,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="nav-btn" data-view="movers">MOVERS</button>
     <button class="nav-btn" data-view="trend">STRIKE TREND</button>
     <button class="nav-btn" data-view="delta">OPTION SCREENER</button>
+    <button class="nav-btn" data-view="expscreen">EXPOSURE SCREENER</button>
     <button class="nav-btn" data-view="settings">SETTINGS</button>
     <button class="nav-btn" data-view="vix">VIX</button>
     <button class="nav-btn" data-view="market">MARKET INFO</button>
@@ -395,6 +396,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="subtab" data-stab="oi-walls-tab">OI WALLS</button>
     <button class="subtab" data-stab="oi-flow">FLOW — DELTA</button>
     <button class="subtab" data-stab="oi-smart">SMART MONEY</button>
+    <button class="subtab" data-stab="oi-exposure">EXPOSURE FLOW</button>
     <button class="subtab" data-stab="oi-history">EOD HISTORY</button>
   </div>
   <div class="subtab-panel active" id="stab-oi-signals">
@@ -439,6 +441,82 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
         <span class="badge" style="margin-left:6px">STRENGTH = max OI ÷ avg OI</span>
       </div>
       <div class="tw" id="oiWallsTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+
+  <div class="subtab-panel" id="stab-oi-exposure">
+    <div class="filter-bar">
+      <span class="fl">EXPIRY</span>
+      <select id="expExpiry" style="min-width:120px">
+        <option value="all">ALL EXPIRIES</option>
+      </select>
+      <label class="chk-label"><input type="checkbox" id="expExpiryPast"> PAST</label>
+      <div class="toggle-group" id="expModeGroup" style="margin-left:8px">
+        <button class="active" data-em="multiday">MULTI-DAY</button>
+        <button data-em="intraday">INTRADAY</button>
+      </div>
+      <span id="expMultiCtrl" style="display:flex;align-items:center;gap:6px">
+        <span class="fl">FROM</span>
+        <input type="date" id="expDateFrom" style="width:130px">
+        <span class="fl">TO</span>
+        <input type="date" id="expDateTo" style="width:130px">
+      </span>
+      <span id="expIntraCtrl" style="display:none;align-items:center;gap:6px">
+        <span class="fl">DATE</span>
+        <input type="date" id="expIntraDate" style="width:130px">
+      </span>
+      <span class="fl">MIN VOL</span>
+      <input type="number" id="expMinVol" value="100" style="width:60px">
+      <button class="btn" id="btnExpLoad">LOAD</button>
+    </div>
+
+    <!-- Divergence signals -->
+    <div id="expDivSignals" style="display:none;margin-bottom:8px"></div>
+    <div id="expDivHelp" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;background:var(--card);border:1px solid var(--border);font-family:var(--mono);font-size:10px;color:var(--muted);line-height:1.6">
+      <b style="color:var(--text)">Signal Guide:</b><br>
+      <b style="color:var(--amber)">⚡ Fragile Pin:</b> Gamma exposure is stable (pinning regime) but vanna is building — a vol move will force delta hedging that breaks the pin. Pre-breakout signal.<br>
+      <b style="color:var(--amber)">⚡ Coiled Spring:</b> Directional delta flow building under positive gamma (vol-suppression zone) — positioning is accumulating but price is pinned. Watch for the gamma wall to fail.<br>
+      <b style="color:var(--red)">⚡ Gamma Shift:</b> Significant change in total net GEX between periods — the gamma regime itself is changing (flip point migrating, dealer hedging pressure shifting).<br>
+      <b style="color:var(--green)">⚡ Bullish Accumulation:</b> Net delta flow is positive (call delta > put delta) while spot is falling — smart money building bullish exposure against the tape.<br>
+      <b style="color:var(--red)">⚡ Bearish Distribution:</b> Net delta flow is negative while spot is rising — smart money reducing/shorting into strength.
+    </div>
+
+    <!-- Gamma layer: flip migration + GEX profile -->
+    <div class="g2" style="margin-bottom:10px">
+      <div class="card">
+        <div class="card-title">GAMMA FLIP MIGRATION
+          <span class="badge">balance point where call γ = put γ</span>
+        </div>
+        <div id="expFlipChart" class="chart"><div class="empty">Select filters and click LOAD</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">NET GEX PROFILE (LATEST)
+          <span class="badge">₹M per strike · current vs previous</span>
+        </div>
+        <div id="expGexProfile" class="chart"><div class="empty">Load data first</div></div>
+      </div>
+    </div>
+
+    <!-- Directional layer -->
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-title">DIRECTIONAL DELTA FLOW
+        <span class="badge">CE delta flow (solid) · PE delta flow (dashed) · Net (thick) · Rotation locus (marker)</span>
+      </div>
+      <div id="expDeltaChart" class="chart"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Vanna layer -->
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-title">VANNA EXPOSURE FLOW
+        <span class="badge">net vanna exposure over time · peak vanna strike</span>
+      </div>
+      <div id="expVannaChart" class="chart"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Summary table -->
+    <div class="card">
+      <div class="card-title">EXPOSURE SUMMARY</div>
+      <div class="tw" id="expSummaryTable"><div class="empty">Load data first</div></div>
     </div>
   </div>
 
@@ -1192,6 +1270,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="nav-btn" data-view="movers">MOVERS</button>
     <button class="nav-btn" data-view="trend">STRIKE TREND</button>
     <button class="nav-btn" data-view="delta">OPTION SCREENER</button>
+    <button class="nav-btn" data-view="expscreen">EXPOSURE SCREENER</button>
     <button class="nav-btn" data-view="settings">SETTINGS</button>
     <button class="nav-btn" data-view="vix">VIX</button>
     <button class="nav-btn" data-view="market">MARKET INFO</button>
@@ -1351,6 +1430,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="subtab" data-stab="oi-walls-tab">OI WALLS</button>
     <button class="subtab" data-stab="oi-flow">FLOW — DELTA</button>
     <button class="subtab" data-stab="oi-smart">SMART MONEY</button>
+    <button class="subtab" data-stab="oi-exposure">EXPOSURE FLOW</button>
     <button class="subtab" data-stab="oi-history">EOD HISTORY</button>
   </div>
   <div class="subtab-panel active" id="stab-oi-signals">
@@ -1375,6 +1455,82 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <div class="tw" id="oiSignalTable"></div>
   </div>
   </div>
+  <div class="subtab-panel" id="stab-oi-exposure">
+    <div class="filter-bar">
+      <span class="fl">EXPIRY</span>
+      <select id="expExpiry" style="min-width:120px">
+        <option value="all">ALL EXPIRIES</option>
+      </select>
+      <label class="chk-label"><input type="checkbox" id="expExpiryPast"> PAST</label>
+      <div class="toggle-group" id="expModeGroup" style="margin-left:8px">
+        <button class="active" data-em="multiday">MULTI-DAY</button>
+        <button data-em="intraday">INTRADAY</button>
+      </div>
+      <span id="expMultiCtrl" style="display:flex;align-items:center;gap:6px">
+        <span class="fl">FROM</span>
+        <input type="date" id="expDateFrom" style="width:130px">
+        <span class="fl">TO</span>
+        <input type="date" id="expDateTo" style="width:130px">
+      </span>
+      <span id="expIntraCtrl" style="display:none;align-items:center;gap:6px">
+        <span class="fl">DATE</span>
+        <input type="date" id="expIntraDate" style="width:130px">
+      </span>
+      <span class="fl">MIN VOL</span>
+      <input type="number" id="expMinVol" value="100" style="width:60px">
+      <button class="btn" id="btnExpLoad">LOAD</button>
+    </div>
+
+    <!-- Divergence signals -->
+    <div id="expDivSignals" style="display:none;margin-bottom:8px"></div>
+    <div id="expDivHelp" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;background:var(--card);border:1px solid var(--border);font-family:var(--mono);font-size:10px;color:var(--muted);line-height:1.6">
+      <b style="color:var(--text)">Signal Guide:</b><br>
+      <b style="color:var(--amber)">⚡ Fragile Pin:</b> Gamma exposure is stable (pinning regime) but vanna is building — a vol move will force delta hedging that breaks the pin. Pre-breakout signal.<br>
+      <b style="color:var(--amber)">⚡ Coiled Spring:</b> Directional delta flow building under positive gamma (vol-suppression zone) — positioning is accumulating but price is pinned. Watch for the gamma wall to fail.<br>
+      <b style="color:var(--red)">⚡ Gamma Shift:</b> Significant change in total net GEX between periods — the gamma regime itself is changing (flip point migrating, dealer hedging pressure shifting).<br>
+      <b style="color:var(--green)">⚡ Bullish Accumulation:</b> Net delta flow is positive (call delta > put delta) while spot is falling — smart money building bullish exposure against the tape.<br>
+      <b style="color:var(--red)">⚡ Bearish Distribution:</b> Net delta flow is negative while spot is rising — smart money reducing/shorting into strength.
+    </div>
+
+    <!-- Gamma layer: flip migration + GEX profile -->
+    <div class="g2" style="margin-bottom:10px">
+      <div class="card">
+        <div class="card-title">GAMMA FLIP MIGRATION
+          <span class="badge">balance point where call γ = put γ</span>
+        </div>
+        <div id="expFlipChart" class="chart"><div class="empty">Select filters and click LOAD</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">NET GEX PROFILE (LATEST)
+          <span class="badge">₹M per strike · current vs previous</span>
+        </div>
+        <div id="expGexProfile" class="chart"><div class="empty">Load data first</div></div>
+      </div>
+    </div>
+
+    <!-- Directional layer -->
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-title">DIRECTIONAL DELTA FLOW
+        <span class="badge">CE delta flow (solid) · PE delta flow (dashed) · Net (thick) · Rotation locus (marker)</span>
+      </div>
+      <div id="expDeltaChart" class="chart"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Vanna layer -->
+    <div class="card" style="margin-bottom:10px">
+      <div class="card-title">VANNA EXPOSURE FLOW
+        <span class="badge">net vanna exposure over time · peak vanna strike</span>
+      </div>
+      <div id="expVannaChart" class="chart"><div class="empty">Load data first</div></div>
+    </div>
+
+    <!-- Summary table -->
+    <div class="card">
+      <div class="card-title">EXPOSURE SUMMARY</div>
+      <div class="tw" id="expSummaryTable"><div class="empty">Load data first</div></div>
+    </div>
+  </div>
+
   <div class="subtab-panel" id="stab-oi-history">
     <div class="filter-bar">
       <span class="fl">EXPIRY</span><select id="oiHistExpiry" style="min-width:110px"></select>
@@ -1915,6 +2071,51 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
 
 
 <!-- ══ MARKET INFO ════════════════════════════════════════════════ -->
+<!-- ══ EXPOSURE SCREENER ═══════════════════════════════════════════ -->
+<div class="view" id="view-expscreen">
+  <div class="filter-bar">
+    <span class="fl">DATE</span>
+    <select id="esDate" style="min-width:130px"></select>
+    <div class="toggle-group" id="esViewGroup" style="margin-left:8px">
+      <button class="active" data-ev="changed">WHAT CHANGED</button>
+      <button data-ev="all">FULL UNIVERSE</button>
+    </div>
+    <span class="fl">SIGNAL</span>
+    <select id="esSignal" style="min-width:140px"><option value="">ALL SIGNALS</option></select>
+    <span class="fl">REGIME</span>
+    <select id="esRegime" style="min-width:110px">
+      <option value="">ALL</option>
+      <option value="positive">POSITIVE</option>
+      <option value="negative">NEGATIVE</option>
+      <option value="all_positive">ALL +γ</option>
+      <option value="all_negative">ALL −γ</option>
+    </select>
+    <span class="fl">MIN CONF</span>
+    <select id="esConf" style="min-width:90px">
+      <option value="low">LOW</option>
+      <option value="medium" selected>MEDIUM</option>
+      <option value="high">HIGH</option>
+    </select>
+    <button class="btn" id="btnEsLoad">LOAD</button>
+    <button class="btn sec" style="font-size:9px" id="btnEsGuide">ⓘ GUIDE</button>
+  </div>
+
+  <div id="esGuide" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;
+    background:var(--card);border:1px solid var(--border);font-family:var(--mono);
+    font-size:10px;color:var(--muted);line-height:1.7"></div>
+
+  <!-- Signal count summary bar -->
+  <div id="esCounts" class="kpi-row" style="margin-bottom:8px"></div>
+
+  <div class="card">
+    <div class="card-title">EXPOSURE SCREENER
+      <span class="badge" id="esDateBadge"></span>
+      <span class="badge" style="margin-left:4px">click symbol → GEX</span>
+    </div>
+    <div class="tw" id="esTable"><div class="empty">Select filters and click LOAD</div></div>
+  </div>
+</div>
+
 <div class="view" id="view-market">
   <div class="filter-bar">
     <span class="fl">SYMBOL (optional)</span>

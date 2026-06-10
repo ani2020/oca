@@ -8,9 +8,29 @@ import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
 from scipy.ndimage import uniform_filter1d
+
+# Shared pure-math (single source, also used by standalone batch script).
+# Robust import: try as-is, then add project root to path. If still missing,
+# fail loudly with a clear message rather than breaking every route silently.
+_core = None
+try:
+    import exposure_core as _core
+except ImportError:
+    import sys, pathlib
+    _root = pathlib.Path(__file__).resolve().parent.parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    try:
+        import exposure_core as _core
+    except ImportError as _e:
+        raise ImportError(
+            "exposure_core.py not found. It must be placed at the project root "
+            f"({_root}), alongside the oc_dashboard package and oc_exposure_eod.py. "
+            "Download exposure_core.py and put it there."
+        ) from _e
 from fastapi import HTTPException
 
-from .db import qdf, tbl, _safe
+from .db import qdf, tbl, _safe, ts_filter_clause
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -22,6 +42,13 @@ def _build_gamma_profile(
     num_levels: int = 200, price_range_pct: float = 5.0,
 ) -> tuple[pd.DataFrame, float, float, int]:
     """Returns (profile_df, spot, dte, lot_size)."""
+    # Use ts_filter if provided, otherwise fall back to MAX(timestamp) for this expiry
+    if ts_filter:
+        _ts_clause, _ts_params = ts_filter_clause(ts_filter)
+    else:
+        _ts_clause = f"AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)"
+        _ts_params = [symbol, expiry[:10]]
+
     df = qdf(
         f"""
         SELECT
@@ -37,11 +64,11 @@ def _build_gamma_profile(
             COALESCE(ce_iv,           0) AS ce_iv
         FROM {tbl()}
         WHERE symbol = ?
-          AND expiry  = ? 
-          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
+          AND expiry  = ?
+          {_ts_clause}
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], symbol, expiry[:10]],
+        [symbol, expiry[:10]] + _ts_params,
     )
     if df.empty:
         return pd.DataFrame(), 0, 0, 1
@@ -52,11 +79,26 @@ def _build_gamma_profile(
     strikes  = df["strike_price"].values
     call_gex = df["ce_gamma"].values * df["ce_oi"].values * lot_size
     put_gex  = df["pe_gamma"].values * df["pe_oi"].values * lot_size
+    net_gex  = call_gex - put_gex   # sign: positive = call gamma dominant
 
-    lo     = spot * (1 - price_range_pct / 100)
-    hi     = spot * (1 + price_range_pct / 100)
+    # Adaptive range from ATM IV (expected move + buffer)
+    atm_mask = np.abs(strikes - df["atm_strike"].iloc[0]) < 1e-6
+    if not atm_mask.any():
+        # Fallback: nearest strike to atm_strike
+        atm_mask = np.zeros(len(strikes), dtype=bool)
+        atm_mask[int(np.argmin(np.abs(strikes - df["atm_strike"].iloc[0])))] = True
+    atm_iv   = float(df.loc[df["strike_price"] == strikes[atm_mask][0], "ce_iv"].iloc[0]) if atm_mask.any() else 0
+    lo, hi   = gamma_analysis_range(spot, atm_iv=atm_iv, dte=dte)
+
+    # Flip point: computed on ACTUAL discrete strikes (not linspace) for accuracy.
+    # Linspace maps multiple levels to same strike, shifting the zero-crossing.
+    rng_mask   = (strikes >= lo) & (strikes <= hi)
+    flip_point, flip_nearest, _ = _core.gamma_flip(
+        strikes[rng_mask], net_gex[rng_mask], ref_price=spot
+    )
+
+    # Linspace grid for VISUAL chart only (smooth curve)
     levels = np.linspace(lo, hi, num_levels)
-
     rows = []
     for lvl in levels:
         ni = int(np.argmin(np.abs(strikes - lvl)))
@@ -69,16 +111,24 @@ def _build_gamma_profile(
             "put_gamma_billions":   pg,
             "total_gamma_billions": cg + pg,
         })
-    return pd.DataFrame(rows), spot, dte, lot_size
+    result_df = pd.DataFrame(rows)
+    # Attach flip point to the df so callers can read it directly
+    result_df.attrs["flip_point"]   = flip_point
+    result_df.attrs["flip_nearest"] = flip_nearest
+    return result_df, spot, dte, lot_size
 
 
 def _flip_and_magnet(gdf: pd.DataFrame):
-    g, x = gdf["total_gamma_billions"].values, gdf["level"].values
-    idx  = np.where(np.sign(g[:-1]) != np.sign(g[1:]))[0]
-    gamma_flip = None
-    if len(idx):
-        i = idx[0]; d = g[i+1]-g[i]
-        if d: gamma_flip = float(x[i] - g[i]*(x[i+1]-x[i])/d)
+    # Prefer the pre-computed discrete-strike flip (stored in df.attrs by
+    # _build_gamma_profile) — more accurate than linspace zero-crossing.
+    # Fall back to linspace crossing only if attrs not set.
+    gamma_flip = gdf.attrs.get("flip_point") if hasattr(gdf, "attrs") else None
+    if gamma_flip is None:
+        g, x = gdf["total_gamma_billions"].values, gdf["level"].values
+        idx  = np.where(np.sign(g[:-1]) != np.sign(g[1:]))[0]
+        if len(idx):
+            i = idx[0]; d = g[i+1]-g[i]
+            if d: gamma_flip = float(x[i] - g[i]*(x[i+1]-x[i])/d)
     max_g = float(gdf["total_gamma_billions"].max())
     magnet = None
     if max_g > 0:
@@ -323,6 +373,26 @@ def _flow_signal(ce_oi_chg: float, pe_oi_chg: float,
 
 from scipy.ndimage import uniform_filter1d
 
+# Shared pure-math (single source, also used by standalone batch script).
+# Robust import: try as-is, then add project root to path. If still missing,
+# fail loudly with a clear message rather than breaking every route silently.
+_core = None
+try:
+    import exposure_core as _core
+except ImportError:
+    import sys, pathlib
+    _root = pathlib.Path(__file__).resolve().parent.parent
+    if str(_root) not in sys.path:
+        sys.path.insert(0, str(_root))
+    try:
+        import exposure_core as _core
+    except ImportError as _e:
+        raise ImportError(
+            "exposure_core.py not found. It must be placed at the project root "
+            f"({_root}), alongside the oc_dashboard package and oc_exposure_eod.py. "
+            "Download exposure_core.py and put it there."
+        ) from _e
+
 # ── Cluster detection ──────────────────────────────────────────────────────
 
 def _smooth(arr: np.ndarray, window: int) -> np.ndarray:
@@ -447,6 +517,38 @@ def _match_clusters(prev: list, curr: list, spot: float, tol_pct: float = 2.0) -
 
 # ── EOD snapshot helper ────────────────────────────────────────────────────
 
+
+def gamma_analysis_range(spot, expected_move=None, atm_iv=None, dte=None,
+                         buffer_pct=0.5, max_pct=15.0):
+    """
+    Compute adaptive strike range for gamma flip/peak analysis.
+    Uses expected move (from ATM straddle or IV×√T) + small buffer, capped.
+    Both GEX page and Exposure page should use this for consistency.
+    """
+    if expected_move and expected_move > 0:
+        em = expected_move
+    elif atm_iv and atm_iv > 0 and dte and dte > 0:
+        # Fallback: compute from IV
+        em = spot * (atm_iv / 100.0) * math.sqrt(dte / 365.0)
+    else:
+        em = spot * 0.05  # last resort: 5% fixed
+
+    buffer = spot * buffer_pct / 100.0
+    half_range = em + buffer
+    # Cap
+    max_range = spot * max_pct / 100.0
+    half_range = min(half_range, max_range)
+
+    return spot - half_range, spot + half_range
+
+
+def gamma_flip_from_strikes(strikes, net_gex_values):
+    """Gamma flip (zero-crossing) → (flip_strike, nearest_real_strike).
+    Thin wrapper over exposure_core.gamma_flip (single-sourced math)."""
+    flip, nearest, _regime = _core.gamma_flip(strikes, net_gex_values)
+    return flip, nearest
+
+
 def _eod_df(symbol: str, expiry_filter: str, exp_params: list,
             date_from: str, date_to: str) -> "pd.DataFrame":
     """Fetch EOD (≤15:30) snapshot per strike per date."""
@@ -500,7 +602,19 @@ def _eod_df(symbol: str, expiry_filter: str, exp_params: list,
             COALESCE(t.ce_time_value,  0)   AS ce_tv,
             COALESCE(t.pe_time_value,  0)   AS pe_tv,
             COALESCE(t.ce_nd2, 0)           AS ce_nd2,
-            COALESCE(t.pe_nd2, 0)           AS pe_nd2
+            COALESCE(t.pe_nd2, 0)           AS pe_nd2,
+            -- Exposure columns
+            COALESCE(t.ce_gexv,  0)          AS ce_gexv,
+            COALESCE(t.pe_gexv,  0)          AS pe_gexv,
+            COALESCE(t.net_gexv, 0)          AS net_gexv,
+            COALESCE(t.ce_vanna_ex,  0)      AS ce_vanna_ex,
+            COALESCE(t.pe_vanna_ex,  0)      AS pe_vanna_ex,
+            COALESCE(t.net_vanna_ex, 0)      AS net_vanna_ex,
+            COALESCE(t.ce_delta_oi_chg, 0)  AS ce_delta_oi_chg,
+            COALESCE(t.pe_delta_oi_chg, 0)  AS pe_delta_oi_chg,
+            COALESCE(t.ce_delta_oi, 0)      AS ce_delta_oi,
+            COALESCE(t.pe_delta_oi, 0)      AS pe_delta_oi,
+            COALESCE(t.net_charm_ex, 0)     AS net_charm_ex
         FROM {tbl()} t
         JOIN eod_ts e
           ON  t.symbol       = ?

@@ -134,14 +134,16 @@ def safe_response(data: Any) -> JSONResponse:
 def ts_filter_clause(ts_str: str, col: str = "timestamp") -> tuple:
     """
     Build a timestamp filter clause.
-    ts_str can be 'YYYY-MM-DD HH:MM' (exact match) or 'YYYY-MM-DD' (day range).
+    ts_str can be 'YYYY-MM-DD HH:MM' or 'YYYY-MM-DD HH:MM:SS' or 'YYYY-MM-DD'.
     Returns (sql_fragment, params_list).
     """
     if not ts_str:
         return "", []
     ts_str = ts_str.strip()
-    if len(ts_str) == 10:  # date only
+    if len(ts_str) == 10:  # date only → match the whole day
         return f"AND CAST({col} AS DATE) = CAST(? AS DATE)", [ts_str]
+    if len(ts_str) == 16:  # YYYY-MM-DD HH:MM (no seconds) → match by minute
+        return f"AND STRFTIME({col}, '%Y-%m-%d %H:%M') = ?", [ts_str]
     return f"AND {col} = ?", [ts_str]
 
 
