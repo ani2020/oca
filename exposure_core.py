@@ -26,7 +26,9 @@ DEFAULTS = {
     "BAQ_MAX_PCT":     10.0,
     "EARNINGS_WINDOW": 2,
     # signal thresholds
-    "DRIFT_FRAC":          0.15,   # |velocity| >= this × expected_move
+    "DRIFT_FRAC":          0.25,   # |velocity| >= this × expected_move (raised from 0.15)
+    "DRIFT_MAX_NORM_DIST": 1.0,    # drift gate: only fire when |flip_norm_distance| < this
+                                   #   (tuning range ~1.0–1.25; trends overshoot the EM)
     "PIN_NARROW_FRAC":     0.90,   # transition width must drop below this × prev
     "INSTAB_DELTA":        0.05,   # neg-gamma fraction rise to flag
 }
@@ -149,7 +151,11 @@ def derive_signals(curr: Dict, prev: Optional[Dict],
     """
     Return (fired_signals_csv, active_regime). Needs prev-day dict for triggers.
     Signals: regime_flip_to_neg/pos, flip_drift_up/down, pin_strengthening,
-             instability_widening, crash_risk, trend_reinforce.
+             instability_widening, crash_risk, bull_trend_reinforce,
+             bear_trend_reinforce.
+
+    NOTE: flip_velocity may be supplied here (legacy path) or computed in the
+    Stage-2 SQL layer. When present on `curr`, drift is evaluated here.
     """
     p = {**DEFAULTS, **(params or {})}
     fired: List[str] = []
@@ -170,7 +176,12 @@ def derive_signals(curr: Dict, prev: Optional[Dict],
     fv = curr.get("flip_velocity")
     em = curr.get("expected_move") or 0
     thresh = em * p["DRIFT_FRAC"] if em > 0 else None
-    if fv is not None and thresh:
+    # Relevance gate (DRIFT ONLY): only fire when the flip is within
+    # DRIFT_MAX_NORM_DIST expected-moves of spot — a distant flip's wobble is
+    # noise. flip_norm_distance = (flip - fut) / expected_move (dimensionless).
+    fnd = curr.get("flip_norm_distance")
+    drift_relevant = (fnd is not None and abs(fnd) < p["DRIFT_MAX_NORM_DIST"])
+    if fv is not None and thresh and drift_relevant:
         if fv <= -thresh:
             fired.append("flip_drift_down")
         elif fv >= thresh:
@@ -186,10 +197,19 @@ def derive_signals(curr: Dict, prev: Optional[Dict],
         fired.append("instability_widening")
 
     iv_chg = curr.get("iv_change") or 0
+    # Crash risk: negative gamma + RISING IV + negative PE vanna (disorderly,
+    # dealers sell into weakness — vanna feedback loop).
     if cr in NEG and iv_chg > 0 and (curr.get("pe_vanna") or 0) < 0:
         fired.append("crash_risk")
+    # Bull trend reinforce: positive gamma + positive CE vanna + RISING IV
+    # (orderly upside continuation — dealers buy stock).
     if cr in POS and (curr.get("ce_vanna") or 0) > 0 and iv_chg > 0:
-        fired.append("trend_reinforce")
+        fired.append("bull_trend_reinforce")
+    # Bear trend reinforce: negative gamma + negative PE vanna + FALLING IV
+    # (orderly downside grind / healthy pullback — vol being sold). Distinct from
+    # crash_risk by IV direction (mutually exclusive: iv_chg < 0 vs > 0).
+    if cr in NEG and iv_chg < 0 and (curr.get("pe_vanna") or 0) < 0:
+        fired.append("bear_trend_reinforce")
 
     return ",".join(fired), active
 
@@ -220,6 +240,11 @@ SIGNAL_INFO = {
     "crash_risk": ("Crash Risk",
         "Negative gamma + rising IV + negative PE vanna — dealers sell into weakness "
         "(vanna feedback). Downside amplification setup."),
-    "trend_reinforce": ("Trend Reinforcement",
-        "Positive gamma + positive CE vanna + rising IV — trend continuation supportive."),
+    "bull_trend_reinforce": ("Bull Trend Reinforce",
+        "Positive gamma + positive CE vanna + rising IV — orderly upside continuation "
+        "(dealers buy stock to stay neutral). Trend-supportive."),
+    "bear_trend_reinforce": ("Bear Trend Reinforce",
+        "Negative gamma + negative PE vanna + FALLING IV — orderly downside grind / "
+        "healthy pullback (vol being sold). Distinct from crash_risk: falling IV means "
+        "controlled selling, not the disorderly vanna-feedback flush."),
 }

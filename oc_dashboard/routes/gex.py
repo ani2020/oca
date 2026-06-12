@@ -22,6 +22,7 @@ def gex_chart(
     Fetch raw GEX columns; scale to ₹M here to avoid alias-referencing
     alias bug in DuckDB Binder.
     """
+    ts_clause, ts_params = ts_filter_clause(timestamp)
     df = qdf(
         f"""
         SELECT
@@ -36,10 +37,10 @@ def gex_chart(
         FROM {tbl()}
         WHERE symbol    = ?
           AND expiry = ?
-          AND timestamp = ?
+          {ts_clause}
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], timestamp],
+        [symbol, expiry[:10]] + ts_params,
     )
     if df.empty:
         raise HTTPException(404, "No GEX data for given filters")

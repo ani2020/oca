@@ -96,9 +96,13 @@ def exposure_screener(
     # Confidence filter
     df = df[df["confidence"].map(lambda c: conf_rank.get(c, 0) >= min_rank)]
 
-    # View: changed = only rows with a fired signal or regime transition today
+    # View: changed = rows with a fired signal OR an active compression/release
+    # indicator today (anything noteworthy, not just signal-bar items)
     if view == "changed":
-        df = df[df["signals"].fillna("") != ""]
+        has_signal = df["signals"].fillna("") != ""
+        has_compress = df["regime_compression"].fillna(False).astype(bool)
+        has_release = df["compression_release"].fillna(False).astype(bool)
+        df = df[has_signal | has_compress | has_release]
 
     # Signal filter
     if signal:
@@ -126,10 +130,23 @@ def exposure_screener(
             if sig:
                 counts[sig] = counts.get(sig, 0) + 1
 
+    # Indicator counts (compression state + release events) for the screen date
+    ind = qdf(f"""
+        SELECT
+            SUM(CASE WHEN regime_compression THEN 1 ELSE 0 END) AS compressing,
+            SUM(CASE WHEN compression_release THEN 1 ELSE 0 END) AS releasing
+        FROM exposure_eod WHERE date = CAST(? AS DATE)
+    """, [d])
+    indicator_counts = {
+        "regime_compression": int(ind["compressing"].iloc[0] or 0),
+        "compression_release": int(ind["releasing"].iloc[0] or 0),
+    } if not ind.empty else {}
+
     return safe_response({
         "date":   d,
         "view":   view,
         "rows":   to_records(df),
         "counts": counts,
+        "indicator_counts": indicator_counts,
         "total":  int(len(df)),
     })

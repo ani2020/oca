@@ -2457,19 +2457,35 @@ function renderExposureScreener(d){
   document.getElementById('esDateBadge').textContent = d.date||'';
   // Signal count summary
   const counts = d.counts||{};
-  const order = ['regime_flip_to_neg','regime_flip_to_pos','crash_risk','trend_reinforce',
+  const order = ['regime_flip_to_neg','regime_flip_to_pos','crash_risk',
+                 'bull_trend_reinforce','bear_trend_reinforce',
                  'pin_strengthening','instability_widening','flip_drift_up','flip_drift_down'];
+  // Indicator counts (compression/release) shown alongside signals
+  const indCounts = d.indicator_counts||{};
   const colors = {regime_flip_to_neg:'var(--red)',crash_risk:'var(--red)',
-    regime_flip_to_pos:'var(--green)',trend_reinforce:'var(--green)',
+    regime_flip_to_pos:'var(--green)',bull_trend_reinforce:'var(--green)',
+    bear_trend_reinforce:'var(--amber)',
     instability_widening:'var(--amber)',pin_strengthening:'var(--acc)'};
   const cntEl=document.getElementById('esCounts');
-  cntEl.innerHTML = order.filter(k=>counts[k]).map(k=>{
+  let pills = order.filter(k=>counts[k]).map(k=>{
     const col=colors[k]||'var(--muted)';
     return `<div class="kpi" style="cursor:pointer;border-color:${col}"
       onclick="document.getElementById('esSignal').value='${k}';loadExposureScreener()">
       <div class="kpi-label">${k.replace(/_/g,' ')}</div>
       <div class="kpi-val" style="color:${col}">${counts[k]}</div></div>`;
-  }).join('') || '<span style="font-family:var(--mono);font-size:10px;color:var(--muted)">No signals fired on this date</span>';
+  });
+  // Indicator pills (compression state + release events) — distinct styling
+  if(indCounts.regime_compression){
+    pills.push(`<div class="kpi" style="border-color:var(--acc);border-style:dashed">
+      <div class="kpi-label">🌀 compressing</div>
+      <div class="kpi-val" style="color:var(--acc)">${indCounts.regime_compression}</div></div>`);
+  }
+  if(indCounts.compression_release){
+    pills.push(`<div class="kpi" style="border-color:var(--red);border-style:dashed">
+      <div class="kpi-label">⚡ release</div>
+      <div class="kpi-val" style="color:var(--red)">${indCounts.compression_release}</div></div>`);
+  }
+  cntEl.innerHTML = pills.join('') || '<span style="font-family:var(--mono);font-size:10px;color:var(--muted)">No signals fired on this date</span>';
 
   const rows = d.rows||[];
   if(!rows.length){
@@ -2480,18 +2496,22 @@ function renderExposureScreener(d){
     {key:'symbol',      label:'SYMBOL', fmt:(v)=>`<span style="cursor:pointer;color:var(--acc);font-weight:600"
                                         onclick="jumpGex('${v}')">${v}</span>`},
     {key:'spot',        label:'SPOT',    fmt:v=>v!=null?fmt(v,1):'—'},
-    {key:'gex_regime',  label:'REGIME',  fmt:v=>regimePill(v)},
+    {key:'gex_regime',  label:'REGIME',  fmt:(v,r)=>regimePillWithDays(v, r)},
+    {key:'days_in_regime',label:'DAYS', fmt:(v,r)=>daysInRegimeBadge(v, r&&r.gex_regime)},
     {key:'net_gex_sign',label:'AGG SIGN',fmt:v=>v||'—'},
     {key:'net_gex_norm',label:'LOPSIDED', fmt:v=>v!=null?sspan(v,3):'—'},
     {key:'gamma_flip',  label:'γ FLIP',  fmt:v=>v!=null?fmt(v,0):'—'},
-    {key:'flip_velocity',label:'FLIP Δ', fmt:v=>v!=null?sspan(v,0):'—'},
+    {key:'flip_velocity',label:'FLIP Δ/d', fmt:v=>v!=null?sspan(v,1):'—'},
     {key:'flip_norm_distance',label:'FLIP DIST',fmt:v=>v!=null?sspan(v,2):'—'},
     {key:'transition_width_norm',label:'TRANS W', fmt:v=>v!=null?fmt(v,2):'—'},
     {key:'neg_gamma_fraction',label:'NEG γ%', fmt:v=>v!=null?fmt(v*100,0)+'%':'—'},
     {key:'pe_vanna',    label:'PE VANNA',fmt:v=>v!=null?sspan(v,0):'—'},
     {key:'iv_change',   label:'IV Δ',    fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'regime_compression',label:'COMPRESS',fmt:(v,r)=>compressionBadge(v, r&&r.compression_days)},
+    {key:'compression_release',label:'RELEASE',fmt:v=>v?'<span style="color:var(--red);font-weight:600">⚡ RELEASE</span>':'—'},
+    {key:'oi_turnover_ratio',label:'OI TURN',fmt:v=>turnoverBadge(v)},
     {key:'signals',     label:'SIGNALS', fmt:v=>v?signalChips(v):'—'},
-    {key:'confidence',  label:'CONF',    fmt:v=>v||'—'},
+    {key:'confidence',  label:'CONF',    fmt:v=>confBadge(v)},
     {key:'next_day_realized_move',label:'NEXT MOVE%',fmt:v=>v!=null?sspan(v,2):'—'},
   ]);
 }
@@ -2502,10 +2522,43 @@ function regimePill(v){
   const col=map[v]||'var(--muted)';
   return `<span style="color:${col};font-family:var(--mono);font-size:10px">${(v||'').replace('_',' ')}</span>`;
 }
+function regimePillWithDays(v){ return regimePill(v); }
+
+// days_in_regime badge — green if positive regime, red if negative, intensity hints persistence
+function daysInRegimeBadge(days, regime){
+  if(days==null) return '—';
+  const pos = regime && regime.indexOf('positive')>=0;
+  const col = pos ? 'var(--green)' : 'var(--red)';
+  return `<span style="font-family:var(--mono);font-size:10px;color:${col};font-weight:600">${days}d</span>`;
+}
+
+// compression badge — shows coiling state + consecutive days
+function compressionBadge(v, days){
+  if(!v) return '—';
+  return `<span style="display:inline-block;font-size:9px;padding:1px 6px;border-radius:3px;
+    border:1px solid var(--acc);color:var(--acc);font-family:var(--mono)">🌀 ${days||1}d</span>`;
+}
+
+// OI turnover — two-sided caution: very low (stale) and >1 (thin OI) both flagged
+function turnoverBadge(v){
+  if(v==null) return '—';
+  let col='var(--green)';           // healthy mid-band
+  let note='';
+  if(v < 0.05){ col='var(--muted)'; note=' ⚠'; }       // stale/quiet
+  else if(v > 1.0){ col='var(--amber)'; note=' ⚠'; }   // thin OI, unreliable
+  else if(v > 0.5){ col='var(--text)'; }               // high but ok
+  return `<span style="font-family:var(--mono);font-size:10px;color:${col}">${fmt(v,2)}${note}</span>`;
+}
+
+function confBadge(v){
+  const map={high:'var(--green)',medium:'var(--amber)',low:'var(--muted)'};
+  const col=map[v]||'var(--muted)';
+  return `<span style="font-family:var(--mono);font-size:9px;color:${col}">${(v||'').toUpperCase()}</span>`;
+}
 function signalChips(v){
   return String(v).split(',').map(s=>{
     const red=['regime_flip_to_neg','crash_risk'].includes(s);
-    const grn=['regime_flip_to_pos','trend_reinforce'].includes(s);
+    const grn=['regime_flip_to_pos','bull_trend_reinforce'].includes(s);
     const col=red?'var(--red)':grn?'var(--green)':'var(--amber)';
     return `<span style="display:inline-block;font-size:8px;padding:1px 5px;margin:1px;
       border:1px solid ${col};color:${col};border-radius:3px">${s.replace(/_/g,' ')}</span>`;

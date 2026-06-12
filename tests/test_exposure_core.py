@@ -130,16 +130,66 @@ def test_signal_no_crash_without_rising_iv():
     sigs, _ = core.derive_signals(curr, prev)
     assert "crash_risk" not in sigs
 
-def test_signal_drift_threshold():
-    # velocity below 15% of expected move → no drift
+def test_signal_bull_trend_reinforce():
     prev = {"gex_regime": "positive"}
-    curr = {"gex_regime": "positive", "flip_velocity": 50, "expected_move": 800}
+    curr = {"gex_regime": "positive", "ce_vanna": 500, "iv_change": 1.0,
+            "expected_move": 800}
     sigs, _ = core.derive_signals(curr, prev)
-    assert "flip_drift_up" not in sigs   # 50 < 120
-    # above threshold → fires
-    curr["flip_velocity"] = 200
+    keys = sigs.split(",")
+    assert "bull_trend_reinforce" in keys
+    assert "trend_reinforce" not in keys   # old standalone name gone
+
+def test_signal_bear_trend_reinforce():
+    # negative gamma + negative PE vanna + FALLING IV → orderly bearish
+    prev = {"gex_regime": "negative"}
+    curr = {"gex_regime": "negative", "pe_vanna": -500, "iv_change": -1.0,
+            "expected_move": 800}
+    sigs, _ = core.derive_signals(curr, prev)
+    assert "bear_trend_reinforce" in sigs
+    assert "crash_risk" not in sigs        # falling IV → not crash
+
+def test_bear_reinforce_and_crash_mutually_exclusive():
+    # rising IV → crash_risk (not bear_reinforce); falling IV → bear_reinforce
+    prev = {"gex_regime": "negative"}
+    base = {"gex_regime": "negative", "pe_vanna": -500, "expected_move": 800}
+    up = core.derive_signals({**base, "iv_change": 1.0}, prev)[0]
+    dn = core.derive_signals({**base, "iv_change": -1.0}, prev)[0]
+    assert "crash_risk" in up and "bear_trend_reinforce" not in up
+    assert "bear_trend_reinforce" in dn and "crash_risk" not in dn
+
+def test_signal_drift_threshold():
+    # velocity below 25% of expected move → no drift (flip near spot)
+    prev = {"gex_regime": "positive"}
+    curr = {"gex_regime": "positive", "flip_velocity": 50, "expected_move": 800,
+            "flip_norm_distance": 0.3}
+    sigs, _ = core.derive_signals(curr, prev)
+    assert "flip_drift_up" not in sigs   # 50 < 200 (0.25×800)
+    # above threshold + flip near spot → fires
+    curr["flip_velocity"] = 300
     sigs, _ = core.derive_signals(curr, prev)
     assert "flip_drift_up" in sigs
+
+def test_signal_drift_relevance_gate():
+    # velocity well above threshold, but flip is DISTANT (|norm_dist| > 1) → suppressed
+    prev = {"gex_regime": "positive"}
+    curr = {"gex_regime": "positive", "flip_velocity": 400, "expected_move": 800,
+            "flip_norm_distance": 1.5}
+    sigs, _ = core.derive_signals(curr, prev)
+    assert "flip_drift_up" not in sigs   # distant flip wobble = noise
+    # same velocity, flip near spot → fires
+    curr["flip_norm_distance"] = 0.5
+    sigs, _ = core.derive_signals(curr, prev)
+    assert "flip_drift_up" in sigs
+
+def test_signal_drift_gate_configurable():
+    # widen the gate to 1.25 → a flip at 1.1 EM now fires
+    prev = {"gex_regime": "positive"}
+    curr = {"gex_regime": "positive", "flip_velocity": 400, "expected_move": 800,
+            "flip_norm_distance": 1.1}
+    sigs, _ = core.derive_signals(curr, prev)
+    assert "flip_drift_up" not in sigs   # default gate 1.0 → suppressed
+    sigs, _ = core.derive_signals(curr, prev, params={"DRIFT_MAX_NORM_DIST": 1.25})
+    assert "flip_drift_up" in sigs       # widened gate → fires
 
 def test_signal_no_prev_returns_empty():
     sigs, active = core.derive_signals({"gex_regime": "positive"}, None)
