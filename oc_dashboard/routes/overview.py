@@ -88,3 +88,45 @@ def snapshot(symbol: str = Query(...)):
             for k, v in r.items()}
 
 
+@router.get("/api/overview_meta")
+def overview_meta():
+    """Lightweight: latest snapshot timestamp + today's exposure signal counts.
+    Query-only (reads pre-computed exposure_eod); never computes on load."""
+    out = {"snapshot_ts": None, "signal_summary": {}, "exposure_date": None}
+
+    # Latest snapshot timestamp across the table (minute precision)
+    try:
+        ts = qdf(f"SELECT STRFTIME(MAX(timestamp), '%Y-%m-%d %H:%M') AS ts "
+                 f"FROM {tbl()} WHERE timestamp IS NOT NULL")
+        if not ts.empty and ts["ts"].iloc[0]:
+            out["snapshot_ts"] = str(ts["ts"].iloc[0])
+    except Exception:
+        pass
+
+    # Today's exposure signal counts (query-only, graceful if table missing)
+    try:
+        latest = qdf("SELECT MAX(date) AS d FROM exposure_eod")
+        if not latest.empty and latest["d"].iloc[0] is not None:
+            d = str(latest["d"].iloc[0])
+            out["exposure_date"] = d
+            rows = qdf("SELECT signals FROM exposure_eod "
+                       "WHERE date = CAST(? AS DATE) AND signals != ''", [d])
+            counts = {}
+            for s in rows["signals"].tolist():
+                for sig in str(s).split(","):
+                    sig = sig.strip()
+                    if sig:
+                        counts[sig] = counts.get(sig, 0) + 1
+            # compression/release indicator counts
+            ind = qdf("SELECT "
+                      "SUM(CASE WHEN regime_compression THEN 1 ELSE 0 END) AS comp, "
+                      "SUM(CASE WHEN compression_release THEN 1 ELSE 0 END) AS rel "
+                      "FROM exposure_eod WHERE date = CAST(? AS DATE)", [d])
+            if not ind.empty:
+                counts["_compressing"] = int(ind["comp"].iloc[0] or 0)
+                counts["_releasing"] = int(ind["rel"].iloc[0] or 0)
+            out["signal_summary"] = counts
+    except Exception:
+        pass
+
+    return safe_response(out)

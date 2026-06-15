@@ -102,9 +102,12 @@ function makeTbl(rows,cols){
   const heads=cols.map(c=>`<th onclick="sortTbl(this)">${typeof c==='string'?c:c.label}</th>`).join('');
   const keys=cols.map(c=>typeof c==='string'?c:c.key);
   const fmts=cols.map(c=>typeof c==='object'&&c.fmt?c.fmt:null);
+  const svals=cols.map(c=>typeof c==='object'&&c.sortValue?c.sortValue:null);
   const body=rows.map(r=>'<tr>'+keys.map((k,i)=>{
     const v=r[k];const cell=fmts[i]?fmts[i](v,r):(v==null?'—':v);
-    return`<td>${cell}</td>`;
+    // optional explicit sort key (e.g. signal severity) so icon cells sort correctly
+    const sv=svals[i]?` data-sort="${svals[i](v,r)}"`:'';
+    return`<td${sv}>${cell}</td>`;
   }).join('')+'</tr>').join('');
   return`<table><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>`;
 }
@@ -114,8 +117,15 @@ function sortTbl(th){
   const asc=th.dataset.asc!=='1';th.dataset.asc=asc?'1':'0';
   const rows=Array.from(tbl.querySelectorAll('tbody tr'));
   rows.sort((a,b)=>{
-    const av=a.children[idx].textContent.trim().replace(/[,₹%+CrL]/g,'');
-    const bv=b.children[idx].textContent.trim().replace(/[,₹%+CrL]/g,'');
+    const ac=a.children[idx], bc=b.children[idx];
+    // prefer explicit data-sort (e.g. signal severity) over visible text
+    const ads=ac.getAttribute('data-sort'), bds=bc.getAttribute('data-sort');
+    if(ads!=null && bds!=null){
+      const an2=parseFloat(ads),bn2=parseFloat(bds);
+      if(!isNaN(an2)&&!isNaN(bn2))return asc?an2-bn2:bn2-an2;
+    }
+    const av=ac.textContent.trim().replace(/[,₹%+CrL]/g,'');
+    const bv=bc.textContent.trim().replace(/[,₹%+CrL]/g,'');
     const an=parseFloat(av),bn=parseFloat(bv);
     if(!isNaN(an)&&!isNaN(bn))return asc?an-bn:bn-an;
     return asc?av.localeCompare(bv):bv.localeCompare(av);
@@ -133,7 +143,8 @@ function wireToggleGroup(id){
   });
 }
 ['ovFilterGroup','gexFilterGroup','oiFilterGroup','ivFilterGroup',
- 'moverFilterGroup','volShockFilterGroup','ivShockFilterGroup','dsFilterGroup']
+ 'moverFilterGroup','volShockFilterGroup','ivShockFilterGroup','dsFilterGroup',
+ 'esViewGroup']
   .forEach(wireToggleGroup);
 function getFilter(id){
   return document.querySelector('#'+id+' .active')?.dataset.ft||'all';
@@ -419,6 +430,7 @@ async function loadDsTimestamps(){
 // ── OVERVIEW ──────────────────────────────────────────────────────
 async function loadOverview(){
   setLoad('overviewCards');setLoad('allOiTable');
+  loadOverviewMeta();
   try{
     const ft=getFilter('ovFilterGroup');
     const[data,sigs]=await Promise.all([api('/api/overview'),api('/api/oi_signals_all')]);
@@ -476,8 +488,9 @@ async function loadGex(){
   const rng=parseFloat(document.getElementById('gexRange').value)||5;
   if(!sym||!exp){alert('Select symbol and expiry');return;}
   ['gexBarChart','gammaProfileChart','netGexChart'].forEach(id=>setLoad(id));
-  document.getElementById('gexKpis').innerHTML='';
-  document.getElementById('gammaAnalysisCard').style.display='none';
+  {const _gk=document.getElementById('gexKpis');if(_gk)_gk.innerHTML='';
+   const _gg=document.getElementById('gexGaKpis');if(_gg)_gg.innerHTML='';
+   const _gd=document.getElementById('gexGaDetail');if(_gd)_gd.innerHTML='';}
   try{
     const[gex,gp]=await Promise.all([
       api(`/api/gex?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`),
@@ -524,28 +537,40 @@ async function loadGex(){
 }
 
 async function loadGammaAnalysis(sym,exp,ts,rng){
-  const card=document.getElementById('gammaAnalysisCard'),cont=document.getElementById('gaContent');
-  card.style.display='';cont.innerHTML='<div class="loading"><div class="spinner"></div>Fetching ATR…</div>';
-  try{
-    const ga=await api(`/api/gamma_analysis?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&price_range_pct=${rng}`);
+  const boxes=document.getElementById('gexGaKpis');
+  const detail=document.getElementById('gexGaDetail');
+  if(boxes) boxes.innerHTML='<div class="kpi"><div class="kpi-label">GAMMA ANALYSIS</div><div class="kpi-val" style="font-size:11px">loading…</div></div>';
+  api(`/api/gamma_analysis?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}&price_range_pct=${rng}`)
+  .then(ga=>{
     const pos=ga.regime==='Positive Gamma';
-    const row=(lbl,val,c='')=>`<div class="ga-item"><div class="ga-label">${lbl}</div><div class="ga-value ${c}">${val||'—'}</div></div>`;
-    const structs=ga.structures?.length?`<ul class="ga-list">${ga.structures.map(s=>`<li>${s}</li>`).join('')}</ul>`:'<div class="empty" style="padding:8px">None identified</div>';
-    const warns=ga.warnings?.length?`<ul class="ga-list ga-warn">${ga.warnings.map(w=>`<li>${w}</li>`).join('')}</ul>`:'<div class="empty" style="padding:8px">No warnings</div>';
-    cont.innerHTML=`<div class="ga-regime ${pos?'pos':'neg'}">${ga.regime}</div>
-      <div class="ga-row">
-        ${row('GAMMA FLIP',fmt(ga.gamma_flip,0))}${row('GAMMA@SPOT',fmt(ga.gamma_at_spot,4))}
-        ${row('ATM IV',ga.atm_iv_pct!=null?ga.atm_iv_pct+'%':'—')}${row('ATR(14)',ga.atr!=null?fmt(ga.atr,1):'—')}
-        ${row('γ-ADJ ATR',ga.gamma_adj_atr!=null?fmt(ga.gamma_adj_atr,1):'—')}
-        ${row('EXP RANGE',ga.expected_range!=null?'±'+fmt(ga.expected_range,1):'—')}
-        ${row('TREND',ga.trend,'acc')}${row('BEHAVIOR',ga.behavior)}
-        ${row('BULL BREAK',ga.bullish_break!=null?fmt(ga.bullish_break,0):'—','up')}
-        ${row('BEAR BREAK',ga.bearish_break!=null?fmt(ga.bearish_break,0):'—','down')}
-      </div>
-      <div class="g2"><div><div class="ga-label" style="margin-bottom:6px">RECOMMENDED STRUCTURES</div>${structs}</div>
-      <div><div class="ga-label" style="margin-bottom:6px">WARNINGS</div>${warns}</div></div>`;
-  }catch(e){cont.innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;}
+    // Secondary stat boxes — gamma-analysis values folded in as boxes (#11b)
+    const kpi=(lbl,val,cls='')=>`<div class="kpi"><div class="kpi-label">${lbl}</div>
+      <div class="kpi-val ${cls}">${val||'—'}</div></div>`;
+    if(boxes){
+      boxes.innerHTML=[
+        kpi('REGIME', ga.regime, pos?'up':'down'),
+        kpi('γ@SPOT', fmt(ga.gamma_at_spot,4)),
+        kpi('ATM IV', ga.atm_iv_pct!=null?ga.atm_iv_pct+'%':'—'),
+        kpi('EXP RANGE', ga.expected_range!=null?'±'+fmt(ga.expected_range,1):'—'),
+        kpi('γ-ADJ ATR', ga.gamma_adj_atr!=null?fmt(ga.gamma_adj_atr,1):'—'),
+        kpi('TREND', ga.trend, 'acc'),
+        kpi('BULL BREAK', ga.bullish_break!=null?fmt(ga.bullish_break,0):'—','up'),
+        kpi('BEAR BREAK', ga.bearish_break!=null?fmt(ga.bearish_break,0):'—','down'),
+      ].join('');
+    }
+    // Compact structures + warnings below the boxes
+    if(detail){
+      const structs=ga.structures?.length?ga.structures.map(s=>`<span class="ga-chip">${s}</span>`).join(''):'';
+      const warns=ga.warnings?.length?ga.warnings.map(w=>`<span class="ga-chip warn">⚠ ${w}</span>`).join(''):'';
+      detail.innerHTML=(structs||warns)?
+        `<div style="display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+           ${ga.behavior?`<span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-right:6px">${ga.behavior}</span>`:''}
+           ${structs}${warns}</div>`:'';
+    }
+  })
+  .catch(e=>{ if(boxes) boxes.innerHTML=`<div class="kpi"><div class="kpi-val" style="font-size:10px;color:var(--red)">⚠ ${e.message}</div></div>`; });
 }
+
 
 // ── MAX PAIN ──────────────────────────────────────────────────────
 async function loadMaxPain(sym,exp,ts){
@@ -1052,16 +1077,41 @@ const VIEW_INIT={
   expscreen:()=>loadExposureScreener(),
   gex:()=>loadCascade('gexSymbol','gexExpiry','gexTimestamp'),
   oi:()=>{},
-  shockers:()=>{loadVolShock();loadIvShock();},
   iv:()=>loadCascade('ivSymbol','ivExpiry','ivTimestamp'),
-  movers:()=>loadMovers(),
   trend:()=>loadCascade('trendSymbol','trendExpiry',null).then(()=>loadAtmStrikes()),
-  delta:()=>loadDsTimestamps(),
+  delta:()=>{ const t=document.querySelector('#screenerPageTabs .pagetab[data-ptab="sp-delta"]');
+              if(t)t.dataset.init='1'; loadDsTimestamps(); },
   settings:()=>loadSettings(),
   vix:()=>loadVix(),
-  walls:()=>{},  // walls now inside oi subtab
+  walls:()=>loadOiWalls(),
   market:()=>loadMarketInfo(),
 };
+
+// ── #10: Screener mid-level page-tabs (Delta/Premium | Divergence | Shockers | Movers) ──
+// Each panel inits lazily the first time its tab is shown.
+const PTAB_INIT = {
+  'sp-delta':      ()=>loadDsTimestamps(),
+  'sp-divergence': ()=>{ if(typeof loadDivergence==='function') loadDivergence(); },
+  'sp-shockers':   ()=>{ loadVolShock(); loadIvShock(); },
+  'sp-movers':     ()=>loadMovers(),
+};
+document.querySelectorAll('#screenerPageTabs .pagetab').forEach(tab=>{
+  tab.addEventListener('click',()=>{
+    const bar=tab.closest('.pagetab-bar');
+    const view=tab.closest('.view');
+    bar.querySelectorAll('.pagetab').forEach(t=>t.classList.remove('active'));
+    view.querySelectorAll('.pagetab-panel').forEach(p=>p.classList.remove('active'));
+    tab.classList.add('active');
+    const panel=document.getElementById(tab.dataset.ptab);
+    panel.classList.add('active');
+    if(!tab.dataset.init){
+      tab.dataset.init='1';
+      const fn=PTAB_INIT[tab.dataset.ptab];
+      if(fn)fn();
+    }
+  });
+});
+
 
 // ── bfcache guard ────────────────────────────────────────────────
 // When Chrome/Edge restores the page from back-forward cache, persisted=true.
@@ -1438,6 +1488,16 @@ function filterTableBySymbol(tableContainerId, query){
     // First cell is always the symbol
     const sym=row.cells[0]?.textContent.trim().toUpperCase()||'';
     row.style.display=(!q||sym.includes(q))?'':'none';
+  });
+}
+
+function filterCardsBySymbol(containerId, query){
+  const q = (query||'').trim().toUpperCase();
+  const cont = document.getElementById(containerId);
+  if(!cont) return;
+  cont.querySelectorAll('.tc').forEach(card=>{
+    const sym = (card.querySelector('.tc-sym')?.textContent||'').toUpperCase();
+    card.style.display = (!q || sym.includes(q)) ? '' : 'none';
   });
 }
 
@@ -2453,6 +2513,71 @@ async function loadExposureScreener(){
   }
 }
 
+
+// #4 — filter exposure screener rows by ticker (client-side over rendered table)
+function filterEsRows(query){
+  const q=(query||'').trim().toUpperCase();
+  const tbl=document.querySelector('#esTable table');
+  if(!tbl) return;
+  tbl.querySelectorAll('tbody tr').forEach(tr=>{
+    const sym=(tr.querySelector('td')?.textContent||'').toUpperCase();
+    tr.style.display = (!q || sym.includes(q)) ? '' : 'none';
+  });
+}
+
+// ── #9: Signal icon system (compact column + severity sort + legend) ──
+const SIGNAL_ICONS = {
+  regime_flip_to_neg:    {icon:'▼', color:'var(--red)',   label:'Regime flip → negative'},
+  regime_flip_to_pos:    {icon:'▲', color:'var(--green)', label:'Regime flip → positive'},
+  crash_risk:            {icon:'⚡', color:'var(--red)',   label:'Crash risk (disorderly, rising IV + PE vanna)'},
+  bull_trend_reinforce:  {icon:'↑', color:'var(--green)', label:'Bull trend reinforce (orderly upside)'},
+  bear_trend_reinforce:  {icon:'↓', color:'var(--amber)', label:'Bear trend reinforce (orderly pullback, falling IV)'},
+  pin_strengthening:     {icon:'◎', color:'var(--acc)',   label:'Pin strengthening (transition narrowing)'},
+  instability_widening:  {icon:'◇', color:'var(--amber)', label:'Instability widening (neg-gamma fraction rising)'},
+  flip_drift_up:         {icon:'⤴', color:'var(--muted)', label:'Flip drift up'},
+  flip_drift_down:       {icon:'⤵', color:'var(--muted)', label:'Flip drift down'},
+};
+// Severity rank — lower = more urgent (sorts first). crash/flips → reinforce/structural → drift.
+const SIGNAL_SEVERITY = {
+  crash_risk:0, regime_flip_to_neg:1, regime_flip_to_pos:1,
+  bull_trend_reinforce:2, bear_trend_reinforce:2,
+  pin_strengthening:3, instability_widening:3,
+  flip_drift_up:4, flip_drift_down:4,
+};
+function signalIcons(v){
+  if(!v) return '—';
+  const sigs=String(v).split(',').map(s=>s.trim()).filter(Boolean);
+  // sort by severity so the most urgent icon shows first
+  sigs.sort((a,b)=>(SIGNAL_SEVERITY[a]??9)-(SIGNAL_SEVERITY[b]??9));
+  return sigs.map(s=>{
+    const m=SIGNAL_ICONS[s];
+    if(!m) return `<span title="${s}">${s}</span>`;
+    return `<span title="${m.label}" style="color:${m.color};font-size:13px;margin-right:3px;cursor:default">${m.icon}</span>`;
+  }).join('');
+}
+// Min-severity of a row's signals — drives column sorting (urgent rows to top)
+function signalSeverityKey(v){
+  if(!v) return 99;
+  return Math.min(...String(v).split(',').map(s=>SIGNAL_SEVERITY[s.trim()]??9));
+}
+// Header legend — terse icon→label key
+function signalLegend(){
+  return Object.entries(SIGNAL_ICONS).map(([k,m])=>
+    `<span style="margin-right:12px;white-space:nowrap;font-size:10px;color:var(--muted)">
+       <span style="color:${m.color};font-size:12px">${m.icon}</span> ${k.replace(/_/g,' ')}</span>`
+  ).join('');
+}
+// Agg-sign colored +/- icon (consistent with regime coloring)
+function aggSignIcon(v){
+  if(v==null||v==='') return '—';
+  const s=String(v).toLowerCase();
+  const pos=s.includes('pos')||v==='+'||v===1||v>0;
+  const neg=s.includes('neg')||v==='-'||v===-1||v<0;
+  if(pos) return '<span style="color:var(--green);font-weight:700;font-size:13px">+</span>';
+  if(neg) return '<span style="color:var(--red);font-weight:700;font-size:13px">−</span>';
+  return '—';
+}
+
 function renderExposureScreener(d){
   document.getElementById('esDateBadge').textContent = d.date||'';
   // Signal count summary
@@ -2488,17 +2613,38 @@ function renderExposureScreener(d){
   cntEl.innerHTML = pills.join('') || '<span style="font-family:var(--mono);font-size:10px;color:var(--muted)">No signals fired on this date</span>';
 
   const rows = d.rows||[];
+  const isDropped = (d.view==='dropped');
   if(!rows.length){
-    document.getElementById('esTable').innerHTML='<div class="empty">No tickers match the current filters</div>';
+    const msg = isDropped
+      ? `No tickers dropped their signals since ${d.prev_date||'the previous day'}`
+      : 'No tickers match the current filters';
+    document.getElementById('esTable').innerHTML=`<div class="empty">${msg}</div>`;
     return;
   }
+  // Dropped-view banner
+  if(isDropped){
+    const cntEl2=document.getElementById('esCounts');
+    if(cntEl2) cntEl2.innerHTML=`<span style="font-family:var(--mono);font-size:10px;color:var(--muted)">
+      ${rows.length} ticker(s) had a signal on ${d.prev_date||'prev day'} but none today (${d.date}) —
+      their signal reset. Yesterday's signal shown below.</span>`;
+  }
+  // Header legend for signal icons (#9)
+  const legendEl=document.getElementById('esSignalLegend');
+  if(legendEl) legendEl.innerHTML='<span style="font-size:9px;color:var(--muted);margin-right:8px">SIGNALS:</span>'+signalLegend();
+
+  const droppedCol = isDropped ? [
+    {key:'prev_signals', label:'YDAY SIGNAL', fmt:v=>signalIcons(v), sortValue:v=>signalSeverityKey(v)},
+  ] : [];
   document.getElementById('esTable').innerHTML = makeTbl(rows, [
     {key:'symbol',      label:'SYMBOL', fmt:(v)=>`<span style="cursor:pointer;color:var(--acc);font-weight:600"
                                         onclick="jumpGex('${v}')">${v}</span>`},
-    {key:'spot',        label:'SPOT',    fmt:v=>v!=null?fmt(v,1):'—'},
+    ...droppedCol,
+    // #9c: primary price = FUT (fut_price); spot shown in tooltip
+    {key:'fut_price',   label:'FUT',     fmt:(v,r)=>v!=null?`<span title="spot: ${r&&r.spot!=null?fmt(r.spot,1):'—'}">${fmt(v,1)}</span>`:'—'},
     {key:'gex_regime',  label:'REGIME',  fmt:(v,r)=>regimePillWithDays(v, r)},
     {key:'days_in_regime',label:'DAYS', fmt:(v,r)=>daysInRegimeBadge(v, r&&r.gex_regime)},
-    {key:'net_gex_sign',label:'AGG SIGN',fmt:v=>v||'—'},
+    // #9b: Agg Sign → colored +/- icon (consistent with regime)
+    {key:'net_gex_sign',label:'AGG',     fmt:v=>aggSignIcon(v)},
     {key:'net_gex_norm',label:'LOPSIDED', fmt:v=>v!=null?sspan(v,3):'—'},
     {key:'gamma_flip',  label:'γ FLIP',  fmt:v=>v!=null?fmt(v,0):'—'},
     {key:'flip_velocity',label:'FLIP Δ/d', fmt:v=>v!=null?sspan(v,1):'—'},
@@ -2508,9 +2654,10 @@ function renderExposureScreener(d){
     {key:'pe_vanna',    label:'PE VANNA',fmt:v=>v!=null?sspan(v,0):'—'},
     {key:'iv_change',   label:'IV Δ',    fmt:v=>v!=null?sspan(v,2):'—'},
     {key:'regime_compression',label:'COMPRESS',fmt:(v,r)=>compressionBadge(v, r&&r.compression_days)},
-    {key:'compression_release',label:'RELEASE',fmt:v=>v?'<span style="color:var(--red);font-weight:600">⚡ RELEASE</span>':'—'},
+    {key:'compression_release',label:'REL',fmt:v=>v?'<span title="compression release" style="color:var(--red);font-weight:600">⚡</span>':'—'},
     {key:'oi_turnover_ratio',label:'OI TURN',fmt:v=>turnoverBadge(v)},
-    {key:'signals',     label:'SIGNALS', fmt:v=>v?signalChips(v):'—'},
+    // #9a: Signals → icons (severity-sorted), sortValue drives column sort by urgency
+    {key:'signals',     label:'SIGNALS', fmt:v=>signalIcons(v), sortValue:v=>signalSeverityKey(v)},
     {key:'confidence',  label:'CONF',    fmt:v=>confBadge(v)},
     {key:'next_day_realized_move',label:'NEXT MOVE%',fmt:v=>v!=null?sspan(v,2):'—'},
   ]);
@@ -2565,6 +2712,50 @@ function signalChips(v){
   }).join('');
 }
 
+
+
+// ── Overview meta: snapshot timestamp badge + recent-signals strip (#1,#3) ──
+async function loadOverviewMeta(){
+  try{
+    const m = await api('/api/overview_meta');
+    // Snapshot timestamp badge
+    const badge = document.getElementById('ovSnapBadge');
+    if(badge) badge.textContent = m.snapshot_ts ? ('SNAP ' + m.snapshot_ts) : '';
+    // Recent exposure signals strip (query-only)
+    renderSignalStrip(m.signal_summary||{}, m.exposure_date);
+  }catch(e){ /* exposure_eod may be absent — strip stays hidden */ }
+}
+
+function renderSignalStrip(counts, expDate){
+  const el = document.getElementById('ovSignalStrip');
+  if(!el) return;
+  // Priority signals to surface (high-value only)
+  const PRIO = [
+    ['crash_risk','⚡ crash','var(--red)'],
+    ['regime_flip_to_neg','▼ →neg','var(--red)'],
+    ['regime_flip_to_pos','▲ →pos','var(--green)'],
+    ['_releasing','⚡ release','var(--red)'],
+    ['_compressing','🌀 coiling','var(--acc)'],
+    ['bull_trend_reinforce','↑ bull','var(--green)'],
+    ['bear_trend_reinforce','↓ bear','var(--amber)'],
+  ];
+  const parts = PRIO.filter(([k])=>counts[k]).map(([k,label,col])=>
+    `<span style="color:${col};font-family:var(--mono);font-size:10px;margin-right:14px;
+       cursor:pointer" onclick="document.querySelector('[data-view=&quot;expscreen&quot;]').click()">
+       ${label} <b>${counts[k]}</b></span>`);
+  if(parts.length){
+    el.innerHTML = `<div style="padding:6px 12px;background:var(--card);border:1px solid var(--border);
+      border-radius:4px;display:flex;align-items:center;flex-wrap:wrap">
+      <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-right:12px">
+        EOD SIGNALS ${expDate||''} →</span>${parts.join('')}
+      <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:auto;cursor:pointer"
+        onclick="document.querySelector('[data-view=&quot;expscreen&quot;]').click()">full screener ›</span>
+    </div>`;
+    el.style.display='';
+  } else {
+    el.style.display='none';
+  }
+}
 
 // ── Bootstrap ─────────────────────────────────────────────────────
 

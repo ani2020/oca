@@ -49,7 +49,7 @@ def exposure_screener_signals_meta():
 @router.get("/api/exposure_screener")
 def exposure_screener(
     screen_date:  Optional[str] = Query(None, description="EOD date; default latest"),
-    view:         str = Query("changed", description="changed | all"),
+    view:         str = Query("changed", description="changed | all | dropped"),
     signal:       Optional[str] = Query(None, description="filter by one signal key"),
     regime:       Optional[str] = Query(None, description="positive|negative|all_positive|all_negative"),
     index_name:   Optional[str] = Query(None, description="filter to index constituents"),
@@ -95,6 +95,46 @@ def exposure_screener(
 
     # Confidence filter
     df = df[df["confidence"].map(lambda c: conf_rank.get(c, 0) >= min_rank)]
+
+    # View: dropped = tickers that HAD a signal on the previous trading day but
+    # have NONE today (their signal reset / fell off the radar). Self-join vs the
+    # prior available date. Returns today's row enriched with yesterday's signals.
+    if view == "dropped":
+        prev = qdf("""
+            SELECT MAX(date) AS d FROM exposure_eod WHERE date < CAST(? AS DATE)
+        """, [d])
+        if prev.empty or prev["d"].iloc[0] is None:
+            return safe_response({"date": d, "view": view, "rows": [], "counts": {},
+                                  "indicator_counts": {}, "prev_date": None, "total": 0})
+        pdate = str(prev["d"].iloc[0])
+        # Symbols with a signal yesterday
+        had = qdf("""
+            SELECT symbol, signals AS prev_signals FROM exposure_eod
+            WHERE date = CAST(? AS DATE) AND signals != ''
+        """, [pdate])
+        # Symbols with a signal today
+        now = qdf("""
+            SELECT symbol FROM exposure_eod
+            WHERE date = CAST(? AS DATE) AND signals != ''
+        """, [d])
+        now_set = set(now["symbol"].tolist())
+        dropped_map = {r.symbol: r.prev_signals
+                       for r in had.itertuples() if r.symbol not in now_set}
+        # Keep today's rows for the dropped symbols; attach yesterday's signals
+        df = df[df["symbol"].isin(dropped_map.keys())].copy()
+        df["prev_signals"] = df["symbol"].map(dropped_map)
+        # (skip the normal signal/changed filtering for this view)
+        if regime:
+            df = df[df["gex_regime"] == regime]
+        if sort_by in df.columns and not df.empty:
+            df = df.reindex(df[sort_by].abs().sort_values(ascending=False).index)
+        df = df.head(limit)
+        return safe_response({
+            "date": d, "prev_date": pdate, "view": view,
+            "rows": to_records(df),
+            "counts": {}, "indicator_counts": {},
+            "total": int(len(df)),
+        })
 
     # View: changed = rows with a fired signal OR an active compression/release
     # indicator today (anything noteworthy, not just signal-bar items)

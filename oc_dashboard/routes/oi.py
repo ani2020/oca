@@ -129,9 +129,10 @@ def oi_walls(filter_type: str = Query("all")):
     Sortable across all symbols.
     """
     idx_list = ", ".join(f"'{s}'" for s in config.NSE_INDICES)
+    # Qualify with t. — `symbol` is ambiguous in the base CTE (t JOIN latest l)
     sym_filter = (
-        f"AND symbol IN ({idx_list})"       if filter_type == "index"
-        else f"AND symbol NOT IN ({idx_list})" if filter_type == "stock"
+        f"AND t.symbol IN ({idx_list})"       if filter_type == "index"
+        else f"AND t.symbol NOT IN ({idx_list})" if filter_type == "stock"
         else ""
     )
     df = qdf(

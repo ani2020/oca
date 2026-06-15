@@ -164,14 +164,18 @@ def _gamma_analysis_inline(
     g = gdf["total_gamma_billions"].values
     x = gdf["level"].values
 
-    # Gamma flip
-    gamma_flip = None
-    idx = np.where(np.sign(g[:-1]) != np.sign(g[1:]))[0]
-    if len(idx):
-        i = idx[0]
-        d = g[i + 1] - g[i]
-        if d:
-            gamma_flip = float(x[i] - g[i] * (x[i + 1] - x[i]) / d)
+    # Gamma flip — use the single-source value computed by _build_gamma_profile
+    # (smoothed discrete-strike flip in gdf.attrs), NOT a separate linspace
+    # zero-crossing. This keeps the GEX page showing ONE consistent flip value.
+    gamma_flip = gdf.attrs.get("flip_point") if hasattr(gdf, "attrs") else None
+    if gamma_flip is None:
+        # Fallback only if attrs missing
+        idx = np.where(np.sign(g[:-1]) != np.sign(g[1:]))[0]
+        if len(idx):
+            i = idx[0]
+            d = g[i + 1] - g[i]
+            if d:
+                gamma_flip = float(x[i] - g[i] * (x[i + 1] - x[i]) / d)
 
     # Gamma at spot
     ns_col = gdf["near_strike"].values

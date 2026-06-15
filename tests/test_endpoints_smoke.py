@@ -120,3 +120,23 @@ def test_signals_meta(client):
     assert r.status_code == 200
     body = r.json()
     assert any(s["key"] == "crash_risk" for s in body["signals"])
+
+
+def test_overview_meta(client):
+    r = client.get("/api/overview_meta")
+    assert r.status_code == 200
+    body = r.json()
+    assert "snapshot_ts" in body and "signal_summary" in body
+
+def test_oi_walls_all(client):
+    r = client.get("/api/oi_walls?filter_type=all")
+    assert r.status_code in (200, 404)
+
+def test_oi_walls_index_no_ambiguous_symbol(client):
+    # The ambiguous-symbol bug 500'd specifically on index/stock filter
+    r = client.get("/api/oi_walls?filter_type=index")
+    assert r.status_code in (200, 404)   # must NOT be 500
+
+def test_oi_walls_stock_no_ambiguous_symbol(client):
+    r = client.get("/api/oi_walls?filter_type=stock")
+    assert r.status_code in (200, 404)
