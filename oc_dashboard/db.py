@@ -171,3 +171,19 @@ def latest_ts(symbol: str) -> str:
     if rows and rows[0][0]:
         return rows[0][0]
     return ""
+
+
+def latest_data_date(symbol: str) -> str:
+    """Latest DATA date (YYYY-MM-DD) for a symbol — NOT wall-clock today.
+    Use as the anchor for history windows / 'today's data' so that weekends,
+    holidays, missed scrapes, or pre-market review (calendar ahead of data) don't
+    truncate windows or 404. Per-symbol because the scraped NSE source has random
+    symbol-level pull gaps, so a global MAX(date) can be ahead of a given symbol.
+    """
+    rows = _qraw(
+        f"SELECT CAST(MAX(CAST(timestamp AS DATE)) AS VARCHAR) FROM {tbl()} WHERE symbol=?",
+        [symbol],
+    )
+    if rows and rows[0][0]:
+        return rows[0][0]
+    return ""

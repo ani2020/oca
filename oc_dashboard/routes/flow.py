@@ -6,7 +6,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
-from ..db import qdf, tbl, to_records, safe_response, _safe
+from ..db import qdf, tbl, to_records, safe_response, _safe, latest_data_date
 from ..helpers import _assign_bucket, _dte_regime, _flow_signal
 from .. import config
 
@@ -41,9 +41,10 @@ def oi_flow_buckets(
     5. Detects migrated strikes (current delta bucket ≠ assigned bucket).
     6. Emits crossing signal when total OI stable but bucket composition shifts.
     """
-    today = date.today().isoformat()
-    d_from = date_from or today
-    d_to   = date_to   or today
+    # Anchor to symbol's latest DATA date (not wall-clock) for stale-data days
+    anchor = latest_data_date(symbol) or date.today().isoformat()
+    d_from = date_from or anchor
+    d_to   = date_to   or anchor
 
     expiry_filter = "" if expiry == "all" else "AND expiry = ?"
     expiry_params = [] if expiry == "all" else [expiry[:10]]

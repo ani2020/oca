@@ -4,7 +4,7 @@ import numpy as np
 from datetime import date, datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
-from ..db import qdf, tbl, to_records, safe_response, _safe, ts_filter_clause, _ts_lo_hi, latest_ts
+from ..db import qdf, tbl, to_records, safe_response, _safe, ts_filter_clause, _ts_lo_hi, latest_ts, latest_data_date
 from .. import config
 
 router = APIRouter()
@@ -17,6 +17,7 @@ def iv_smile(
     filter_type: str           = Query("all"),
 ):
     ts_filter = timestamp or latest_ts(symbol)
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
     df = qdf(
         f"""
         SELECT strike_price,
@@ -29,12 +30,12 @@ def iv_smile(
                COALESCE(underlying_price,0) AS spot
         FROM {tbl()}
         WHERE symbol = ?
-          AND expiry = ? 
-          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
+          AND expiry = ?
+          {ts_clause}
           AND (COALESCE(ce_iv,0)>0 OR COALESCE(pe_iv,0)>0)
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], symbol, expiry[:10]],
+        [symbol, expiry[:10]] + ts_params,
     )
     if df.empty:
         raise HTTPException(404, "No IV data found")
@@ -56,7 +57,7 @@ def iv_smile(
                 std = float(np.std(res[fit_mask])) or 1.0
                 z   = res / std
                 for i in range(len(x_all)):
-                    if y_all[i] > 0:
+                    if fit_mask[i]:  # only where spline was actually fit (no extrapolation)
                         fitted[i]  = float(fv[i])
                         zscore[i]  = float(z[i])
                         anomaly[i] = int(abs(z[i]) > 2.0 and fit_mask[i])
@@ -80,6 +81,7 @@ def iv_term_structure(
     Uses the row where distance_from_atm = 0 (ATM strike) per expiry.
     """
     ts_filter = timestamp or latest_ts(symbol)
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
     lo, hi    = _ts_lo_hi(ts_filter)
     df = qdf(
         f"""
@@ -93,11 +95,11 @@ def iv_term_structure(
             strike_price
         FROM {tbl()}
         WHERE symbol = ?
-          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=?)
+          {ts_clause}
           AND distance_from_atm = 0
         ORDER BY expiry
         """,
-        [symbol, symbol],
+        [symbol] + ts_params,
     )
     if df.empty:
         # Fallback: nearest strike to spot per expiry
@@ -118,11 +120,11 @@ def iv_term_structure(
                         ORDER BY ABS(distance_from_atm), strike_price
                     ) AS rn
                 FROM {tbl()}
-                AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=?)
+                {ts_clause}
             )
             SELECT * FROM ranked WHERE rn = 1 ORDER BY expiry
             """,
-            [symbol, symbol],
+            [symbol] + ts_params,
         )
     if df.empty:
         raise HTTPException(404, "No IV term structure data")
@@ -154,6 +156,7 @@ def iv_rank(
     RV-IV spread = m_volatility (realised annualised) - ATM IV
     """
     ts_filter = timestamp or latest_ts(symbol)
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
     lo, hi    = _ts_lo_hi(ts_filter)
 
     # Current ATM IV
@@ -164,11 +167,11 @@ def iv_rank(
                COALESCE(m_volatility, 0) AS rv
         FROM {tbl()}
         WHERE symbol = ? AND expiry = ?
-          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
+          {ts_clause}
           AND distance_from_atm = 0
         LIMIT 1
         """,
-        [symbol, expiry[:10], symbol, expiry[:10]],
+        [symbol, expiry[:10]] + ts_params,
     )
     if cur.empty:
         raise HTTPException(404, "No current ATM IV data")
@@ -232,6 +235,7 @@ def pc_skew(
     - Time series of riskreversal across timestamps for this expiry
     """
     ts_filter = timestamp or latest_ts(symbol)
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
     lo, hi    = _ts_lo_hi(ts_filter)
 
     # All strikes for this expiry/timestamp
@@ -250,10 +254,10 @@ def pc_skew(
             COALESCE(underlying_price, 0) AS spot
         FROM {tbl()}
         WHERE symbol = ? AND expiry = ?
-          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
+          {ts_clause}
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], symbol, expiry[:10]],
+        [symbol, expiry[:10]] + ts_params,
     )
     if df.empty:
         raise HTTPException(404, "No skew data")
@@ -351,6 +355,7 @@ def oi_weighted_iv(
     More accurate measure of the market's effective implied vol than simple average.
     """
     ts_filter = timestamp or latest_ts(symbol)
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
     lo, hi    = _ts_lo_hi(ts_filter)
     df = qdf(
         f"""
@@ -362,12 +367,13 @@ def oi_weighted_iv(
             SUM(COALESCE(ce_oi,0))            AS total_ce_oi,
             SUM(COALESCE(pe_oi,0))            AS total_pe_oi
         FROM {tbl()}
-        WHERE symbol = ? AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=?)
+        WHERE symbol = ?
+          {ts_clause}
           AND COALESCE(ce_iv,0) > 0
         GROUP BY expiry, days_to_expiry
         ORDER BY expiry
         """,
-        [symbol, symbol],
+        [symbol] + ts_params,
     )
     if df.empty:
         raise HTTPException(404, "No IV data")
@@ -406,7 +412,6 @@ def iv_intraday_trend(filter_type: str = Query("all")):
         else f"AND symbol NOT IN ({idx_list})" if filter_type == "stock"
         else ""
     )
-    today = date.today().isoformat()
     df = qdf(
         f"""
         WITH day_bounds AS (
@@ -414,7 +419,9 @@ def iv_intraday_trend(filter_type: str = Query("all")):
                    MIN(timestamp) AS ts_open,
                    MAX(timestamp) AS ts_now
             FROM {tbl()}
-            WHERE CAST(timestamp AS DATE) = CAST(? AS DATE)
+            WHERE CAST(timestamp AS DATE) = (
+                      SELECT MAX(CAST(timestamp AS DATE)) FROM {tbl()}
+                  )
             {sym_filter}
             GROUP BY symbol
         ),
@@ -449,8 +456,7 @@ def iv_intraday_trend(filter_type: str = Query("all")):
         FROM iv_open o
         JOIN iv_now  n ON o.symbol = n.symbol
         ORDER BY ABS(n.iv - o.iv) DESC
-        """,
-        [today],
+        """
     )
     return [] if df.empty else to_records(df)
 
@@ -488,7 +494,7 @@ def iv_history(
         FROM daily
         ORDER BY dt, strike_price
         """,
-        [symbol, expiry[:10], date.today().isoformat()],
+        [symbol, expiry[:10], (latest_data_date(symbol) or date.today().isoformat())],
     )
     if df.empty:
         raise HTTPException(404, "No IV history")

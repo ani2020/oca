@@ -169,6 +169,7 @@ def delta_oi(
     """
     ts_filter = timestamp or latest_ts(symbol)
     lo, hi    = _ts_lo_hi(ts_filter)
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
 
     df = qdf(
         f"""
@@ -188,10 +189,10 @@ def delta_oi(
             COALESCE(net_flow,  0)        AS net_flow
         FROM {tbl()}
         WHERE symbol = ? AND expiry = ?
-          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND expiry=?)
+          {ts_clause}
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], symbol, expiry[:10]],
+        [symbol, expiry[:10]] + ts_params,
     )
     if df.empty:
         raise HTTPException(404, "No delta OI data")
@@ -309,10 +310,10 @@ def strike_snapshot(
             COALESCE(m_volatility,0)      AS rv
         FROM {tbl()}
         WHERE symbol=? AND strike_price=? AND expiry=?
-          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=? AND strike_price=? AND expiry=?)
+          {ts_clause}
         LIMIT 1
         """,
-        [symbol, strike_price, expiry[:10], symbol, strike_price, expiry[:10]],
+        [symbol, strike_price, expiry[:10]] + ts_params,
     )
     if df.empty:
         raise HTTPException(404, "No snapshot data")
@@ -369,6 +370,8 @@ def premium_lens(
     ce_ltp_s/pe_ltp_s (Premium/Discount/NA) from DB is also shown.
     Filters to show only strikes outside the configured ratio range.
     """
+    ts_filter = timestamp or latest_ts(symbol)
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
     df = qdf(
         f"""
         SELECT
@@ -394,14 +397,12 @@ def premium_lens(
             COALESCE(underlying_price,  0) AS spot
         FROM {tbl()}
         WHERE symbol=? AND expiry=?
-                    AND timestamp = (
-              SELECT MAX(timestamp) FROM {tbl()}
-              WHERE symbol = ? AND expiry = ?)
- AND (COALESCE(ce_ltp,0) > 0 OR COALESCE(pe_ltp,0) > 0)
+          {ts_clause}
+          AND (COALESCE(ce_ltp,0) > 0 OR COALESCE(pe_ltp,0) > 0)
           AND (COALESCE(ce_oi,0) >= ? OR COALESCE(pe_oi,0) >= ?)
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], symbol, expiry[:10], min_oi, min_oi],
+        [symbol, expiry[:10]] + ts_params + [min_oi, min_oi],
     )
     if df.empty:
         raise HTTPException(404, "No data")

@@ -35,7 +35,6 @@ def divergence(
         else f"AND symbol NOT IN ({idx_list})" if filter_type == "stock"
         else ""
     )
-    today = date.today().isoformat()
 
     if mode == "intraday":
         # First timestamp today vs latest timestamp today per symbol
@@ -46,10 +45,19 @@ def divergence(
                        MIN(timestamp) AS ts_open,
                        MAX(timestamp) AS ts_now
                 FROM {tbl()}
-                WHERE CAST(timestamp AS DATE) = CAST(? AS DATE)
+                WHERE CAST(timestamp AS DATE) = (
+                          SELECT MAX(CAST(timestamp AS DATE)) FROM {tbl()}
+                      )
                 {sym_filter}
                 GROUP BY symbol
                 HAVING MIN(timestamp) != MAX(timestamp)
+            ),
+            near_exp AS (
+                -- per-symbol nearest (front) expiry — pin ATM premium to ONE expiry
+                SELECT symbol, MIN(expiry) AS expiry
+                FROM {tbl()}
+                WHERE expiry >= CURRENT_DATE
+                GROUP BY symbol
             )
             SELECT
                 n.symbol,
@@ -70,11 +78,11 @@ def divergence(
                 AVG(CASE WHEN n.distance_from_atm = 0 THEN n.net_flow ELSE NULL END) AS net_flow
             FROM {tbl()} n
             JOIN day_bounds d ON n.symbol = d.symbol AND n.timestamp = d.ts_now
-            JOIN {tbl()} o   ON o.symbol = d.symbol AND o.timestamp = d.ts_open
-            WHERE n.expiry >= CURRENT_DATE
+            JOIN near_exp ne  ON n.symbol = ne.symbol AND n.expiry = ne.expiry
+            JOIN {tbl()} o    ON o.symbol = d.symbol AND o.timestamp = d.ts_open
+                              AND o.expiry = ne.expiry
             GROUP BY n.symbol, n.timestamp, o.timestamp
-            """,
-            [today],
+            """
         )
     else:
         # Compare two most recent timestamps per symbol.
@@ -82,7 +90,14 @@ def divergence(
         # then join only those two rows — avoids a full cross-join.
         df_ref = qdf(
             f"""
-            WITH sym_ts AS (
+            WITH near_exp AS (
+                -- per-symbol nearest (front) expiry — pin ATM premium to ONE expiry
+                SELECT symbol, MIN(expiry) AS expiry
+                FROM {tbl()}
+                WHERE expiry >= CURRENT_DATE {sym_filter}
+                GROUP BY symbol
+            ),
+            sym_ts AS (
                 SELECT symbol,
                        MAX(timestamp) AS ts_now,
                        MIN(timestamp) AS ts_prev
@@ -106,7 +121,8 @@ def divergence(
                        AVG(CASE WHEN t.distance_from_atm=0 THEN t.net_flow END) AS net_flow,
                        STRFTIME(MAX(t.timestamp), '%Y-%m-%d %H:%M') AS ts_now_str
                 FROM {tbl()} t
-                JOIN sym_ts s ON t.symbol=s.symbol AND t.timestamp=s.ts_now
+                JOIN sym_ts s   ON t.symbol=s.symbol AND t.timestamp=s.ts_now
+                JOIN near_exp ne ON t.symbol=ne.symbol AND t.expiry=ne.expiry
                 GROUP BY t.symbol
             ),
             snap_prev AS (
@@ -118,7 +134,8 @@ def divergence(
                        AVG(CASE WHEN t.distance_from_atm=0 THEN t.pe_iv  END) AS pe_iv_prev,
                        STRFTIME(MAX(t.timestamp), '%Y-%m-%d %H:%M') AS ts_prev_str
                 FROM {tbl()} t
-                JOIN sym_ts s ON t.symbol=s.symbol AND t.timestamp=s.ts_prev
+                JOIN sym_ts s   ON t.symbol=s.symbol AND t.timestamp=s.ts_prev
+                JOIN near_exp ne ON t.symbol=ne.symbol AND t.expiry=ne.expiry
                 GROUP BY t.symbol
             )
             SELECT n.symbol,

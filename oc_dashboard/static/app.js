@@ -2610,7 +2610,12 @@ function renderExposureScreener(d){
       <div class="kpi-label">⚡ release</div>
       <div class="kpi-val" style="color:var(--red)">${indCounts.compression_release}</div></div>`);
   }
-  cntEl.innerHTML = pills.join('') || '<span style="font-family:var(--mono);font-size:10px;color:var(--muted)">No signals fired on this date</span>';
+  // #4: counts are MARKET-WIDE (whole day, all symbols) — NOT the filtered table below
+  const wideLbl = '<span style="font-family:var(--mono);font-size:9px;color:var(--muted);'
+    + 'margin-right:8px;align-self:center">MARKET-WIDE · '+(d.date||'')+' →</span>';
+  cntEl.innerHTML = pills.length
+    ? (wideLbl + pills.join(''))
+    : '<span style="font-family:var(--mono);font-size:10px;color:var(--muted)">No signals fired on this date</span>';
 
   const rows = d.rows||[];
   const isDropped = (d.view==='dropped');

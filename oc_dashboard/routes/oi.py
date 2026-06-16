@@ -4,7 +4,7 @@ import pandas as pd
 from datetime import date, datetime, timedelta
 from typing import Optional
 from fastapi import APIRouter, HTTPException, Query
-from ..db import qdf, tbl, to_records, safe_response, _ts_lo_hi, latest_ts
+from ..db import qdf, tbl, to_records, safe_response, _ts_lo_hi, latest_ts, latest_data_date
 from ..cache import cache_get
 from .. import config
 
@@ -83,38 +83,52 @@ def oi_change(
 
 @router.get("/api/oi_signals_all")
 def oi_signals_all():
-    symbols = qdf(f"SELECT DISTINCT symbol FROM {tbl()} ORDER BY symbol")["symbol"].tolist()
-    rows = []
-    for sym in symbols:
-        ts_df = qdf(
-            f"SELECT DISTINCT CAST(timestamp AS VARCHAR) AS ts FROM {tbl()} "
-            f"WHERE symbol=? ORDER BY ts DESC LIMIT 2", [sym],
+    # Single set-based query (was a 2-query-per-symbol loop = ~262 round-trips).
+    # DENSE_RANK tags each symbol's two most recent snapshots; aggregate the
+    # latest-vs-previous diff for ALL symbols in one pass.
+    df = qdf(
+        f"""
+        WITH ranked AS (
+            SELECT symbol, timestamp, strike_price, expiry,
+                   COALESCE(ce_oi, 0)  AS ce_oi,
+                   COALESCE(pe_oi, 0)  AS pe_oi,
+                   COALESCE(ce_ltp, 0) AS ce_ltp,
+                   COALESCE(pe_ltp, 0) AS pe_ltp,
+                   DENSE_RANK() OVER (PARTITION BY symbol ORDER BY timestamp DESC) AS rk
+            FROM {tbl()}
+        ),
+        two AS (
+            SELECT * FROM ranked WHERE rk <= 2
+        ),
+        -- ensure a symbol actually has two distinct snapshots
+        valid AS (
+            SELECT symbol FROM two GROUP BY symbol
+            HAVING COUNT(DISTINCT timestamp) >= 2
+        ),
+        agg AS (
+            SELECT t.symbol,
+                   SUM(CASE WHEN rk=1 THEN ce_oi ELSE 0 END)
+                     - SUM(CASE WHEN rk=2 THEN ce_oi ELSE 0 END) AS ce_oi_chg,
+                   SUM(CASE WHEN rk=1 THEN pe_oi ELSE 0 END)
+                     - SUM(CASE WHEN rk=2 THEN pe_oi ELSE 0 END) AS pe_oi_chg,
+                   AVG(CASE WHEN rk=1 THEN ce_ltp END)
+                     - AVG(CASE WHEN rk=2 THEN ce_ltp END) AS avg_ce_ltp_chg,
+                   AVG(CASE WHEN rk=1 THEN pe_ltp END)
+                     - AVG(CASE WHEN rk=2 THEN pe_ltp END) AS avg_pe_ltp_chg,
+                   MAX(CASE WHEN rk=1 THEN CAST(timestamp AS VARCHAR) END) AS ts_new
+            FROM two t
+            JOIN valid v ON t.symbol = v.symbol
+            GROUP BY t.symbol
         )
-        if len(ts_df) < 2: continue
-        ts_new, ts_old = ts_df["ts"].iloc[0], ts_df["ts"].iloc[1]
-        agg = qdf(
-            f"""
-            SELECT
-                SUM(COALESCE(n.ce_oi,  0))-SUM(COALESCE(o.ce_oi,  0)) AS ce_oi_chg,
-                SUM(COALESCE(n.pe_oi,  0))-SUM(COALESCE(o.pe_oi,  0)) AS pe_oi_chg,
-                AVG(COALESCE(n.ce_ltp, 0))-AVG(COALESCE(o.ce_ltp, 0)) AS avg_ce_ltp_chg,
-                AVG(COALESCE(n.pe_ltp, 0))-AVG(COALESCE(o.pe_ltp, 0)) AS avg_pe_ltp_chg
-            FROM {tbl()} n
-            JOIN {tbl()} o
-              ON  n.symbol=o.symbol AND n.strike_price=o.strike_price AND n.expiry=o.expiry
-            WHERE n.symbol=?
-              AND n.timestamp  BETWEEN ?  AND ? 
-              AND o.timestamp  BETWEEN ?  AND ?
-            """,
-            [sym] + _ts_lo_hi(ts_new) + _ts_lo_hi(ts_old),
-        )
-        if agg.empty: continue
-        r = agg.iloc[0].to_dict()
-        r["symbol"] = sym; r["ts_new"] = ts_new
-        r["total_oi_chg"] = abs(r.get("ce_oi_chg") or 0) + abs(r.get("pe_oi_chg") or 0)
-        rows.append(r)
-    if not rows: return []
-    return to_records(pd.DataFrame(rows).sort_values("total_oi_chg", ascending=False))
+        SELECT symbol, ce_oi_chg, pe_oi_chg, avg_ce_ltp_chg, avg_pe_ltp_chg, ts_new,
+               ABS(COALESCE(ce_oi_chg,0)) + ABS(COALESCE(pe_oi_chg,0)) AS total_oi_chg
+        FROM agg
+        ORDER BY total_oi_chg DESC
+        """
+    )
+    if df.empty:
+        return []
+    return to_records(df)
 
 
 @router.get("/api/oi_walls")
@@ -137,29 +151,38 @@ def oi_walls(filter_type: str = Query("all")):
     )
     df = qdf(
         f"""
-        WITH latest AS (
-            SELECT symbol, MAX(timestamp) AS ts
-            FROM {tbl()} GROUP BY symbol
+        WITH ranked AS (
+            -- tag each symbol's two most recent snapshots
+            SELECT t.*,
+                   DENSE_RANK() OVER (PARTITION BY t.symbol ORDER BY t.timestamp DESC) AS rk
+            FROM {tbl()} t
+            WHERE (t.ce_oi > 0 OR t.pe_oi > 0)
+            {sym_filter}
         ),
         base AS (
-            SELECT t.symbol,
-                   t.strike_price,
-                   COALESCE(t.ce_oi,0)           AS ce_oi,
-                   COALESCE(t.pe_oi,0)           AS pe_oi,
-                   COALESCE(t.ce_ltp,0)          AS ce_ltp,
-                   COALESCE(t.pe_ltp,0)          AS pe_ltp,
-                   COALESCE(t.ce_iv, 0)          AS ce_iv,
-                   COALESCE(t.pe_iv, 0)          AS pe_iv,
-                   COALESCE(t.ce_oi_change, 0)   AS ce_oi_change,
-                   COALESCE(t.pe_oi_change, 0)   AS pe_oi_change,
-                   COALESCE(t.underlying_price,0) AS spot,
-                   COALESCE(t.fut_price,0)        AS fut_price,
-                   COALESCE(t.atm_strike,0)       AS atm_strike,
-                   COALESCE(t.lotsize,1)          AS lotsize
-            FROM {tbl()} t
-            JOIN latest l ON t.symbol=l.symbol AND t.timestamp=l.ts
-            WHERE t.ce_oi > 0 OR t.pe_oi > 0
-            {sym_filter}
+            SELECT symbol, strike_price,
+                   COALESCE(ce_oi,0)           AS ce_oi,
+                   COALESCE(pe_oi,0)           AS pe_oi,
+                   COALESCE(ce_ltp,0)          AS ce_ltp,
+                   COALESCE(pe_ltp,0)          AS pe_ltp,
+                   COALESCE(ce_iv, 0)          AS ce_iv,
+                   COALESCE(pe_iv, 0)          AS pe_iv,
+                   COALESCE(ce_oi_change, 0)   AS ce_oi_change,
+                   COALESCE(pe_oi_change, 0)   AS pe_oi_change,
+                   COALESCE(underlying_price,0) AS spot,
+                   COALESCE(fut_price,0)        AS fut_price,
+                   COALESCE(atm_strike,0)       AS atm_strike,
+                   COALESCE(lotsize,1)          AS lotsize
+            FROM ranked WHERE rk = 1
+        ),
+        prev_base AS (
+            -- previous snapshot per symbol/strike (for real LTP/IV change)
+            SELECT symbol, strike_price,
+                   COALESCE(ce_ltp,0) AS ce_ltp,
+                   COALESCE(pe_ltp,0) AS pe_ltp,
+                   COALESCE(ce_iv, 0) AS ce_iv,
+                   COALESCE(pe_iv, 0) AS pe_iv
+            FROM ranked WHERE rk = 2
         ),
         agg AS (
             SELECT symbol,
@@ -178,19 +201,20 @@ def oi_walls(filter_type: str = Query("all")):
             SELECT b.symbol,
                    b.strike_price    AS ce_wall_strike,
                    b.ce_oi           AS ce_wall_oi,
-                   COALESCE(b.ce_ltp, 0)             AS ce_ltp,
-                   COALESCE(b.ce_oi_change, 0)        AS ce_oi_chg,
-                   COALESCE(b.ce_iv,  0)              AS ce_iv,
-                   -- LTP and IV changes vs previous snapshot (use DB columns)
-                   COALESCE(b.ce_ltp, 0) - COALESCE(prev.ce_ltp, 0)  AS ce_ltp_chg,
-                   COALESCE(b.ce_iv,  0) - COALESCE(prev.ce_iv,  0)  AS ce_iv_chg,
-                   CASE WHEN COALESCE(b.ce_oi_change,0) > 0 AND COALESCE(b.ce_ltp,0) > 0 THEN 'Long Build-Up'
-                        WHEN COALESCE(b.ce_oi_change,0) > 0 AND COALESCE(b.ce_ltp,0) < 0 THEN 'Short Build-Up'
-                        WHEN COALESCE(b.ce_oi_change,0) < 0 AND COALESCE(b.ce_ltp,0) > 0 THEN 'Short Covering'
-                        WHEN COALESCE(b.ce_oi_change,0) < 0 AND COALESCE(b.ce_ltp,0) < 0 THEN 'Long Unwinding'
+                   b.ce_ltp                           AS ce_ltp,
+                   b.ce_oi_change                     AS ce_oi_chg,
+                   b.ce_iv                            AS ce_iv,
+                   -- real LTP/IV change vs previous snapshot
+                   b.ce_ltp - COALESCE(prev.ce_ltp, b.ce_ltp)  AS ce_ltp_chg,
+                   b.ce_iv  - COALESCE(prev.ce_iv,  b.ce_iv)   AS ce_iv_chg,
+                   -- build-up matrix: OI change × PRICE change (not price level)
+                   CASE WHEN b.ce_oi_change > 0 AND (b.ce_ltp - COALESCE(prev.ce_ltp,b.ce_ltp)) > 0 THEN 'Long Build-Up'
+                        WHEN b.ce_oi_change > 0 AND (b.ce_ltp - COALESCE(prev.ce_ltp,b.ce_ltp)) < 0 THEN 'Short Build-Up'
+                        WHEN b.ce_oi_change < 0 AND (b.ce_ltp - COALESCE(prev.ce_ltp,b.ce_ltp)) > 0 THEN 'Short Covering'
+                        WHEN b.ce_oi_change < 0 AND (b.ce_ltp - COALESCE(prev.ce_ltp,b.ce_ltp)) < 0 THEN 'Long Unwinding'
                         ELSE 'Neutral' END            AS ce_signal
             FROM base b
-            LEFT JOIN base prev ON prev.symbol = b.symbol
+            LEFT JOIN prev_base prev ON prev.symbol = b.symbol
                 AND prev.strike_price = b.strike_price
             QUALIFY ROW_NUMBER() OVER (PARTITION BY b.symbol ORDER BY b.ce_oi DESC) = 1
         ),
@@ -198,18 +222,18 @@ def oi_walls(filter_type: str = Query("all")):
             SELECT b.symbol,
                    b.strike_price    AS pe_wall_strike,
                    b.pe_oi           AS pe_wall_oi,
-                   COALESCE(b.pe_ltp, 0)             AS pe_ltp,
-                   COALESCE(b.pe_oi_change, 0)        AS pe_oi_chg,
-                   COALESCE(b.pe_iv,  0)              AS pe_iv,
-                   COALESCE(b.pe_ltp, 0) - COALESCE(prev.pe_ltp, 0)  AS pe_ltp_chg,
-                   COALESCE(b.pe_iv,  0) - COALESCE(prev.pe_iv,  0)  AS pe_iv_chg,
-                   CASE WHEN COALESCE(b.pe_oi_change,0) > 0 AND COALESCE(b.pe_ltp,0) > 0 THEN 'Long Build-Up'
-                        WHEN COALESCE(b.pe_oi_change,0) > 0 AND COALESCE(b.pe_ltp,0) < 0 THEN 'Short Build-Up'
-                        WHEN COALESCE(b.pe_oi_change,0) < 0 AND COALESCE(b.pe_ltp,0) > 0 THEN 'Short Covering'
-                        WHEN COALESCE(b.pe_oi_change,0) < 0 AND COALESCE(b.pe_ltp,0) < 0 THEN 'Long Unwinding'
+                   b.pe_ltp                           AS pe_ltp,
+                   b.pe_oi_change                     AS pe_oi_chg,
+                   b.pe_iv                            AS pe_iv,
+                   b.pe_ltp - COALESCE(prev.pe_ltp, b.pe_ltp)  AS pe_ltp_chg,
+                   b.pe_iv  - COALESCE(prev.pe_iv,  b.pe_iv)   AS pe_iv_chg,
+                   CASE WHEN b.pe_oi_change > 0 AND (b.pe_ltp - COALESCE(prev.pe_ltp,b.pe_ltp)) > 0 THEN 'Long Build-Up'
+                        WHEN b.pe_oi_change > 0 AND (b.pe_ltp - COALESCE(prev.pe_ltp,b.pe_ltp)) < 0 THEN 'Short Build-Up'
+                        WHEN b.pe_oi_change < 0 AND (b.pe_ltp - COALESCE(prev.pe_ltp,b.pe_ltp)) > 0 THEN 'Short Covering'
+                        WHEN b.pe_oi_change < 0 AND (b.pe_ltp - COALESCE(prev.pe_ltp,b.pe_ltp)) < 0 THEN 'Long Unwinding'
                         ELSE 'Neutral' END            AS pe_signal
             FROM base b
-            LEFT JOIN base prev ON prev.symbol = b.symbol
+            LEFT JOIN prev_base prev ON prev.symbol = b.symbol
                 AND prev.strike_price = b.strike_price
             QUALIFY ROW_NUMBER() OVER (PARTITION BY b.symbol ORDER BY b.pe_oi DESC) = 1
         )
@@ -265,8 +289,9 @@ def oi_history(
     Multi-day OI history for heatmap: strikes × dates → OI change.
     Filters strikes to ATM ± price_range_pct to keep the heatmap readable.
     """
-    # Use intraday timestamps when days=1 (today), daily aggregation otherwise
-    today = date.today().isoformat()
+    # Anchor to the symbol's latest DATA date (not wall-clock) so stale-data
+    # days (weekends/holidays/missed scrapes) don't return empty.
+    today = latest_data_date(symbol) or date.today().isoformat()
     if days <= 1:
         # Intraday: show each snapshot as a separate column in the heatmap
         df = qdf(

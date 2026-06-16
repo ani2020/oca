@@ -102,25 +102,35 @@ def gamma_flip(strikes, net_gex, ref_price=None,
         if (g <= 0).all():
             return None, None, "all_negative"
         return None, None, "no_crossing"
-    i = sc[0]
-    denom = g[i + 1] - g[i]
-    flip = float(x[i]) if abs(denom) < 1e-12 else \
-        float(x[i] - g[i] * (x[i + 1] - x[i]) / denom)
-    nearest = float(x[int(np.argmin(np.abs(x - flip)))])
     ref = ref_price if ref_price is not None else x[int(len(x) // 2)]
+    # interpolated flip per crossing; pick the one NEAREST ref_price (not first)
+    def _interp(i):
+        d = g[i + 1] - g[i]
+        return float(x[i]) if abs(d) < 1e-12 else float(x[i] - g[i] * (x[i + 1] - x[i]) / d)
+    flips = [_interp(int(j)) for j in sc]
+    best = int(np.argmin([abs(f - ref) for f in flips]))
+    i = int(sc[best])
+    flip = flips[best]
+    nearest = float(x[int(np.argmin(np.abs(x - flip)))])
     gex_at_ref = float(g[int(np.argmin(np.abs(x - ref)))])
     regime = "positive" if gex_at_ref >= 0 else "negative"
     return round(flip, 2), nearest, regime
 
 
-def transition_width(strikes, net_gex) -> Optional[float]:
-    """Strike distance between last +gamma and first -gamma straddling the flip."""
+def transition_width(strikes, net_gex, ref_price=None) -> Optional[float]:
+    """Strike distance between the +/- gamma strikes straddling the flip.
+    Uses the crossing NEAREST ref_price (consistent with gamma_flip), not the first."""
     g = np.asarray(net_gex, float)
     x = np.asarray(strikes, float)
     sc = np.where(np.sign(g[:-1]) != np.sign(g[1:]))[0]
     if len(sc) == 0:
         return None
-    i = sc[0]
+    ref = ref_price if ref_price is not None else x[int(len(x) // 2)]
+    def _interp(i):
+        d = g[i + 1] - g[i]
+        return float(x[i]) if abs(d) < 1e-12 else float(x[i] - g[i] * (x[i + 1] - x[i]) / d)
+    best = int(np.argmin([abs(_interp(int(j)) - ref) for j in sc]))
+    i = int(sc[best])
     return float(abs(x[i + 1] - x[i]))
 
 

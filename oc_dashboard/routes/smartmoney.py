@@ -5,7 +5,7 @@ from typing import Any, Dict, Optional
 import numpy as np
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
-from ..db import qdf, tbl, safe_response, _safe
+from ..db import qdf, tbl, safe_response, _safe, latest_data_date
 from ..helpers import _smooth, _find_clusters, _match_clusters, _eod_df
 from .. import config
 
@@ -81,9 +81,13 @@ def smart_money_flow(
     min_prom_pct:    float         = Query(10.0),
     min_oi_change:   float         = Query(0),    # filter stale positions
 ):
-    today      = date.today().isoformat()
-    d_from     = date_from or (date.today() - timedelta(days=5)).isoformat()
-    d_to       = date_to   or today
+    # Anchor to the symbol's latest DATA date (not wall-clock) so stale-data
+    # days don't yield empty windows; widen the default lookback from that anchor.
+    _anchor_str = latest_data_date(symbol) or date.today().isoformat()
+    _anchor     = date.fromisoformat(_anchor_str)
+    today       = _anchor_str
+    d_from      = date_from or (_anchor - timedelta(days=5)).isoformat()
+    d_to        = date_to   or today
     exp_filter = "" if expiry == "all" else "AND expiry = ?"
     exp_params = [] if expiry == "all" else [expiry[:10]]
 
