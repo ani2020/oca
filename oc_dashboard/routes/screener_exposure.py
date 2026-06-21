@@ -14,8 +14,10 @@ router = APIRouter()
 try:
     import exposure_core as _core
     SIGNAL_INFO = _core.SIGNAL_INFO
+    METRIC_INFO = getattr(_core, "METRIC_INFO", {})
 except Exception:
     SIGNAL_INFO = {}
+    METRIC_INFO = {}
 
 
 def _exposure_table_exists() -> bool:
@@ -42,6 +44,17 @@ def exposure_screener_signals_meta():
         "signals": [
             {"key": k, "label": v[0], "description": v[1]}
             for k, v in SIGNAL_INFO.items()
+        ]
+    })
+
+
+@router.get("/api/exposure_screener/metrics_meta")
+def exposure_screener_metrics_meta():
+    """Column/metric help text (label, meaning, interpret) for th tooltips + GUIDE."""
+    return safe_response({
+        "metrics": [
+            {"key": k, "label": v[0], "meaning": v[1], "interpret": v[2]}
+            for k, v in METRIC_INFO.items()
         ]
     })
 

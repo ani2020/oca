@@ -142,6 +142,43 @@ def lopsidedness(net_gex) -> float:
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Basis (futures vs spot) — cash/futures positioning layer
+# ═══════════════════════════════════════════════════════════════════
+
+# Annualized basis beyond this (abs %) is treated as bad data (dividend/ex-date
+# distortion or stale stock future), not a real signal. Indices sit well inside
+# this (~5-7%); deep-negative single-stock outliers (-100%..-345% annualized seen
+# in real data) are clamped to None so they don't fire false basis signals.
+BASIS_ANNUAL_CLAMP = 60.0   # abs % — generous; only catches clear distortions
+
+
+def basis_metrics(fut_price, spot, dte):
+    """Basis between same-expiry future and spot.
+    Returns (basis, basis_pct, basis_annualized) — any element None if not meaningful.
+
+    Guards:
+      - fut_price == spot  → fallback (no real future captured) → all None
+      - spot <= 0          → undefined → all None
+      - basis_annualized only when dte is usable (>0); clamped to None when its
+        magnitude exceeds BASIS_ANNUAL_CLAMP (dividend/data distortion, esp. stocks).
+    """
+    if fut_price is None or spot is None or spot <= 0:
+        return None, None, None
+    # fallback sentinel: collector sets fut_price = spot when no matching future
+    if abs(float(fut_price) - float(spot)) < 1e-9:
+        return None, None, None
+    basis = float(fut_price) - float(spot)
+    basis_pct = basis / float(spot) * 100.0
+    basis_annualized = None
+    if dte is not None and dte > 0:
+        ann = basis_pct * 365.0 / float(dte)
+        # clamp obvious distortions (mostly single-stock dividend/data quirks)
+        if abs(ann) <= BASIS_ANNUAL_CLAMP:
+            basis_annualized = round(ann, 3)
+    return round(basis, 4), round(basis_pct, 4), basis_annualized
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Smoothing
 # ═══════════════════════════════════════════════════════════════════
 
@@ -257,4 +294,98 @@ SIGNAL_INFO = {
         "Negative gamma + negative PE vanna + FALLING IV — orderly downside grind / "
         "healthy pullback (vol being sold). Distinct from crash_risk: falling IV means "
         "controlled selling, not the disorderly vanna-feedback flush."),
+}
+
+
+# Column / metric help text for the exposure screener (directional-only).
+# Single source — exposed to the frontend via the meta endpoint.
+# {column_key: (label, meaning, interpret)}. No hard numeric thresholds yet
+# (history thin); add quantile bands later without changing structure.
+METRIC_INFO = {
+    "fut_price": ("FUT",
+        "Front-expiry futures price (Black-76 basis). All Greeks/flip computed on this.",
+        "Primary price reference. Spot (underlying) shown in tooltip; the basis "
+        "between them carries cost-of-carry + positioning."),
+    "gex_regime": ("REGIME",
+        "Net gamma sign at the strike nearest price (at-spot regime).",
+        "Positive = dealers long gamma, hedging DAMPENS moves (vol-suppression / pin). "
+        "Negative = dealers short gamma, hedging AMPLIFIES moves (vol-expansion risk)."),
+    "days_in_regime": ("DAYS",
+        "Consecutive sessions in the current gamma regime.",
+        "Higher = established / persistent regime. Just-flipped (low) = fresh, less "
+        "confirmed. Colour: green positive regime, red negative."),
+    "net_gex_sign": ("AGG",
+        "Sign of the aggregate (spot²-scaled) net gamma across the range.",
+        "Green + = aggregate positive, red - = aggregate negative. When AGG disagrees "
+        "with REGIME (local pin in a net-negative structure) the divergence is "
+        "informative — local suppression sitting inside broader amplification."),
+    "net_gex_norm": ("LOPSIDED",
+        "Net/gross gamma ratio in [-1, +1] (lopsidedness).",
+        "+1 = all positive gamma (pure vol-suppression), -1 = all negative (pure "
+        "amplification), near 0 = balanced / mixed regime. Sign = which gamma dominates; "
+        "magnitude = how dominant."),
+    "gamma_flip": ("γ FLIP",
+        "Gamma balance point — strike where net dealer gamma crosses zero.",
+        "Above flip = positive-gamma (pinning) zone; below = negative (amplifying), or "
+        "vice-versa per regime. The structural boundary price tends to gravitate to / "
+        "react around."),
+    "flip_velocity": ("FLIP Δ/d",
+        "Flip migration speed in points per calendar day (vs previous session).",
+        "Sign = direction of drift; larger magnitude = structure shifting faster. "
+        "Calendar-normalised so weekend gaps don't inflate it."),
+    "flip_norm_distance": ("FLIP DIST",
+        "Flip distance from price in expected-move units = (flip - fut) / expected_move.",
+        "|value| < 1 = flip within one expected move = LIVE, relevant boundary price "
+        "could cross. > 1 = distant, less relevant. Sign = flip above / below price."),
+    "transition_width_norm": ("TRANS W",
+        "Width of the gamma-flip transition zone, normalised.",
+        "Lower = sharper, well-defined flip (clean pin / abrupt regime boundary). "
+        "Higher = blurry, gradual transition (weak / uncertain boundary)."),
+    "neg_gamma_fraction": ("NEG γ%",
+        "Fraction of in-range strikes with negative net gamma.",
+        "Higher = broader amplification zone (more of the range is move-amplifying). "
+        "Rising day-over-day underlies the instability_widening signal."),
+    "pe_vanna": ("PE VANNA",
+        "Put-side vanna exposure (IV-sensitivity of delta), tracked independently.",
+        "Negative PE vanna under rising IV + negative gamma is the crash-feedback leg "
+        "(dealers sell into weakness). Never netted with CE vanna."),
+    "iv_change": ("IV Δ",
+        "Change in smoothed ATM implied vol vs previous session.",
+        "Rising IV with negative gamma = stress / crash setup; falling IV with negative "
+        "gamma = orderly pullback. The IV direction discriminates crash vs bear-reinforce."),
+    "basis_annualized": ("BASIS%",
+        "Annualized basis = (fut - spot)/spot × 365/dte. Cost-of-carry + positioning. "
+        "NULL when no future captured (fut==spot) or when distorted (dividend/data).",
+        "Positive = contango (futures premium, normal/bullish carry). Negative = "
+        "backwardation (futures discount — short pressure / borrow stress / event fear). "
+        "Indices clean; single-stock values noisy near dividends."),
+    "basis_chg": ("BASIS Δ",
+        "Change in annualized basis vs previous session.",
+        "Collapsing basis (large negative Δ) = carry unwinding / futures leading down — "
+        "confirms downside. Expanding = building long carry. Sign-flip "
+        "(contango→backwardation) is the cleanest standalone basis event."),
+    "oi_turnover_ratio": ("OI TURN",
+        "Session OI turnover = sum|OI change| / sum OI across in-range CE+PE.",
+        "Very low = stale / quiet book (distrust the metrics). Very high = thin OI, "
+        "unreliable. Mid-range = healthy active turnover. Indicator only — a data-quality "
+        "lens, not wired to signals."),
+    "regime_compression": ("COMPRESS",
+        "Coiling state — sustained tightening (narrowing transition + flip converging "
+        "+ flat/falling IV under positive gamma).",
+        "A LEADING setup that MAY precede vol expansion. Self-extinguishes on release — "
+        "act on it before it disappears. Badge shows consecutive coiling days."),
+    "compression_release": ("REL",
+        "Break day — compression ended WITH expansion (IV rising + regime flipping + "
+        "transition widening).",
+        "Confirms a real release into expansion (vs a quiet de-compression). The "
+        "'spring just sprang' marker."),
+    "confidence": ("CONF",
+        "Data-quality confidence in the row's metrics (driven by strike count / "
+        "in-range liquidity).",
+        "Low confidence = sparse / thin profile; treat the flip, regime and widths "
+        "with caution (few strikes can mislead the gamma read)."),
+    "next_day_realized_move": ("NEXT MOVE%",
+        "The actual next-session move % (forward outcome, where available).",
+        "Used to validate whether signals predicted the subsequent move. Blank for the "
+        "latest rows that have no next session yet."),
 }

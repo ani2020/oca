@@ -431,6 +431,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       oninput="filterOiSignals()" style="width:90px;font-size:10px;padding:2px 6px">
     <button class="btn sec" style="font-size:9px;padding:3px 8px"
       onclick="clearOiSigFilters()">CLEAR</button>
+    <button class="btn sec" style="font-size:9px" id="btnOiSigCsv" title="Download CSV">⬇ CSV</button>
   </div>
   <div class="card">
     <div class="card-title">BUILD-UP / COVERING SIGNALS
@@ -885,6 +886,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <span class="fl">MIN PREM %</span>
     <input type="number" id="divMinPrem" value="0.5" step="0.1" style="width:60px">
     <button class="btn" id="btnDiv">LOAD</button>
+    <button class="btn sec" style="font-size:9px" id="btnDivCsv" title="Download CSV">⬇ CSV</button>
   </div>
   <div class="card">
     <div class="card-title">DIVERGENCE SIGNALS <span class="badge">ranked by magnitude</span>
@@ -1058,6 +1060,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
         <input type="text" id="wallsSearch" placeholder="filter symbol…"
           oninput="filterTableBySymbol('oiWallsTable',this.value)"
           style="width:120px;font-size:10px;padding:3px 7px">
+        <button class="btn sec" style="font-size:9px;margin-left:6px" id="btnWallsCsv" title="Download CSV">⬇ CSV</button>
       </span>
     </div>
     <div class="tw" id="oiWallsTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
@@ -1096,6 +1099,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
            oninput="filterEsRows(this.value)">
     <button class="btn" id="btnEsLoad">LOAD</button>
     <button class="btn sec" style="font-size:9px" id="btnEsGuide">ⓘ GUIDE</button>
+    <button class="btn sec" style="font-size:9px" id="btnEsCsv" title="Download current view as CSV">⬇ CSV</button>
   </div>
 
   <div id="esGuide" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;

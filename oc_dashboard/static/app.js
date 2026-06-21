@@ -99,17 +99,67 @@ function populateSel(id,items){
 }
 function makeTbl(rows,cols){
   if(!rows||!rows.length)return'<div class="empty">No data</div>';
-  const heads=cols.map(c=>`<th onclick="sortTbl(this)">${typeof c==='string'?c:c.label}</th>`).join('');
+  const heads=cols.map(c=>{
+    if(typeof c==='string') return `<th onclick="sortTbl(this)">${c}</th>`;
+    const tip = c.help ? ` title="${String(c.help).replace(/"/g,'&quot;')}"` : '';
+    return `<th onclick="sortTbl(this)"${tip}>${c.label}</th>`;
+  }).join('');
   const keys=cols.map(c=>typeof c==='string'?c:c.key);
+  const labels=cols.map(c=>typeof c==='string'?c:c.label);
   const fmts=cols.map(c=>typeof c==='object'&&c.fmt?c.fmt:null);
   const svals=cols.map(c=>typeof c==='object'&&c.sortValue?c.sortValue:null);
+  // exportValue override → decoded value for CSV (signals→names, sign→pos/neg, raw nums)
+  const exps=cols.map(c=>typeof c==='object'&&c.exportValue?c.exportValue:null);
   const body=rows.map(r=>'<tr>'+keys.map((k,i)=>{
     const v=r[k];const cell=fmts[i]?fmts[i](v,r):(v==null?'—':v);
-    // optional explicit sort key (e.g. signal severity) so icon cells sort correctly
     const sv=svals[i]?` data-sort="${svals[i](v,r)}"`:'';
-    return`<td${sv}>${cell}</td>`;
+    // data-export: decoded value for CSV; default to raw v (not the formatted cell)
+    let ev = exps[i] ? exps[i](v,r) : (v==null?'':v);
+    ev = String(ev).replace(/"/g,'&quot;');
+    return`<td${sv} data-export="${ev}">${cell}</td>`;
   }).join('')+'</tr>').join('');
-  return`<table><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>`;
+  // stash column labels on the table for the CSV exporter (header row + order)
+  const hdr = labels.map(l=>String(l).replace(/"/g,'&quot;')).join('\u0001');
+  return`<table data-cols="${hdr}"><thead><tr>${heads}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+// ── CSV export (current filtered + sorted view, with headers) ──
+function exportTableCsv(tableEl, filename){
+  if(!tableEl){ return; }
+  const colHdr = tableEl.getAttribute('data-cols')||'';
+  const headers = colHdr ? colHdr.split('\u0001') : [];
+  const esc = s => {
+    s = (s==null) ? '' : String(s);
+    return /[",\n]/.test(s) ? '"'+s.replace(/"/g,'""')+'"' : s;
+  };
+  const lines = [];
+  if(headers.length) lines.push(headers.map(esc).join(','));
+  // only VISIBLE rows (respects ticker filter), in DOM order (respects sort)
+  tableEl.querySelectorAll('tbody tr').forEach(tr=>{
+    if(tr.style.display === 'none') return;
+    const cells = Array.from(tr.children).map(td=>{
+      let v = td.getAttribute('data-export');
+      if(v==null) v = td.textContent.trim();
+      return esc(v);
+    });
+    lines.push(cells.join(','));
+  });
+  const csv = '\ufeff' + lines.join('\r\n');   // BOM for Excel unicode (₹)
+  const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url; a.download = filename || 'export.csv';
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
+
+// Wire a CSV button: finds the table inside containerId, exports it
+function csvBtn(containerId, filenameFn){
+  const cont = document.getElementById(containerId);
+  const tbl = cont ? cont.querySelector('table') : null;
+  if(!tbl){ alert('No table to export'); return; }
+  const fn = (typeof filenameFn==='function') ? filenameFn() : (filenameFn||'export.csv');
+  exportTableCsv(tbl, fn);
 }
 function sortTbl(th){
   const tbl=th.closest('table');
@@ -2464,12 +2514,20 @@ function renderExposureFlow(d){
 wireToggleGroup('esViewGroup');
 document.getElementById('btnEsLoad')?.addEventListener('click', loadExposureScreener);
 document.getElementById('esViewGroup')?.addEventListener('click', ()=>setTimeout(loadExposureScreener,50));
+document.getElementById('btnEsCsv')?.addEventListener('click', ()=>csvBtn('esTable', ()=>{
+  const d=document.getElementById('esDate')?.value||new Date().toISOString().slice(0,10);
+  return 'exposure_screener_'+d+'.csv';
+}));
+document.getElementById('btnDivCsv')?.addEventListener('click', ()=>csvBtn('divTable', 'divergence_'+new Date().toISOString().slice(0,10)+'.csv'));
+document.getElementById('btnWallsCsv')?.addEventListener('click', ()=>csvBtn('oiWallsTable', 'oi_walls_'+new Date().toISOString().slice(0,10)+'.csv'));
+document.getElementById('btnOiSigCsv')?.addEventListener('click', ()=>csvBtn('oiSignalTable', 'oi_signals_'+new Date().toISOString().slice(0,10)+'.csv'));
 document.getElementById('btnEsGuide')?.addEventListener('click', ()=>{
   const g=document.getElementById('esGuide');
   g.style.display = g.style.display==='none' ? '' : 'none';
 });
 
 let _esInit = false;
+const _metricInfo = {};  // column key → {label, meaning, interpret} for th tooltips
 async function initExposureScreener(){
   if(_esInit) return;
   _esInit = true;
@@ -2485,8 +2543,20 @@ async function initExposureScreener(){
     (sm.signals||[]).forEach(s=>{
       ssel.innerHTML += `<option value="${s.key}">${s.label}</option>`;
     });
+    // Column/metric help — single source from exposure_core METRIC_INFO
+    let metricsHtml = '';
+    try{
+      const mm = await api('/api/exposure_screener/metrics_meta');
+      (mm.metrics||[]).forEach(m=>{ _metricInfo[m.key] = m; });
+      metricsHtml = '<br><b style="color:var(--text)">Column Reference:</b><br>' +
+        (mm.metrics||[]).map(m=>
+          `<b style="color:var(--acc)">${m.label}:</b> ${m.meaning} `+
+          `<span style="color:var(--muted)">→ ${m.interpret}</span>`
+        ).join('<br>');
+    }catch(e){ /* metrics_meta optional */ }
     guide.innerHTML = '<b style="color:var(--text)">Signal Guide:</b><br>' +
-      (sm.signals||[]).map(s=>`<b style="color:var(--acc)">${s.label}:</b> ${s.description}`).join('<br>');
+      (sm.signals||[]).map(s=>`<b style="color:var(--acc)">${s.label}:</b> ${s.description}`).join('<br>') +
+      metricsHtml;
   }catch(e){ /* table may not exist yet */ }
 }
 
@@ -2640,16 +2710,16 @@ function renderExposureScreener(d){
   const droppedCol = isDropped ? [
     {key:'prev_signals', label:'YDAY SIGNAL', fmt:v=>signalIcons(v), sortValue:v=>signalSeverityKey(v)},
   ] : [];
-  document.getElementById('esTable').innerHTML = makeTbl(rows, [
+  const esCols = [
     {key:'symbol',      label:'SYMBOL', fmt:(v)=>`<span style="cursor:pointer;color:var(--acc);font-weight:600"
                                         onclick="jumpGex('${v}')">${v}</span>`},
     ...droppedCol,
     // #9c: primary price = FUT (fut_price); spot shown in tooltip
-    {key:'fut_price',   label:'FUT',     fmt:(v,r)=>v!=null?`<span title="spot: ${r&&r.spot!=null?fmt(r.spot,1):'—'}">${fmt(v,1)}</span>`:'—'},
+    {key:'fut_price',   label:'FUT',     fmt:(v,r)=>v!=null?`<span title="spot: ${r&&r.spot!=null?fmt(r.spot,1):'—'}">${fmt(v,1)}</span>`:'—', exportValue:v=>v==null?'':v},
     {key:'gex_regime',  label:'REGIME',  fmt:(v,r)=>regimePillWithDays(v, r)},
     {key:'days_in_regime',label:'DAYS', fmt:(v,r)=>daysInRegimeBadge(v, r&&r.gex_regime)},
     // #9b: Agg Sign → colored +/- icon (consistent with regime)
-    {key:'net_gex_sign',label:'AGG',     fmt:v=>aggSignIcon(v)},
+    {key:'net_gex_sign',label:'AGG',     fmt:v=>aggSignIcon(v), exportValue:v=>v||''},
     {key:'net_gex_norm',label:'LOPSIDED', fmt:v=>v!=null?sspan(v,3):'—'},
     {key:'gamma_flip',  label:'γ FLIP',  fmt:v=>v!=null?fmt(v,0):'—'},
     {key:'flip_velocity',label:'FLIP Δ/d', fmt:v=>v!=null?sspan(v,1):'—'},
@@ -2658,14 +2728,19 @@ function renderExposureScreener(d){
     {key:'neg_gamma_fraction',label:'NEG γ%', fmt:v=>v!=null?fmt(v*100,0)+'%':'—'},
     {key:'pe_vanna',    label:'PE VANNA',fmt:v=>v!=null?sspan(v,0):'—'},
     {key:'iv_change',   label:'IV Δ',    fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'basis_annualized',label:'BASIS%',fmt:v=>v!=null?sspan(v,1):'—', exportValue:v=>v==null?'':v},
+    {key:'basis_chg',   label:'BASIS Δ', fmt:v=>v!=null?sspan(v,1):'—', exportValue:v=>v==null?'':v},
     {key:'regime_compression',label:'COMPRESS',fmt:(v,r)=>compressionBadge(v, r&&r.compression_days)},
     {key:'compression_release',label:'REL',fmt:v=>v?'<span title="compression release" style="color:var(--red);font-weight:600">⚡</span>':'—'},
     {key:'oi_turnover_ratio',label:'OI TURN',fmt:v=>turnoverBadge(v)},
     // #9a: Signals → icons (severity-sorted), sortValue drives column sort by urgency
-    {key:'signals',     label:'SIGNALS', fmt:v=>signalIcons(v), sortValue:v=>signalSeverityKey(v)},
+    {key:'signals',     label:'SIGNALS', fmt:v=>signalIcons(v), sortValue:v=>signalSeverityKey(v), exportValue:v=>v||''},
     {key:'confidence',  label:'CONF',    fmt:v=>confBadge(v)},
     {key:'next_day_realized_move',label:'NEXT MOVE%',fmt:v=>v!=null?sspan(v,2):'—'},
-  ]);
+  ];
+  // attach column help (meaning + interpret) as th tooltip from METRIC_INFO
+  esCols.forEach(c=>{ const m=_metricInfo[c.key]; if(m) c.help = m.meaning+' → '+m.interpret; });
+  document.getElementById('esTable').innerHTML = makeTbl(rows, esCols);
 }
 
 function regimePill(v){
