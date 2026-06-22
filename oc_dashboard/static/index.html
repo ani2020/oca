@@ -242,6 +242,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="nav-btn" data-view="trend">STRIKE TREND</button>
     <button class="nav-btn" data-view="delta">SCREENER</button>
     <button class="nav-btn" data-view="expscreen">EXPOSURE SCREENER</button>
+    <button class="nav-btn" data-view="history">HISTORY</button>
     <button class="nav-btn" data-view="settings">SETTINGS</button>
     <button class="nav-btn" data-view="vix">VIX</button>
     <button class="nav-btn" data-view="market">MARKET INFO</button>
@@ -1112,13 +1113,44 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   <div class="card">
     <div class="card-title">EXPOSURE SCREENER
       <span class="badge" id="esDateBadge"></span>
-      <span class="badge" style="margin-left:4px">click symbol → GEX</span>
+      <span class="badge" style="margin-left:4px">click symbol → HISTORY</span>
     </div>
     <div id="esSignalLegend" style="display:flex;flex-wrap:wrap;align-items:center;
        padding:6px 10px;margin-bottom:6px;background:var(--card);border:1px solid var(--border);
        border-radius:4px"></div>
     <div class="tw" id="esTable"><div class="empty">Select filters and click LOAD</div></div>
   </div>
+</div>
+
+<!-- ── HISTORY (Symbol Trend) view ───────────────────────────────── -->
+<div class="view" id="view-history">
+  <div class="filter-bar">
+    <button class="btn sec" id="btnHsBack" style="display:none;font-size:10px"
+            title="Return to the view you came from">← BACK</button>
+    <span class="fl">SYMBOL</span>
+    <select id="hsSymbol" style="min-width:140px"></select>
+    <span class="fl">FROM</span>
+    <input type="date" id="hsFrom" style="min-width:140px">
+    <span class="fl">TO</span>
+    <input type="date" id="hsTo" style="min-width:140px">
+    <div class="toggle-group" id="hsRangeGroup" style="margin-left:4px"
+         title="Quick window from the TO date">
+      <button data-days="7" class="active">7D</button>
+      <button data-days="14">14D</button>
+      <button data-days="30">30D</button>
+      <button data-days="0">MAX</button>
+    </div>
+    <button class="btn" id="btnHsLoad">LOAD</button>
+    <button class="btn sec" style="font-size:9px" id="btnHsGuide" title="Column reference">ⓘ GUIDE</button>
+    <button class="btn sec" style="font-size:9px" id="btnHsCsv" title="Download transposed history as CSV">⬇ CSV</button>
+  </div>
+
+  <div id="hsGuide" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;
+    background:var(--card);border:1px solid var(--border);font-family:var(--mono);
+    font-size:10px;color:var(--muted);line-height:1.7"></div>
+
+  <!-- Per-symbol blocks render here (list-of-blocks; length-1 today, N-ready) -->
+  <div id="hsBlocks"><div class="empty">Pick a symbol and click LOAD — or click any ticker elsewhere to jump here.</div></div>
 </div>
 
 <div class="view" id="view-market">

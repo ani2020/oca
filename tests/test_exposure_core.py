@@ -201,3 +201,111 @@ def test_confidence_levels():
     assert core.confidence(1000, 10, 0.3) == "high"
     assert core.confidence(1000, 5, 0.8) == "medium"
     assert core.confidence(0, 2, None) == "low"
+
+
+# ── basis dead-zone (history view + screener basis) ────────────────
+def test_basis_deadzone_noise_is_neutral():
+    # the -0.03 Jun-18 BANKINDIA closing-tick print → within dead-zone
+    assert core.basis_deadzone(-0.03) is True
+    assert core.basis_deadzone(0.05) is True
+
+def test_basis_deadzone_real_basis_outside():
+    assert core.basis_deadzone(0.5) is False
+    assert core.basis_deadzone(-1.2) is False
+
+def test_basis_deadzone_none_in_zone():
+    # no meaningful basis → treat as in-zone (neutral)
+    assert core.basis_deadzone(None) is True
+
+def test_basis_deadzone_configurable():
+    assert core.basis_deadzone(0.15, deadzone=0.2) is True
+    assert core.basis_deadzone(0.15, deadzone=0.1) is False
+
+
+# ── regime colour ramp (shared screener + history) ─────────────────
+def test_regime_color_ordered_ramp():
+    # stabilising → destabilising ordering
+    assert core.regime_color("all_positive")["order"] < core.regime_color("positive")["order"]
+    assert core.regime_color("positive")["order"] < core.regime_color("negative")["order"]
+    assert core.regime_color("negative")["order"] < core.regime_color("all_negative")["order"]
+
+def test_regime_color_unknown_fallback():
+    m = core.regime_color("nonsense")
+    assert m["order"] == 99 and m["label"] == ""
+
+def test_regime_color_has_hex():
+    assert core.regime_color("all_positive")["color"].startswith("#")
+
+
+# ── structural strength score ──────────────────────────────────────
+def _strong_pair():
+    """prev/curr where every axis improves → score +6."""
+    prev = {"net_gex_norm": 0.2, "neg_gamma_fraction": 0.4, "iv_change": None,
+            "atm_iv_smoothed": 25, "flip_norm_distance": 0.5,
+            "gex_regime": "positive", "transition_width_norm": 0.6}
+    curr = {"net_gex_norm": 0.5, "neg_gamma_fraction": 0.3, "iv_change": -1.0,
+            "flip_norm_distance": 0.9, "gex_regime": "positive",
+            "transition_width_norm": 0.5}
+    return prev, curr
+
+def test_strength_score_max_positive():
+    prev, curr = _strong_pair()
+    assert core.strength_score(curr, prev) == 6
+
+def test_strength_score_max_negative():
+    # mirror: every axis worsens → -6
+    prev = {"net_gex_norm": 0.5, "neg_gamma_fraction": 0.3, "iv_change": None,
+            "atm_iv_smoothed": 20, "flip_norm_distance": 0.9,
+            "gex_regime": "positive", "transition_width_norm": 0.5}
+    curr = {"net_gex_norm": 0.2, "neg_gamma_fraction": 0.4, "iv_change": 1.0,
+            "flip_norm_distance": 0.5, "gex_regime": "negative",
+            "transition_width_norm": 0.6}
+    assert core.strength_score(curr, prev) == -6
+
+def test_strength_score_range_bounded():
+    prev, curr = _strong_pair()
+    s = core.strength_score(curr, prev)
+    assert -6 <= s <= 6
+
+def test_strength_score_first_row_zero():
+    _, curr = _strong_pair()
+    assert core.strength_score(curr, None) == 0
+
+def test_strength_regime_change_costs_axis():
+    # identical except regime flips → regime axis = -1, others 0 → score -1
+    prev = {"gex_regime": "positive"}
+    curr = {"gex_regime": "negative"}
+    ax = core.strength_axes(curr, prev)
+    assert ax["regime"] == -1
+
+def test_strength_iv_falls_back_to_smoothed_atm():
+    # no iv_change → use atm_iv_smoothed delta
+    prev = {"atm_iv_smoothed": 25, "gex_regime": "positive"}
+    curr = {"atm_iv_smoothed": 23, "gex_regime": "positive"}  # IV falling → +1
+    ax = core.strength_axes(curr, prev)
+    assert ax["iv"] == 1
+
+def test_strength_flip_uses_absolute_distance():
+    # flip receding = |flip_norm_distance| increasing (sign-agnostic)
+    prev = {"flip_norm_distance": -0.4, "gex_regime": "positive"}
+    curr = {"flip_norm_distance": -0.8, "gex_regime": "positive"}  # |0.8|>|0.4| → +1
+    ax = core.strength_axes(curr, prev)
+    assert ax["flip"] == 1
+
+def test_strength_series_cumulative():
+    prev, curr = _strong_pair()
+    ser = core.strength_series([prev, curr])
+    assert ser[0]["strength_score"] == 0          # first row, no prior
+    assert ser[0]["strength_cumulative"] == 0
+    assert ser[1]["strength_score"] == 6
+    assert ser[1]["strength_cumulative"] == 6
+    # originals untouched (returns new dicts)
+    assert "strength_score" not in prev
+
+def test_strength_series_oscillating_nets_near_zero():
+    # noisy regime: alternating improve/worsen → cumulative stays small
+    a = {"net_gex_norm": 0.2, "gex_regime": "positive"}
+    b = {"net_gex_norm": 0.1, "gex_regime": "negative"}  # worsens
+    c = {"net_gex_norm": 0.2, "gex_regime": "positive"}  # improves back
+    ser = core.strength_series([a, b, c])
+    assert abs(ser[-1]["strength_cumulative"]) <= 2

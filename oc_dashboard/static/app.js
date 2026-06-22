@@ -220,6 +220,9 @@ document.querySelectorAll('.nav-btn').forEach(btn=>{
     document.querySelectorAll('.view').forEach(v=>v.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById('view-'+btn.dataset.view).classList.add('active');
+    // History opened directly via the top nav has no origin → hide BACK.
+    // (jumpHistory re-shows it right after its own .click() call.)
+    if(btn.dataset.view==='history' && typeof _hsShowBack==='function') _hsShowBack(null);
     if(!btn.dataset.init){
       btn.dataset.init='1';
       const fn=VIEW_INIT[btn.dataset.view];
@@ -1125,6 +1128,7 @@ document.getElementById('trendExpiry').addEventListener('change',()=>{loadAtmStr
 
 const VIEW_INIT={
   expscreen:()=>loadExposureScreener(),
+  history:()=>{ return initHistory(); },
   gex:()=>loadCascade('gexSymbol','gexExpiry','gexTimestamp'),
   oi:()=>{},
   iv:()=>loadCascade('ivSymbol','ivExpiry','ivTimestamp'),
@@ -2712,7 +2716,7 @@ function renderExposureScreener(d){
   ] : [];
   const esCols = [
     {key:'symbol',      label:'SYMBOL', fmt:(v)=>`<span style="cursor:pointer;color:var(--acc);font-weight:600"
-                                        onclick="jumpGex('${v}')">${v}</span>`},
+                                        onclick="jumpHistory('${v}')" title="Open trend history for ${v}">${v}</span>`},
     ...droppedCol,
     // #9c: primary price = FUT (fut_price); spot shown in tooltip
     {key:'fut_price',   label:'FUT',     fmt:(v,r)=>v!=null?`<span title="spot: ${r&&r.spot!=null?fmt(r.spot,1):'—'}">${fmt(v,1)}</span>`:'—', exportValue:v=>v==null?'':v},
@@ -2743,13 +2747,27 @@ function renderExposureScreener(d){
   document.getElementById('esTable').innerHTML = makeTbl(rows, esCols);
 }
 
-function regimePill(v){
-  const map={positive:'var(--green)',all_positive:'var(--green)',
-    negative:'var(--red)',all_negative:'var(--red)'};
-  const col=map[v]||'var(--muted)';
-  return `<span style="color:${col};font-family:var(--mono);font-size:10px">${(v||'').replace('_',' ')}</span>`;
+// ── Regime colour ramp (mirrors exposure_core.REGIME_COLOR_RAMP) ──
+// Ordered stabilising→destabilising. Word shown as tooltip on the box. Single
+// JS source so the exposure screener AND history view render identically.
+const REGIME_RAMP = {
+  all_positive:{color:'#0c8f4d',order:0,label:'all positive'},  // deep green
+  positive:    {color:'#10b981',order:1,label:'positive'},      // green
+  negative:    {color:'#f59e0b',order:2,label:'negative'},      // orange
+  all_negative:{color:'#dc2626',order:3,label:'all negative'},  // deep red
+};
+function regimeColor(v){ return (REGIME_RAMP[v]||{color:'var(--muted)',label:(v||'')}); }
+// Ordered colour box (the word is the tooltip, not the visible text).
+function regimeBox(v){
+  if(!v) return '—';
+  const m=regimeColor(v);
+  const txt=(v||'').replace('_',' ');
+  return `<span title="${txt}" style="display:inline-block;min-width:46px;text-align:center;
+    font-family:var(--mono);font-size:9px;font-weight:600;padding:2px 7px;border-radius:3px;
+    background:${m.color}22;color:${m.color};border:1px solid ${m.color}">${txt}</span>`;
 }
-function regimePillWithDays(v){ return regimePill(v); }
+function regimePill(v){ return regimeBox(v); }
+function regimePillWithDays(v){ return regimeBox(v); }
 
 // days_in_regime badge — green if positive regime, red if negative, intensity hints persistence
 function daysInRegimeBadge(days, regime){
@@ -2792,6 +2810,518 @@ function signalChips(v){
   }).join('');
 }
 
+
+
+// ════════════════════════════════════════════════════════════════════
+// HISTORY (Symbol Trend) view
+// Time-axis companion to the all-cross-sectional dashboard. Pick a symbol +
+// date range → see how its gamma structure evolved → "stabilising or noisy?".
+// Multi-symbol READY (length-1 today): data is symbol-keyed, chart builders take
+// arrays of series, layout is a list of symbol-blocks. v2 adds the 2nd selector.
+// ════════════════════════════════════════════════════════════════════
+
+const _hsMetricInfo = {};   // column key → {label, meaning, interpret}
+
+// Type-aware change map for the summary box. pct = % change (prices/levels),
+// delta = absolute Δ (bounded ratios — % of these is nonsense), state = first→last
+// transition with no number.
+const HS_CHANGE_TYPE = {
+  fut_price:'pct', spot:'pct', expected_move:'pct',
+  atm_iv_smoothed:'pct', atm_iv:'pct', basis_annualized:'pct',
+  net_gex_norm:'delta', flip_norm_distance:'delta', neg_gamma_fraction:'delta',
+  transition_width_norm:'delta', gamma_flip:'delta',
+  gex_regime:'state', confidence:'state',
+};
+
+// Strength axis labels (mirror exposure_core.strength_axes keys) for the tooltip.
+const HS_AXIS_LABEL = {
+  lopsided:'lopsided', neg_gamma:'neg-γ%', iv:'IV',
+  flip:'flip dist', regime:'regime', trans_w:'trans W',
+};
+
+let _hsInitPromise = null;
+function initHistory(){
+  // Return a SHARED promise so concurrent callers (nav click VIEW_INIT +
+  // jumpHistory) await the SAME completion instead of one short-circuiting on a
+  // half-set flag and finding the symbol dropdown still empty.
+  if(_hsInitPromise) return _hsInitPromise;
+  _hsInitPromise = (async ()=>{
+    try{
+      const ss = await api('/api/symbol_history/symbols');
+      const sel = document.getElementById('hsSymbol');
+      sel.innerHTML = (ss.symbols||[]).map(s=>`<option value="${s}">${s}</option>`).join('');
+    }catch(e){ /* table may not exist yet */ }
+    // Column reference guide (shared METRIC_INFO + strength_score)
+    try{
+      const mm = await api('/api/symbol_history/metrics_meta');
+      (mm.metrics||[]).forEach(m=>{ _hsMetricInfo[m.key]=m; });
+      const g = document.getElementById('hsGuide');
+      g.innerHTML = '<b style="color:var(--text)">Column Reference:</b><br>' +
+        (mm.metrics||[]).map(m=>
+          `<b style="color:var(--acc)">${m.label}:</b> ${m.meaning} `+
+          `<span style="color:var(--muted)">→ ${m.interpret}</span>`).join('<br>');
+    }catch(e){}
+    // Default TO = today, FROM = 7d back (overwritten by jumpHistory / data on load)
+    const to = document.getElementById('hsTo');
+    const from = document.getElementById('hsFrom');
+    if(to && !to.value){ to.value = new Date().toISOString().slice(0,10); }
+    if(from && !from.value){
+      const d=new Date(); d.setDate(d.getDate()-7);
+      from.value = d.toISOString().slice(0,10);
+    }
+  })();
+  return _hsInitPromise;
+}
+
+// Quick-range toggle: set FROM = TO − N days (N=0 → MAX, clear FROM)
+function _hsApplyQuickRange(days){
+  const to = document.getElementById('hsTo').value || new Date().toISOString().slice(0,10);
+  const from = document.getElementById('hsFrom');
+  if(!days){ from.value=''; return; }       // MAX
+  const d = new Date(to+'T00:00:00');
+  d.setDate(d.getDate()-days);
+  from.value = d.toISOString().slice(0,10);
+}
+
+async function loadHistory(){
+  await initHistory();
+  const sym  = document.getElementById('hsSymbol')?.value||'';
+  const from = document.getElementById('hsFrom')?.value||'';
+  const to   = document.getElementById('hsTo')?.value||'';
+  if(!sym){ document.getElementById('hsBlocks').innerHTML='<div class="empty">Select a symbol</div>'; return; }
+  document.getElementById('hsBlocks').innerHTML='<div class="loading"><div class="spinner"></div>Loading trend…</div>';
+  try{
+    const p = new URLSearchParams({symbol:sym});
+    if(from) p.set('date_from', from);
+    if(to)   p.set('date_to', to);
+    const data = await api(`/api/symbol_history?${p}`);
+    renderHistory(data);
+  }catch(e){
+    document.getElementById('hsBlocks').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
+  }
+}
+
+// ── Type-aware change for the summary box ──
+function _hsChange(metric, first, last){
+  const type = HS_CHANGE_TYPE[metric]||'delta';
+  if(first==null && last==null) return {txt:'—', cls:'neu'};
+  if(type==='state'){
+    const a=(first==null?'—':String(first).replace('_',' '));
+    const b=(last==null?'—':String(last).replace('_',' '));
+    if(a===b) return {txt:b, cls:'neu'};
+    return {txt:`${a} → ${b}`, cls:'neu'};
+  }
+  const fa=parseFloat(first), la=parseFloat(last);
+  if(isNaN(fa)||isNaN(la)) return {txt:'—', cls:'neu'};
+  if(type==='pct'){
+    if(fa===0) return {txt:'—', cls:'neu'};
+    const pc=(la-fa)/Math.abs(fa)*100;
+    const c=pc>0?'up':pc<0?'down':'neu';
+    return {txt:(pc>0?'+':'')+fmt(pc,1)+'%', cls:c};
+  }
+  // delta
+  const dv=la-fa;
+  const c=dv>0?'up':dv<0?'down':'neu';
+  return {txt:(dv>0?'+':'')+fmt(dv,3), cls:c};
+}
+
+// Strength-score colour (diverging green↔red around 0)
+function _hsScoreColor(s){
+  if(s==null||s===0) return 'var(--muted)';
+  if(s>0) return s>=4?'#0c8f4d':'var(--green)';
+  return s<=-4?'#dc2626':'var(--red)';
+}
+function _hsScoreCell(s, axes){
+  if(s==null) return '—';
+  const col=_hsScoreColor(s);
+  let tip='';
+  if(axes){ tip = Object.entries(axes).filter(([k,v])=>v!==0)
+      .map(([k,v])=>`${(v>0?'+':'')}${v} ${HS_AXIS_LABEL[k]||k}`).join(', ') || 'no change'; }
+  return `<span title="${tip}" style="font-family:var(--mono);font-weight:700;color:${col}">${s>0?'+':''}${s}</span>`;
+}
+
+// ── Summary box (per symbol) ──
+function _hsSummaryBox(sym, rows){
+  if(!rows.length) return '';
+  const first=rows[0], last=rows[rows.length-1];
+  const cumEnd = last.strength_cumulative;
+  const cumCol = _hsScoreColor(cumEnd>0?1:cumEnd<0?-1:0);
+  const range = `${first.date} → ${last.date}`;
+  // metrics to summarise in the box (label, key)
+  const items = [
+    ['FUT','fut_price'],['SPOT','spot'],['ATM IV','atm_iv_smoothed'],
+    ['LOPSIDED','net_gex_norm'],['FLIP DIST','flip_norm_distance'],
+    ['NEG γ%','neg_gamma_fraction'],['TRANS W','transition_width_norm'],
+    ['BASIS%','basis_annualized'],['REGIME','gex_regime'],['CONF','confidence'],
+  ];
+  const cells = items.map(([lbl,k])=>{
+    const ch=_hsChange(k, first[k], last[k]);
+    let fv = first[k], lv = last[k];
+    const isState = HS_CHANGE_TYPE[k]==='state';
+    const fvs = isState ? '' :
+      `<span style="color:var(--muted);font-size:9px">${fv==null?'—':(typeof fv==='number'?fmt(fv,2):fv)} →
+       ${lv==null?'—':(typeof lv==='number'?fmt(lv,2):lv)}</span>`;
+    return `<div style="min-width:120px;padding:6px 10px;border:1px solid var(--border);border-radius:4px;background:var(--surf)">
+      <div class="kpi-label">${lbl}</div>
+      <div class="kpi-val ${ch.cls}" style="font-size:13px">${ch.txt}</div>
+      ${fvs}</div>`;
+  }).join('');
+  return `<div class="card" style="margin-bottom:10px">
+    <div class="card-title">${sym} — STRUCTURAL TREND
+      <span class="badge" style="margin-left:6px">${range}</span>
+      <span class="badge" style="margin-left:4px;background:${cumCol};color:#fff"
+            title="Cumulative structural strength over the window (climbing = genuine multi-day strengthening; oscillating around 0 = noisy)">
+        STRENGTH Σ ${cumEnd>0?'+':''}${cumEnd}</span>
+      <span style="cursor:pointer;color:var(--acc);font-size:9px;margin-left:8px;font-family:var(--mono)"
+            onclick="jumpGex('${sym}')" title="Drill into the gamma snapshot at the latest date">→ GEX</span>
+    </div>
+    <div style="display:flex;flex-wrap:wrap;gap:8px">${cells}</div>
+    <div style="font-size:9px;color:var(--muted);margin-top:8px;font-family:var(--mono);line-height:1.5">
+      Strength describes the <b>regime</b>, not exogenous shocks — a structure can stabilise right into a gap.
+      Validate against NEXT MOVE% before any predictive read.</div>
+  </div>`;
+}
+
+// ── Charts (N-series-ready; one trace-set per symbol, N=1 today) ──
+// Each builder takes seriesList = [{sym, rows}, ...] and a target div id.
+const _HS_PALETTE = [C.acc, C.acc2, C.pur, C.green];
+
+function _hsX(rows){ return rows.map(r=>r.date); }
+
+function hsChartPriceFlip(seriesList, id){
+  const traces=[];
+  seriesList.forEach((s,si)=>{
+    const col=_HS_PALETTE[si%_HS_PALETTE.length];
+    const tag=seriesList.length>1?` ${s.sym}`:'';
+    traces.push({name:'FUT'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.fut_price),
+      type:'scatter',mode:'lines+markers',line:{color:col,width:2},marker:{size:5}});
+    traces.push({name:'SPOT'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.spot),
+      type:'scatter',mode:'lines',line:{color:col,width:1,dash:'dot'}});
+    traces.push({name:'γ FLIP'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.gamma_flip),
+      type:'scatter',mode:'lines+markers',line:{color:C.amber,width:1.5,dash:'dash'},marker:{size:4}});
+  });
+  plot(id,traces,{...LB,xaxis:{...LB.xaxis,title:''},yaxis:{...LB.yaxis,title:'Price / Flip'},
+    legend:{...LB.legend,orientation:'h',y:1.12}});
+}
+
+function hsChartIvLopsided(seriesList, id){
+  const traces=[];
+  seriesList.forEach((s,si)=>{
+    const tag=seriesList.length>1?` ${s.sym}`:'';
+    traces.push({name:'ATM IV'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.atm_iv_smoothed),
+      type:'scatter',mode:'lines+markers',line:{color:C.acc,width:2},marker:{size:5},yaxis:'y'});
+    traces.push({name:'LOPSIDED'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.net_gex_norm),
+      type:'scatter',mode:'lines+markers',line:{color:C.green,width:2},marker:{size:5},yaxis:'y2'});
+  });
+  plot(id,traces,{...LB,xaxis:{...LB.xaxis,title:''},
+    yaxis:{...LB.yaxis,title:'ATM IV (%)'},
+    yaxis2:{overlaying:'y',side:'right',title:'Lopsided',gridcolor:'transparent',
+      zerolinecolor:'#243550',tickfont:{size:9},range:[-1,1]},
+    legend:{...LB.legend,orientation:'h',y:1.12}});
+}
+
+function hsChartVanna(seriesList, id){
+  const traces=[];
+  seriesList.forEach((s,si)=>{
+    const tag=seriesList.length>1?` ${s.sym}`:'';
+    traces.push({name:'CE VANNA'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.ce_vanna),
+      type:'scatter',mode:'lines+markers',line:{color:C.green,width:2},marker:{size:5}});
+    traces.push({name:'PE VANNA'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.pe_vanna),
+      type:'scatter',mode:'lines+markers',line:{color:C.red,width:2},marker:{size:5}});
+  });
+  plot(id,traces,{...LB,xaxis:{...LB.xaxis,title:''},yaxis:{...LB.yaxis,title:'Vanna (never netted)'},
+    legend:{...LB.legend,orientation:'h',y:1.12}});
+}
+
+function hsChartNegGamma(seriesList, id){
+  const traces=[];
+  seriesList.forEach((s,si)=>{
+    const col=_HS_PALETTE[si%_HS_PALETTE.length];
+    const tag=seriesList.length>1?` ${s.sym}`:'';
+    traces.push({name:'NEG γ%'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.neg_gamma_fraction!=null?r.neg_gamma_fraction*100:null),
+      type:'scatter',mode:'lines',fill:'tozeroy',line:{color:C.red,width:1.5},
+      fillcolor:'rgba(244,63,94,0.15)'});
+  });
+  plot(id,traces,{...LB,xaxis:{...LB.xaxis,title:''},yaxis:{...LB.yaxis,title:'Neg-γ fraction (%)',rangemode:'tozero'}});
+}
+
+function hsChartBasis(seriesList, id){
+  const traces=[];
+  let anyData=false;
+  seriesList.forEach((s,si)=>{
+    const tag=seriesList.length>1?` ${s.sym}`:'';
+    // dead-zoned: render in-zone points muted so noise doesn't look like a real basis
+    const ba=s.rows.map(r=>r.basis_annualized);
+    if(ba.some(v=>v!=null)) anyData=true;
+    traces.push({name:'BASIS%'+tag,x:_hsX(s.rows),y:ba,
+      type:'scatter',mode:'lines+markers',line:{color:C.acc2,width:2},
+      marker:{size:s.rows.map(r=>r.basis_in_deadzone?4:7),
+              color:s.rows.map(r=>r.basis_in_deadzone?'var(--muted)':C.acc2),
+              symbol:s.rows.map(r=>r.basis_in_deadzone?'circle-open':'circle')}});
+    traces.push({name:'BASIS Δ'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.basis_chg),
+      type:'bar',marker:{color:'rgba(139,92,246,0.4)'},yaxis:'y2'});
+  });
+  plot(id,traces,{...LB,xaxis:{...LB.xaxis,title:''},
+    yaxis:{...LB.yaxis,title:'Annualized basis (%)'},
+    yaxis2:{overlaying:'y',side:'right',title:'Basis Δ',gridcolor:'transparent',
+      zerolinecolor:'#243550',tickfont:{size:9}},
+    legend:{...LB.legend,orientation:'h',y:1.12}});
+  if(!anyData){ setEmpty(id,'No meaningful basis in window (fut==spot or dead-zoned)'); }
+}
+
+function hsChartRealized(seriesList, id){
+  const traces=[];
+  seriesList.forEach((s,si)=>{
+    const tag=seriesList.length>1?` ${s.sym}`:'';
+    traces.push({name:'NEXT MOVE%'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.next_day_realized_move),
+      type:'bar',marker:{color:s.rows.map(r=>{
+        const v=r.next_day_realized_move; return v==null?'var(--muted)':v>=0?C.green:C.red;})}});
+  });
+  plot(id,traces,{...LB,xaxis:{...LB.xaxis,title:''},yaxis:{...LB.yaxis,title:'Next-day realized move (%)'}});
+}
+
+function hsChartStrength(seriesList, id){
+  const traces=[];
+  seriesList.forEach((s,si)=>{
+    const col=_HS_PALETTE[si%_HS_PALETTE.length];
+    const tag=seriesList.length>1?` ${s.sym}`:'';
+    // per-day score as bars, cumulative as a line (the headline trajectory)
+    traces.push({name:'DAY SCORE'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.strength_score),
+      type:'bar',marker:{color:s.rows.map(r=>_hsScoreColor(r.strength_score))},yaxis:'y'});
+    traces.push({name:'CUMULATIVE'+tag,x:_hsX(s.rows),y:s.rows.map(r=>r.strength_cumulative),
+      type:'scatter',mode:'lines+markers',line:{color:col,width:2.5},marker:{size:5},yaxis:'y2'});
+  });
+  plot(id,traces,{...LB,xaxis:{...LB.xaxis,title:''},
+    yaxis:{...LB.yaxis,title:'Day score',range:[-6.5,6.5]},
+    yaxis2:{overlaying:'y',side:'right',title:'Cumulative',gridcolor:'transparent',
+      zerolinecolor:'#243550',tickfont:{size:9}},
+    legend:{...LB.legend,orientation:'h',y:1.12}});
+}
+
+// ── Transposed table: dates = columns, metrics = rows ──
+// Section structure mirrors the CSV / spec. Each metric row is a fmt function.
+const _HS_TABLE_SECTIONS = [
+  ['PRICE / STRUCTURE', [
+    ['FUT','fut_price', (v)=>v!=null?fmt(v,1):'—'],
+    ['SPOT','spot', (v)=>v!=null?fmt(v,1):'—'],
+    ['γ FLIP','gamma_flip', (v)=>v!=null?fmt(v,0):'—'],
+    ['FLIP DIST','flip_norm_distance', (v)=>v!=null?sspan(v,2):'—'],
+    ['EXP MOVE','expected_move', (v)=>v!=null?fmt(v,1):'—'],
+  ]],
+  ['REGIME', [
+    ['REGIME','gex_regime', (v)=>regimeBox(v)],
+    ['LOPSIDED','net_gex_norm', (v)=>v!=null?sspan(v,3):'—'],
+    ['NEG γ%','neg_gamma_fraction', (v)=>v!=null?fmt(v*100,0)+'%':'—'],
+    ['TRANS W','transition_width_norm', (v)=>v!=null?fmt(v,2):'—'],
+    ['DAYS','days_in_regime', (v,r)=>daysInRegimeBadge(v, r&&r.gex_regime)],
+    ['STRENGTH','strength_score', (v,r)=>_hsScoreCell(v, r&&r.strength_axes)],
+  ]],
+  ['VOL', [
+    ['ATM IV','atm_iv_smoothed', (v)=>v!=null?fmt(v,2):'—'],
+    ['IV Δ','iv_change', (v)=>v!=null?sspan(v,2):'—'],
+    ['CE VANNA','ce_vanna', (v)=>v!=null?sspan(v,0):'—'],
+    ['PE VANNA','pe_vanna', (v)=>v!=null?sspan(v,0):'—'],
+  ]],
+  ['BASIS', [
+    ['BASIS%','basis_annualized', (v,r)=> v==null?'—':(r&&r.basis_in_deadzone?
+      `<span title="within tick-size dead-zone — treated as flat" style="color:var(--muted)">${fmt(v,1)}</span>`
+      :sspan(v,1))],
+    ['BASIS Δ','basis_chg', (v,r)=> v==null?'—':(r&&!r.basis_chg_emphasis?
+      `<span style="color:var(--muted)">${fmt(v,1)}</span>`:sspan(v,1))],
+  ]],
+  ['SIGNALS', [
+    ['SIGNALS','signals', (v)=>signalIcons(v)],
+    ['CONF','confidence', (v)=>confBadge(v)],
+  ]],
+  ['OUTCOME', [
+    ['NEXT MOVE%','next_day_realized_move', (v)=>v!=null?sspan(v,2):'—'],
+  ]],
+];
+
+function _hsTransposedTable(rows){
+  if(!rows.length) return '<div class="empty">No data in window</div>';
+  const dates=rows.map(r=>r.date);
+  const nd = dates.length;
+  // Date columns share the remaining width evenly; METRIC label is a fixed
+  // left column. With ≤ ~18 dates this fits the full-width card without
+  // horizontal scroll; beyond that the .tw wrapper scrolls gracefully.
+  const datePct = nd ? (88/nd).toFixed(3) : 88;
+  // header row: metric label cell + one column per date (CSV header order)
+  const csvHdr = ['METRIC', ...dates].map(s=>String(s).replace(/"/g,'&quot;')).join('\u0001');
+  const head = '<th onclick="sortTbl(this)" style="text-align:left;position:sticky;left:0;'
+    + 'background:var(--card);width:12%;min-width:90px;z-index:2">METRIC</th>'
+    + dates.map(d=>`<th style="text-align:center;width:${datePct}%;min-width:42px">${d.slice(5)}</th>`).join('');
+  let body='';
+  _HS_TABLE_SECTIONS.forEach(([section, metrics])=>{
+    body += `<tr><td colspan="${nd+1}" style="background:var(--surf);color:var(--acc);
+      font-size:9px;letter-spacing:.08em;font-weight:600;padding:4px 8px">${section}</td></tr>`;
+    metrics.forEach(([lbl,key,fn])=>{
+      const cells = rows.map(r=>{
+        const cell = fn(r[key], r);
+        let ev = r[key]; ev = (ev==null?'':String(ev)).replace(/"/g,'&quot;');
+        return `<td data-export="${ev}" style="text-align:center;white-space:nowrap">${cell}</td>`;
+      }).join('');
+      const tip=_hsMetricInfo[key]?` title="${(_hsMetricInfo[key].meaning+' → '+_hsMetricInfo[key].interpret).replace(/"/g,'&quot;')}"`:'';
+      body += `<tr><td${tip} style="text-align:left;position:sticky;left:0;background:var(--card);
+        color:var(--muted);font-weight:600;z-index:1">${lbl}</td>${cells}</tr>`;
+    });
+  });
+  return `<table style="width:100%;table-layout:fixed" data-cols="${csvHdr}">`
+    + `<thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+}
+
+// ── Per-symbol block (summary + charts + table). List-of-blocks renderer. ──
+function renderHistory(data){
+  const syms = data.symbols||[];
+  const series = data.series||{};
+  const cont = document.getElementById('hsBlocks');
+  const haveData = syms.some(s=>(series[s]||[]).length);
+  if(!haveData){
+    cont.innerHTML=`<div class="empty">No history for ${syms.join(', ')} in
+      ${data.date_from||'?'} → ${data.date_to||'?'}</div>`;
+    return;
+  }
+  // Build container DOM first (charts need their divs to exist before plot()).
+  cont.innerHTML = syms.map(sym=>{
+    const rows = series[sym]||[];
+    if(!rows.length) return `<div class="card" style="margin-bottom:10px"><div class="empty">No data for ${sym}</div></div>`;
+    const sx = sym.replace(/[^A-Za-z0-9]/g,'');
+    return _hsSummaryBox(sym, rows) +
+      `<div class="g2" style="margin-bottom:10px">
+        <div class="card"><div class="card-title">PRICE + γ FLIP</div><div class="chart" id="hsc_price_${sx}"></div></div>
+        <div class="card"><div class="card-title">ATM IV + LOPSIDED</div><div class="chart" id="hsc_iv_${sx}"></div></div>
+       </div>
+       <div class="g2" style="margin-bottom:10px">
+        <div class="card"><div class="card-title">CE / PE VANNA (never netted)</div><div class="chart" id="hsc_vanna_${sx}"></div></div>
+        <div class="card"><div class="card-title">NEG-γ FRACTION</div><div class="chart" id="hsc_neg_${sx}"></div></div>
+       </div>
+       <div class="g2" style="margin-bottom:10px">
+        <div class="card"><div class="card-title">STRUCTURAL STRENGTH (day + cumulative)</div><div class="chart" id="hsc_str_${sx}"></div></div>
+        <div class="card"><div class="card-title">BASIS (annualized + Δ, dead-zoned)</div><div class="chart" id="hsc_basis_${sx}"></div></div>
+       </div>
+       <div class="card" style="margin-bottom:10px">
+         <div class="card-title">NEXT-DAY REALIZED MOVE (validation lens)</div>
+         <div class="chart" id="hsc_real_${sx}"></div>
+       </div>
+       <div class="card" style="margin-bottom:14px">
+         <div class="card-title">HISTORY TABLE (metrics × dates)
+           <span class="badge" style="margin-left:6px">${rows.length} session(s)</span>
+         </div>
+         <div class="tw" style="max-height:none" id="hsTable_${sx}"></div>
+       </div>`;
+  }).join('');
+  // Now render charts + table per symbol (single-series arrays; N-ready signature).
+  syms.forEach(sym=>{
+    const rows = series[sym]||[];
+    if(!rows.length) return;
+    const sx = sym.replace(/[^A-Za-z0-9]/g,'');
+    const sl=[{sym, rows}];
+    hsChartPriceFlip(sl, `hsc_price_${sx}`);
+    hsChartIvLopsided(sl, `hsc_iv_${sx}`);
+    hsChartVanna(sl, `hsc_vanna_${sx}`);
+    hsChartNegGamma(sl, `hsc_neg_${sx}`);
+    hsChartStrength(sl, `hsc_str_${sx}`);
+    hsChartBasis(sl, `hsc_basis_${sx}`);
+    hsChartRealized(sl, `hsc_real_${sx}`);
+    document.getElementById(`hsTable_${sx}`).innerHTML = _hsTransposedTable(rows);
+  });
+}
+
+// ── Nav: jump from any symbol click → History (replaces jumpGex as default) ──
+// Auto: select symbol, TO = current exposure-screener date (or latest), FROM = TO−7d,
+// switch to History, auto-load.
+// Remembers where the user jumped INTO History from, so the BACK button can
+// return there (views are class-toggled, not routed — browser back won't work).
+let _hsBackTo = null;   // {view, label}
+const _VIEW_LABELS = { expscreen:'EXPOSURE SCREENER', overview:'OVERVIEW',
+  gex:'GEX', oi:'OI', iv:'IV', flow:'FLOW', dropped:'EXPOSURE SCREENER' };
+
+function _hsShowBack(view){
+  _hsBackTo = view ? { view, label:(_VIEW_LABELS[view]||view.toUpperCase()) } : null;
+  const b = document.getElementById('btnHsBack');
+  if(!b) return;
+  if(_hsBackTo){
+    b.textContent = `← ${_hsBackTo.label}`;
+    b.style.display = '';
+  } else {
+    b.style.display = 'none';
+  }
+}
+
+function goBackFromHistory(){
+  const target = _hsBackTo && _hsBackTo.view;
+  if(!target){ return; }
+  // Switch back to the originating view. Its state (screener date/filters/table)
+  // is preserved because views are toggled, never re-rendered.
+  const btn = document.querySelector(`[data-view="${target}"]`);
+  if(btn) btn.click();
+}
+
+function jumpHistory(sym){
+  // Capture the screener's selected date BEFORE switching views (read it now so
+  // there's no dependency on DOM ordering later).
+  const esDate = document.getElementById('esDate')?.value || '';
+  // Remember the currently-active view so BACK can return to it.
+  const origin = document.querySelector('.nav-btn.active')?.dataset.view || 'expscreen';
+  document.querySelector('[data-view="history"]').click();
+  _hsShowBack(origin);
+  // Await the SHARED init promise (symbol dropdown + metric meta) so the symbol
+  // option exists before we select it — then set symbol + dates and load.
+  initHistory().then(async ()=>{
+    const sel = document.getElementById('hsSymbol');
+    if(sel){
+      if(![...sel.options].some(o=>o.value===sym)){
+        // symbol not in the list (e.g. dropped from latest scan) → add it so the
+        // jump still works
+        sel.insertAdjacentHTML('afterbegin', `<option value="${sym}">${sym}</option>`);
+      }
+      sel.value = sym;
+    }
+    // anchor TO on the screener date if present, else the symbol's latest data date
+    let toVal = esDate;
+    if(!toVal){
+      try{ const dd = await api(`/api/symbol_history/dates?symbol=${encodeURIComponent(sym)}`);
+           toVal = (dd.dates||[])[0] || ''; }catch(e){}
+    }
+    const to = document.getElementById('hsTo'), from = document.getElementById('hsFrom');
+    if(toVal){
+      to.value = toVal.slice(0,10);
+      // honour the active quick-range toggle (default 7D) for the FROM anchor
+      const days = parseInt(document.querySelector('#hsRangeGroup .active')?.dataset.days || '7', 10);
+      if(days){
+        const d = new Date(to.value+'T00:00:00'); d.setDate(d.getDate()-days);
+        from.value = d.toISOString().slice(0,10);
+      } else {
+        from.value = '';   // MAX
+      }
+    }
+    loadHistory();
+  });
+}
+
+// ── History event wiring ──
+document.getElementById('btnHsBack')?.addEventListener('click', goBackFromHistory);
+document.getElementById('btnHsLoad')?.addEventListener('click', loadHistory);
+document.getElementById('hsSymbol')?.addEventListener('change', loadHistory);
+document.getElementById('btnHsGuide')?.addEventListener('click', ()=>{
+  const g=document.getElementById('hsGuide');
+  g.style.display = g.style.display==='none' ? '' : 'none';
+});
+document.getElementById('hsRangeGroup')?.addEventListener('click', e=>{
+  const b=e.target.closest('button'); if(!b) return;
+  document.querySelectorAll('#hsRangeGroup button').forEach(x=>x.classList.remove('active'));
+  b.classList.add('active');
+  _hsApplyQuickRange(parseInt(b.dataset.days,10));
+});
+// CSV: export the FIRST symbol's transposed table (N=1 today). Per-block button
+// could be added in v2 when multiple symbols render.
+document.getElementById('btnHsCsv')?.addEventListener('click', ()=>{
+  const tbl=document.querySelector('#hsBlocks table');
+  if(!tbl){ alert('Load a symbol first'); return; }
+  const sym=document.getElementById('hsSymbol')?.value||'symbol';
+  const to=document.getElementById('hsTo')?.value||new Date().toISOString().slice(0,10);
+  exportTableCsv(tbl, `history_${sym}_${to}.csv`);
+});
 
 
 // ── Overview meta: snapshot timestamp badge + recent-signals strip (#1,#3) ──

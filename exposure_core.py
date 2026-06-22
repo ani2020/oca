@@ -178,6 +178,48 @@ def basis_metrics(fut_price, spot, dte):
     return round(basis, 4), round(basis_pct, 4), basis_annualized
 
 
+# Below this |basis_pct| (≈ tick-size noise on the 15:30 LTP snapshot), treat the
+# basis as flat/neutral — NOT contango/backwardation. A near-zero closing-tick
+# print (e.g. the −0.03 Jun-18 BANKINDIA basis) must not render as a dramatic
+# contango→backwardation flip. Interpretation-side only; does not touch stored data.
+BASIS_DEADZONE_PCT = 0.1   # abs % of spot
+
+
+def basis_deadzone(basis_pct, deadzone: float = BASIS_DEADZONE_PCT) -> bool:
+    """True when |basis_pct| is within the dead-zone (tick-size noise → treat as
+    neutral/zero). None basis_pct is treated as in-zone (no meaningful basis).
+    Pure predicate — callers decide how to neutralise (suppress sign-flip emphasis,
+    render as flat). Single-sourced so the screener and history view agree."""
+    if basis_pct is None:
+        return True
+    try:
+        return abs(float(basis_pct)) < deadzone
+    except (TypeError, ValueError):
+        return True
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Regime colour ramp (single source — shared by screener + history)
+# ═══════════════════════════════════════════════════════════════════
+# Ordered stabilising → destabilising ramp. Consistent with the existing
+# red = amplification / danger convention. Chosen over green/blue/red because the
+# ramp is visually ORDERED (a 4-step gradient), and avoids blue clashing with the
+# red=danger semantics used elsewhere. `order` lets the UI sort/interpolate; the
+# words remain available as tooltips on the colour box.
+REGIME_COLOR_RAMP = {
+    "all_positive": {"color": "#0c8f4d", "order": 0, "label": "all positive"},   # deep green
+    "positive":     {"color": "#10b981", "order": 1, "label": "positive"},        # green
+    "negative":     {"color": "#f59e0b", "order": 2, "label": "negative"},        # orange
+    "all_negative": {"color": "#dc2626", "order": 3, "label": "all negative"},    # deep red
+}
+REGIME_COLOR_FALLBACK = {"color": "#3d5270", "order": 99, "label": ""}  # muted / unknown
+
+
+def regime_color(regime: Optional[str]) -> Dict[str, Any]:
+    """Return {color, order, label} for a gex_regime word. Unknown → muted fallback."""
+    return REGIME_COLOR_RAMP.get(regime or "", REGIME_COLOR_FALLBACK)
+
+
 # ═══════════════════════════════════════════════════════════════════
 # Smoothing
 # ═══════════════════════════════════════════════════════════════════
@@ -267,6 +309,119 @@ def confidence(total_oi: float, n_strikes: int, tw_norm: Optional[float]) -> str
     if n_strikes >= 4:
         return "medium"
     return "low"
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Structural Strength Score (history view differentiator)
+# ═══════════════════════════════════════════════════════════════════
+# Per-day, day-over-day descriptive heuristic. Six independent-ish axes, +1/−1
+# each, range [−6, +6]. "+" = structure stabilising (regime building), "−" =
+# destabilising. The CUMULATIVE running sum over the window is the headline
+# "building vs deteriorating" number.
+#
+# DISCIPLINE — this describes the *regime*, NOT an exogenous-shock forecast.
+# BANKINDIA stabilised structurally into the Jun-19 crash; a high score did not
+# predict the gap. Validate against next_day_realized_move before any predictive
+# claim. The six axes:
+#   1. lopsided (net_gex_norm) more positive  → +1 / more negative → −1
+#   2. neg_gamma_fraction shrinking            → +1 / expanding     → −1
+#   3. atm_iv_smoothed falling (iv_change<0)   → +1 / rising        → −1
+#   4. flip receding (|flip_norm_distance| ↑)  → +1 / approaching   → −1
+#   5. regime unchanged                        → +1 / changed       → −1
+#   6. transition_width_norm narrowing         → +1 / widening      → −1
+#
+# EXCLUDED on purpose:
+#   - realized-move shrinking → forward-outcome leak (validate AGAINST it, don't
+#     bake it in).
+#   - basis → stock-noisy in v1; revisit once dead-zoned basis history is trusted.
+#
+# OVERLAP NOTE: axes 1 (lopsided) and 5 (regime unchanged) partly co-capture
+# regime persistence — intentional emphasis on persistence, not 6 fully
+# orthogonal axes. Axis 6 (transition_width) was added precisely because it is
+# more independent of the regime/lopsided pair.
+
+STRENGTH_EPS = 1e-9  # treat |delta| below this as "no change" (0 contribution)
+
+
+def strength_axes(curr: Dict, prev: Optional[Dict]) -> Dict[str, int]:
+    """Per-axis ±1/0 contributions for one day vs the previous row.
+    First row of a window (prev is None) → all zeros (no day-over-day basis)."""
+    ax = {"lopsided": 0, "neg_gamma": 0, "iv": 0, "flip": 0,
+          "regime": 0, "trans_w": 0}
+    if not prev:
+        return ax
+
+    def _f(d, k):
+        v = d.get(k)
+        try:
+            return None if v is None else float(v)
+        except (TypeError, ValueError):
+            return None
+
+    # 1. lopsided improving (more positive) / reducing (more negative)
+    a, b = _f(curr, "net_gex_norm"), _f(prev, "net_gex_norm")
+    if a is not None and b is not None and abs(a - b) > STRENGTH_EPS:
+        ax["lopsided"] = 1 if a > b else -1
+
+    # 2. neg_gamma_fraction shrinking (good) / expanding (bad)
+    a, b = _f(curr, "neg_gamma_fraction"), _f(prev, "neg_gamma_fraction")
+    if a is not None and b is not None and abs(a - b) > STRENGTH_EPS:
+        ax["neg_gamma"] = 1 if a < b else -1
+
+    # 3. IV falling (good) / rising (bad). Prefer stored iv_change; fall back to
+    #    smoothed-ATM delta so the score still works on windows lacking iv_change.
+    ivc = _f(curr, "iv_change")
+    if ivc is None:
+        a, b = _f(curr, "atm_iv_smoothed"), _f(prev, "atm_iv_smoothed")
+        ivc = (a - b) if (a is not None and b is not None) else None
+    if ivc is not None and abs(ivc) > STRENGTH_EPS:
+        ax["iv"] = 1 if ivc < 0 else -1
+
+    # 4. flip receding (|flip_norm_distance| increasing) / moving closer
+    a, b = _f(curr, "flip_norm_distance"), _f(prev, "flip_norm_distance")
+    if a is not None and b is not None and abs(abs(a) - abs(b)) > STRENGTH_EPS:
+        ax["flip"] = 1 if abs(a) > abs(b) else -1
+
+    # 5. regime unchanged (good) / changed (bad)
+    rc, rp = curr.get("gex_regime"), prev.get("gex_regime")
+    if rc is not None and rp is not None:
+        ax["regime"] = 1 if rc == rp else -1
+
+    # 6. transition_width narrowing (good) / widening (bad)
+    a, b = _f(curr, "transition_width_norm"), _f(prev, "transition_width_norm")
+    if a is not None and b is not None and abs(a - b) > STRENGTH_EPS:
+        ax["trans_w"] = 1 if a < b else -1
+
+    return ax
+
+
+def strength_score(curr: Dict, prev: Optional[Dict]) -> int:
+    """Net per-day structural strength score in [-6, +6] (sum of strength_axes)."""
+    return int(sum(strength_axes(curr, prev).values()))
+
+
+def strength_series(rows: List[Dict]) -> List[Dict]:
+    """Annotate a date-ordered list of exposure_eod row-dicts with per-day score,
+    its axis breakdown, and the cumulative running sum. Returns NEW dicts (does
+    not mutate inputs) carrying the originals plus:
+        strength_score          int  in [-6, +6]  (0 on first row)
+        strength_axes           dict the per-axis ±1/0 contributions
+        strength_cumulative     int  running sum from the window start
+    Pure — frontend just renders. rows MUST be ascending by date."""
+    out: List[Dict] = []
+    prev: Optional[Dict] = None
+    cum = 0
+    for r in rows:
+        axes = strength_axes(r, prev)
+        sc = int(sum(axes.values()))
+        cum += sc
+        nr = dict(r)
+        nr["strength_score"] = sc
+        nr["strength_axes"] = axes
+        nr["strength_cumulative"] = cum
+        out.append(nr)
+        prev = r
+    return out
 
 
 # Signal metadata for UI / docs (single source of truth)
@@ -388,4 +543,11 @@ METRIC_INFO = {
         "The actual next-session move % (forward outcome, where available).",
         "Used to validate whether signals predicted the subsequent move. Blank for the "
         "latest rows that have no next session yet."),
+    "strength_score": ("STRENGTH",
+        "Per-day structural strength score in [-6, +6] (day-over-day across 6 axes: "
+        "lopsided, neg-gamma%, IV, flip distance, regime persistence, transition width).",
+        "Positive = structure stabilising (regime building); negative = destabilising. "
+        "The CUMULATIVE sum over the window is the headline 'building vs deteriorating' "
+        "number — climbing steadily = genuine multi-day strengthening; oscillating around "
+        "0 = noisy. Descriptive of the REGIME, not an exogenous-shock forecast."),
 }

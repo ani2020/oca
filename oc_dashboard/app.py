@@ -32,6 +32,7 @@ from .nse import init_nse_fetcher
 from .routes import (
     meta, overview, gex, oi, iv, screener, shockers,
     divergence, flow, smartmoney, exposure, screener_exposure, market, icici,
+    symbol_history,
 )
 
 
@@ -114,6 +115,7 @@ app.include_router(flow.router, tags=["flow"])
 app.include_router(smartmoney.router, tags=["smartmoney"])
 app.include_router(exposure.router, tags=["exposure"])
 app.include_router(screener_exposure.router, tags=["exposure_screener"])
+app.include_router(symbol_history.router, tags=["symbol_history"])
 app.include_router(market.router, tags=["market"])
 app.include_router(icici.router, tags=["icici"])
 
