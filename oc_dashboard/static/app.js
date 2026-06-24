@@ -1184,6 +1184,9 @@ document.getElementById('btnVix')?.addEventListener('click', loadVix);
 document.getElementById('btnWalls')?.addEventListener('click', loadOiWalls);
 wireToggleGroup('wallsFilterGroup');
 document.getElementById('wallsFilterGroup')?.addEventListener('click', ()=>setTimeout(loadOiWalls,50));
+// Editing the shelf fraction reloads immediately (matches other live controls)
+document.getElementById('wallsFracInput')?.addEventListener('change', loadOiWalls);
+document.getElementById('wallsExpirySelect')?.addEventListener('change', loadOiWalls);
 // Wire trendTimestamp cascade
 document.getElementById('trendExpiry').addEventListener('change',()=>{
   loadAtmStrikes();
@@ -3490,54 +3493,209 @@ async function loadVix(){
 }
 
 // ══════════════════════════════════════════════════════════════════
-// ITEM 6: OI Walls
+// ITEM 6: OI Walls  (v3 — shelves + gamma wall, lean row + hover-tip detail)
+// One <tr> per symbol so sort/filter/CSV work without special-casing.
+// The CE/PE shelf + gamma-wall detail lives in a hover tooltip on a right-side
+// ⊕ cell (no interleaved detail rows that broke sortTbl).
 // ══════════════════════════════════════════════════════════════════
+let _wallsData = [];        // last payload, for tooltip rendering
+let _wallsFrac = 0.40;      // runtime-tunable shelf fraction
+
+function _wallShelfBand(lo, hi, isShelf){
+  // compact "lo–hi" band, or a lone strike when not a shelf
+  if(lo==null) return '—';
+  if(!isShelf || lo===hi) return `<span class="neu">${fmt(lo,0)}</span>`;
+  return `${fmt(lo,0)}<span style="color:var(--muted)">–</span>${fmt(hi,0)}`;
+}
+function _wallMigrationArrow(mig){
+  if(mig==null || Math.abs(mig)<1e-9) return '<span class="neu">→</span>';
+  return mig>0 ? `<span class="up" title="shelf centre rising ${fmt(mig,1)}">↑ ${fmt(mig,1)}</span>`
+              : `<span class="down" title="shelf centre falling ${fmt(mig,1)}">↓ ${fmt(Math.abs(mig),1)}</span>`;
+}
+
+// Detail tooltip body — CE/PE shelf bands + gamma wall. Returned as plain HTML
+// (no <tr>/<td colspan>) so it can sit inside a hover popover div.
+function _wallDetailTip(r){
+  const shelfBlock = (side, lo, hi, com, oi, n, isShelf, members, oiChg, sig)=>{
+    const band = (lo==null) ? '—'
+      : (isShelf && lo!==hi) ? `${fmt(lo,0)} – ${fmt(hi,0)}` : `${fmt(lo,0)} (lone wall)`;
+    const mem = (members&&members.length)
+      ? members.map(m=>fmt(m,0)).join(' · ') : '—';
+    return `<div style="flex:1;min-width:230px;padding:8px 12px;border:1px solid var(--border);
+        border-radius:4px;background:var(--surf)">
+      <div style="font-family:var(--mono);font-size:9px;color:${side==='CE'?'var(--red)':'var(--green)'};
+        letter-spacing:.06em;margin-bottom:6px">${side} SHELF ${isShelf?'':'(lone wall)'}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;font-family:var(--mono);font-size:10px">
+        <div><span style="color:var(--muted)">BAND</span> <b>${band}</b></div>
+        <div><span style="color:var(--muted)">CoM</span> ${com!=null?fmt(com,1):'—'}</div>
+        <div><span style="color:var(--muted)">Σ OI</span> ${fmtL(oi)}</div>
+        <div><span style="color:var(--muted)">N</span> ${n||1}</div>
+        <div><span style="color:var(--muted)">ΣΔOI</span> ${oiChg!=null?sspan(oiChg,0):'—'}</div>
+        <div><span style="color:var(--muted)">SIG</span> ${sig?pill(sig):'—'}</div>
+      </div>
+      <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:6px">
+        strikes: ${mem}</div>
+    </div>`;
+  };
+  const gammaBlock = ()=>{
+    const gw = r.gamma_wall_strike;
+    const div = r.gamma_oi_divergence;
+    return `<div style="flex:1;min-width:200px;padding:8px 12px;border:1px solid var(--border);
+        border-radius:4px;background:var(--surf)">
+      <div style="font-family:var(--mono);font-size:9px;color:var(--acc);letter-spacing:.06em;margin-bottom:6px">
+        GAMMA WALL ${div?'<span style="color:var(--amber)" title="gamma wall ≠ OI wall — this strike does the real pinning">⚠ DIVERGENT</span>':''}</div>
+      <div style="display:flex;flex-wrap:wrap;gap:10px;font-family:var(--mono);font-size:10px">
+        <div><span style="color:var(--muted)">STRIKE</span> <b>${gw!=null?fmt(gw,0):'—'}</b></div>
+        <div><span style="color:var(--muted)">vs CE WALL</span> ${gw!=null&&r.ce_wall_strike!=null?sspan(gw-r.ce_wall_strike,0):'—'}</div>
+        <div><span style="color:var(--muted)">|γ| EXP</span> ${r.gamma_wall_net_gexv!=null?fmtL(r.gamma_wall_net_gexv):'—'}</div>
+      </div>
+      ${div?`<div style="font-family:var(--mono);font-size:9px;color:var(--amber);margin-top:6px">
+        Price tends to pin/resist at the gamma wall (${fmt(gw,0)}), not the OI wall (${fmt(r.ce_wall_strike,0)}).</div>`:''}
+    </div>`;
+  };
+  return `<div style="display:flex;flex-wrap:wrap;gap:10px">
+      ${shelfBlock('PE', r.pe_shelf_lo, r.pe_shelf_hi, r.pe_shelf_com, r.pe_shelf_oi, r.pe_shelf_n, r.pe_is_shelf, r.pe_shelf_members, r.pe_shelf_oi_chg, r.pe_shelf_signal)}
+      ${shelfBlock('CE', r.ce_shelf_lo, r.ce_shelf_hi, r.ce_shelf_com, r.ce_shelf_oi, r.ce_shelf_n, r.ce_is_shelf, r.ce_shelf_members, r.ce_shelf_oi_chg, r.ce_shelf_signal)}
+      ${gammaBlock()}
+    </div>`;
+}
+
 async function loadOiWalls(){
   const ft=getFilter('wallsFilterGroup');
+  const fracEl=document.getElementById('wallsFracInput');
+  if(fracEl && fracEl.value) _wallsFrac=parseFloat(fracEl.value)||0.40;
+  // Populate expiry selector on first call (if still empty beyond the default option)
+  const expSel=document.getElementById('wallsExpirySelect');
+  if(expSel && expSel.options.length<=1){
+    try{
+      const exps=await api('/api/oi_walls_expiries');
+      exps.forEach(e=>{
+        const o=document.createElement('option');
+        o.value=e; o.textContent=e;
+        expSel.appendChild(o);
+      });
+    }catch(_){/* non-fatal */}
+  }
+  const expVal = expSel ? expSel.value : '';
+  const expParam = expVal ? `&expiry=${encodeURIComponent(expVal)}` : '';
   document.getElementById('oiWallsTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
   document.getElementById('oiWallsKpis').innerHTML='';
   try{
-    const data=await api(`/api/oi_walls?filter_type=${ft}`);
+    const data=await api(`/api/oi_walls?filter_type=${ft}&shelf_frac=${_wallsFrac}${expParam}`);
     if(!data||!data.length){
       document.getElementById('oiWallsTable').innerHTML='<div class="empty">No data</div>';
       return;
     }
-    function wallStrClass(s){return s>5?'wall-strong':s>2?'wall-medium':'wall-weak';}
-    function distCell(v){
-      if(v==null)return'—';
-      const n=parseFloat(v);
-      const cls=Math.abs(n)<50?'up':Math.abs(n)<200?'':'neu';
-      return`<span class="${cls}">${fmt(n,0)}</span>`;
-    }
-    document.getElementById('oiWallsTable').innerHTML=makeTbl(data,[
-      {key:'symbol',label:'SYMBOL',fmt:(v,r)=>`<span style="cursor:pointer;color:var(--acc)"
-        onclick="jumpOiSignals('${v}')" title="Jump to OI Signals for ${v}">${v} ↗</span>`},
-      {key:'spot',label:'SPOT',fmt:v=>fmt(v,2)},
-      {key:'fut_price',label:'FUT',fmt:v=>v>0?fmt(v,2):'—'},
-      {key:'ce_wall_strike',label:'CALL WALL',fmt:v=>`<span class="down">${fmt(v,0)}</span>`},
-      {key:'ce_dist_spot',label:'CE DIST',fmt:v=>distCell(v)},
-      {key:'ce_wall_strength',label:'CE STR',fmt:v=>`<span class="${wallStrClass(v)}">${fmt(v,1)}×</span>`},
-      {key:'ce_wall_oi',label:'CE OI',fmt:v=>fmtL(v)},
-      {key:'ce_ltp',label:'CE LTP',fmt:v=>fmt(v,2)},
-      {key:'ce_ltp_chg',label:'CE ΔLTP',fmt:v=>sspan(v,2)},
-      {key:'ce_iv',label:'CE IV%',fmt:v=>fmt(v,1)+'%'},
-      {key:'ce_iv_chg',label:'CE ΔIV',fmt:v=>sspan(v,2)},
-      {key:'ce_signal',label:'CE SIG',fmt:v=>pill(v)},
-      {key:'pe_wall_strike',label:'PUT WALL',fmt:v=>`<span class="up">${fmt(v,0)}</span>`},
-      {key:'pe_dist_spot',label:'PE DIST',fmt:v=>distCell(v)},
-      {key:'pe_wall_strength',label:'PE STR',fmt:v=>`<span class="${wallStrClass(v)}">${fmt(v,1)}×</span>`},
-      {key:'pe_wall_oi',label:'PE OI',fmt:v=>fmtL(v)},
-      {key:'pe_ltp',label:'PE LTP',fmt:v=>fmt(v,2)},
-      {key:'pe_ltp_chg',label:'PE ΔLTP',fmt:v=>sspan(v,2)},
-      {key:'pe_iv',label:'PE IV%',fmt:v=>fmt(v,1)+'%'},
-      {key:'pe_iv_chg',label:'PE ΔIV',fmt:v=>sspan(v,2)},
-      {key:'pe_signal',label:'PE SIG',fmt:v=>pill(v)},
-      {key:'pcr',label:'PCR',fmt:v=>v!=null?fmt(v,3):'—'},
-      {key:'wall_range',label:'RANGE',fmt:v=>fmt(v,0)+' pts'},
-    ]);
+    _wallsData=data;
+    // Lean columns; SYMBOL is col 0 (sortable + filterable). Detail → hover ⊕.
+    const cols=[
+      {key:'symbol',label:'SYMBOL'},
+      {key:'spot',label:'SPOT'},
+      {key:'fut_price',label:'FUT'},
+      {key:'pcr',label:'PCR'},
+      {key:'pe_wall_strike',label:'PUT WALL'},
+      {key:'pe_band',label:'PE SHELF'},
+      {key:'pe_shelf_signal',label:'PE SIG'},
+      {key:'pe_mig',label:'PE MIG'},
+      {key:'ce_wall_strike',label:'CALL WALL'},
+      {key:'ce_band',label:'CE SHELF'},
+      {key:'ce_shelf_signal',label:'CE SIG'},
+      {key:'ce_mig',label:'CE MIG'},
+      {key:'gamma_wall_strike',label:'γ WALL'},
+      {key:'wall_range',label:'RANGE'},
+      {key:'_tip',label:'',plain:true},   // ⊕ hover-detail, last column
+    ];
+    const head='<tr>'+cols.map(c=>c.plain?`<th></th>`:`<th onclick="sortTbl(this)">${c.label}</th>`).join('')+'</tr>';
+    const body=data.map((r,ri)=>{
+      const gdiv = r.gamma_oi_divergence;
+      const tds=[
+        `<td data-export="${r.symbol}"><span style="cursor:pointer;color:var(--acc)"
+           onclick="jumpOiSignals('${r.symbol}')" title="Jump to OI Signals for ${r.symbol}">${r.symbol} ↗</span></td>`,
+        `<td data-export="${r.spot}">${fmt(r.spot,2)}</td>`,
+        `<td data-export="${r.fut_price}">${r.fut_price>0?fmt(r.fut_price,2):'—'}</td>`,
+        `<td data-export="${r.pcr}">${r.pcr!=null?fmt(r.pcr,3):'—'}</td>`,
+        `<td data-export="${r.pe_wall_strike}"><span class="up">${fmt(r.pe_wall_strike,0)}</span></td>`,
+        `<td data-export="${r.pe_shelf_lo}-${r.pe_shelf_hi}">${_wallShelfBand(r.pe_shelf_lo,r.pe_shelf_hi,r.pe_is_shelf)}</td>`,
+        `<td data-export="${r.pe_shelf_signal||''}">${r.pe_shelf_signal?pill(r.pe_shelf_signal):'—'}</td>`,
+        `<td data-export="${r.pe_shelf_com||''}">${_wallMigrationArrow(r.pe_shelf_members&&r.pe_shelf_members.length?(r.pe_shelf_com-r.pe_wall_strike):null)}</td>`,
+        `<td data-export="${r.ce_wall_strike}"><span class="down">${fmt(r.ce_wall_strike,0)}</span></td>`,
+        `<td data-export="${r.ce_shelf_lo}-${r.ce_shelf_hi}">${_wallShelfBand(r.ce_shelf_lo,r.ce_shelf_hi,r.ce_is_shelf)}</td>`,
+        `<td data-export="${r.ce_shelf_signal||''}">${r.ce_shelf_signal?pill(r.ce_shelf_signal):'—'}</td>`,
+        `<td data-export="${r.ce_shelf_com||''}">${_wallMigrationArrow(r.ce_shelf_members&&r.ce_shelf_members.length?(r.ce_shelf_com-r.ce_wall_strike):null)}</td>`,
+        `<td data-export="${r.gamma_wall_strike||''}">${r.gamma_wall_strike!=null
+           ?`<span class="${gdiv?'':'neu'}" style="${gdiv?'color:var(--amber);font-weight:600':''}"
+             title="${gdiv?'gamma wall ≠ OI wall — real pin here':'gamma wall aligns with OI wall'}">${fmt(r.gamma_wall_strike,0)}${gdiv?' ⚠':''}</span>`
+           :'—'}</td>`,
+        `<td data-export="${r.wall_range}">${fmt(r.wall_range,0)} pts</td>`,
+        // ⊕ hover-detail cell — content carried on the trigger; shown via a
+        // shared fixed-position popover (escapes the .tw scroll clipping).
+        `<td data-export="" style="text-align:center" class="wall-tip-cell">
+           <span class="wall-tip-trigger" tabindex="0" data-wallidx="${ri}"
+                 title="shelf bands + γ-wall detail">⊕</span>
+         </td>`,
+      ].join('');
+      return `<tr>${tds}</tr>`;
+    }).join('');
+    const csvHdr = cols.filter(c=>!c.plain).map(c=>c.label).join('\u0001');
+    document.getElementById('oiWallsTable').innerHTML =
+      `<table data-cols="${csvHdr}"><thead>${head}</thead><tbody>${body}</tbody></table>`;
+    _wireWallTips();
   }catch(e){
     document.getElementById('oiWallsTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
   }
+}
+
+// Shared fixed-position popover for the ⊕ detail cells. One element, reused;
+// position:fixed so the .tw scroll container can't clip it.
+function _ensureWallTipEl(){
+  let el=document.getElementById('wallTipPop');
+  if(!el){
+    el=document.createElement('div');
+    el.id='wallTipPop';
+    el.className='wall-tip-pop';
+    el.addEventListener('mouseenter',()=>{el._over=true;});
+    el.addEventListener('mouseleave',()=>{el._over=false;_hideWallTip();});
+    document.body.appendChild(el);
+  }
+  return el;
+}
+function _showWallTip(trigger){
+  const idx=parseInt(trigger.dataset.wallidx,10);
+  const r=_wallsData[idx]; if(!r) return;
+  const el=_ensureWallTipEl();
+  el.innerHTML=_wallDetailTip(r);
+  el.style.display='block';
+  // Measure then place: prefer below-left of the trigger, clamp into viewport.
+  const tr=trigger.getBoundingClientRect();
+  const pw=el.offsetWidth, ph=el.offsetHeight;
+  const vw=window.innerWidth, vh=window.innerHeight;
+  let left=tr.right-pw;                 // right-align to the ⊕
+  if(left<8) left=8;
+  if(left+pw>vw-8) left=vw-8-pw;
+  let top=tr.bottom+6;
+  if(top+ph>vh-8) top=tr.top-ph-6;     // flip above if it would overflow bottom
+  if(top<8) top=8;
+  el.style.left=left+'px';
+  el.style.top=top+'px';
+}
+function _hideWallTip(){
+  const el=document.getElementById('wallTipPop');
+  if(!el) return;
+  // small delay lets the pointer cross the gap into the popover
+  setTimeout(()=>{ if(!el._over && !el._triggerOver) el.style.display='none'; },80);
+}
+function _wireWallTips(){
+  const tbl=document.querySelector('#oiWallsTable table');
+  if(!tbl) return;
+  tbl.querySelectorAll('.wall-tip-trigger').forEach(t=>{
+    t.addEventListener('mouseenter',()=>{ t._over=true;
+      const el=_ensureWallTipEl(); el._triggerOver=true; _showWallTip(t); });
+    t.addEventListener('mouseleave',()=>{ t._over=false;
+      const el=document.getElementById('wallTipPop'); if(el) el._triggerOver=false;
+      _hideWallTip(); });
+    t.addEventListener('focus',()=>_showWallTip(t));
+    t.addEventListener('blur',()=>_hideWallTip());
+  });
 }
 
 // ══════════════════════════════════════════════════════════════════

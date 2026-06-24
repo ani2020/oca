@@ -424,6 +424,218 @@ def strength_series(rows: List[Dict]) -> List[Dict]:
     return out
 
 
+# ════════════════════════════════════════════════════════════════
+# OI Shelf detection (OI-walls v2 — "call shelf" / "put shelf")
+# ════════════════════════════════════════════════════════════════
+# A single max-OI strike is a poor wall: institutional positioning sits in a
+# BAND of adjacent strikes (e.g. KOTAKBANK CE OI 400/405/410 = one shelf, not a
+# lone 400 wall). This detects that band so the screener shows the real ceiling /
+# floor and its day-over-day migration, rather than one strike.
+#
+# Three pieces, learned from real-data validation across KOTAKBANK / NIFTY / ITC
+# / RELIANCE / TATASTEEL (the NSE strike lattice is irregular per-symbol and NSE
+# injects new strikes mid-cycle, so a naive geometric rule fragments real
+# shelves):
+#   1. FILTER to preferred strikes first — the behavioural round-number effect.
+#      Indices: traders use multiples of 100 (the -50 strikes are illiquid
+#      troughs; NIFTY -00 strikes carry ~1.8× the OI). Stocks: drop fractional
+#      (.5) strikes (ITC integer strikes carry ~2.9× the OI of .5 strikes).
+#      This is the index-vs-stock split, data-justified — not a hack.
+#   2. GRID = the MODE of gaps between preferred strikes in a window around the
+#      wall. OI-INDEPENDENT (so it doesn't shift with the threshold) and
+#      injection-robust (a few off-grid mid-cycle strikes don't move the mode).
+#   3. WALK out from the wall on that grid: include a strike if its OI ≥
+#      FRAC × wall_OI; SKIP up to MAX_SKIP missing grid slots (NSE didn't list /
+#      dead strike); STOP at a present-but-sub-threshold strike (a real OI
+#      trough = a separate wall, e.g. RELIANCE 1350 vs 1400).
+#
+# FRAC is the key knob and is runtime-configurable (params / endpoint query
+# param): low (~0.40) reveals broad shelves, high (~0.65) isolates tight walls.
+# A peaky distribution (ITC) shelves at low frac and collapses to a lone wall at
+# high frac — that's the control working, not a bug.
+#
+# Pure — takes parallel arrays, returns a dict. The endpoint supplies OI +
+# day-over-day OI change + LTP change so the shelf can also carry an aggregate
+# build-up signal and a center-of-mass migration vs the prior session.
+
+# Index symbols use a 100-point preferred grid (fallback 50). Single source so
+# the endpoint and any other caller agree on what counts as an index.
+INDEX_SYMBOLS = {
+    "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY", "NIFTYNXT50",
+    "SENSEX", "BANKEX", "SENSEX50",
+}
+
+OI_SHELF_DEFAULTS = {
+    "FRAC":        0.40,  # shelf member OI must be >= FRAC × wall OI (runtime-tunable)
+    "MAX_SKIP":    1,     # tolerate up to this many missing grid slots mid-shelf
+    "GRID_WINDOW": 6,     # ± strikes around the wall used to infer the grid mode
+    "INDEX_STEP":  100.0, # preferred index strike step
+    "INDEX_STEP_FALLBACK": 50.0,  # if too few 100-strikes present
+}
+
+
+def _oi_buildup_signal(oi_chg: float, ltp_chg: float) -> str:
+    """OI-change × PRICE-change build-up matrix (same convention as oi_walls).
+    Aggregated across a shelf: pass summed oi_chg and the OI-weighted ltp_chg."""
+    if oi_chg > 0 and ltp_chg > 0:  return "Long Build-Up"
+    if oi_chg > 0 and ltp_chg < 0:  return "Short Build-Up"
+    if oi_chg < 0 and ltp_chg > 0:  return "Short Covering"
+    if oi_chg < 0 and ltp_chg < 0:  return "Long Unwinding"
+    return "Neutral"
+
+
+def _preferred_strike_mask(symbol: Optional[str], strikes: np.ndarray,
+                           params: Dict,
+                           is_index: Optional[bool] = None) -> np.ndarray:
+    """Boolean mask of liquidity-preferred strikes (round-number effect).
+    Indices → multiples of 100 (fallback 50). Stocks → integers (drop .5).
+    Falls back to all strikes if the filter would leave too few.
+
+    is_index: explicit override (the app passes this from config.NSE_INDICES so
+    there is ONE authoritative index list). When None, fall back to membership in
+    this module's INDEX_SYMBOLS set."""
+    x = np.asarray(strikes, float)
+    if is_index is None:
+        is_index = bool(symbol) and str(symbol).upper() in INDEX_SYMBOLS
+    if is_index:
+        step = params["INDEX_STEP"]
+        m = np.array([abs(s % step) < 1e-6 for s in x])
+        if m.sum() >= 3:
+            return m
+        fb = params["INDEX_STEP_FALLBACK"]
+        m = np.array([abs(s % fb) < 1e-6 for s in x])
+        return m if m.sum() >= 3 else np.ones(len(x), dtype=bool)
+    # stocks: drop fractional (.5) strikes
+    m = np.array([abs(s - round(s)) < 1e-6 for s in x])
+    return m if m.sum() >= 2 else np.ones(len(x), dtype=bool)
+
+
+def _grid_mode(fx: np.ndarray, wall: float, window: int) -> float:
+    """OI-independent grid step: the MODE of gaps between preferred strikes within
+    ±window strikes of the wall. Robust to a few off-grid injected strikes."""
+    from collections import Counter
+    wi = int(np.argmin(np.abs(fx - wall)))
+    lo = max(0, wi - window)
+    hi = min(len(fx), wi + window + 1)
+    gaps = np.round(np.diff(fx[lo:hi]), 3)
+    gaps = gaps[gaps > 0]
+    if len(gaps) == 0:
+        return 0.0
+    return float(Counter(gaps.tolist()).most_common(1)[0][0])
+
+
+def oi_shelf(strikes, oi, oi_change=None, ltp_change=None,
+             prev_com: Optional[float] = None, symbol: Optional[str] = None,
+             is_index: Optional[bool] = None,
+             params: Optional[Dict] = None) -> Optional[Dict]:
+    """Detect the dominant OI shelf (contiguous band of high-OI preferred strikes).
+
+    Args:
+        strikes:    1-D array of strike prices (any order).
+        oi:         matching open interest per strike (CE or PE — side-agnostic).
+        oi_change:  optional matching day/session OI change per strike.
+        ltp_change: optional matching LTP change per strike (for build-up signal).
+        prev_com:   optional previous-session shelf center-of-mass, for migration.
+        symbol:     ticker — drives the index-vs-stock preferred-strike filter.
+        is_index:   explicit index flag (app passes from config.NSE_INDICES);
+                    None → fall back to this module's INDEX_SYMBOLS set.
+        params:     optional overrides (FRAC / MAX_SKIP / GRID_WINDOW / steps).
+
+    Returns dict (or None if no usable OI):
+        wall_strike   the single highest-OI PREFERRED strike (the classic "wall")
+        wall_oi       OI at that strike
+        lo, hi        shelf strike bounds (band incl. wall_strike)
+        oi            summed OI across the shelf
+        com           OI-weighted center of mass of the shelf
+        n_strikes     number of strikes in the shelf
+        is_shelf      True when the band spans >1 strike (else lone wall)
+        grid          inferred preferred-strike grid step used for the walk
+        members       the shelf strike list
+        oi_change     summed OI change across the shelf (if oi_change given)
+        signal        aggregate build-up signal across the shelf (if changes given)
+        migration     com - prev_com (if prev_com given) — +ve = shelf moving up
+    """
+    p = {**OI_SHELF_DEFAULTS, **(params or {})}
+    x = np.asarray(strikes, float)
+    o = np.asarray(oi, float)
+    if x.size == 0 or o.size == 0 or not np.isfinite(o).any() or o.max() <= 0:
+        return None
+
+    # sort by strike
+    order = np.argsort(x)
+    x, o = x[order], o[order]
+    oc = (np.asarray(oi_change, float)[order] if oi_change is not None else None)
+    lc = (np.asarray(ltp_change, float)[order] if ltp_change is not None else None)
+
+    # 1. filter to preferred (liquid round-number) strikes
+    keep = _preferred_strike_mask(symbol, x, p, is_index)
+    fx, fo = x[keep], o[keep]
+    foc = oc[keep] if oc is not None else None
+    flc = lc[keep] if lc is not None else None
+    if fx.size == 0 or fo.max() <= 0:
+        return None
+
+    # 2. OI-independent grid from the preferred-strike spacing near the wall
+    wall_i = int(np.argmax(fo))
+    grid = _grid_mode(fx, fx[wall_i], int(p["GRID_WINDOW"]))
+    thr = fo[wall_i] * p["FRAC"]
+
+    def _find(s):
+        idx = np.where(np.abs(fx - s) < 1e-6)[0]
+        return int(idx[0]) if len(idx) else -1
+
+    # 3. walk out from the wall on the grid (skip gaps, stop at real troughs)
+    members = [wall_i]
+    if grid > 0:
+        for direction in (-1, +1):
+            s = fx[wall_i] + direction * grid
+            skips = 0
+            while True:
+                i = _find(s)
+                if i < 0:                       # no strike listed here
+                    skips += 1
+                    if skips > int(p["MAX_SKIP"]):
+                        break
+                    s += direction * grid
+                    continue
+                if fo[i] >= thr:                # part of the shelf
+                    members.append(i)
+                    skips = 0
+                    s += direction * grid
+                else:                           # real OI trough → separate wall
+                    break
+    members = sorted(set(members))
+
+    sx = fx[members]
+    so = fo[members]
+    total_oi = float(so.sum())
+    com = float((sx * so).sum() / total_oi) if total_oi > 0 else float(fx[wall_i])
+
+    out: Dict[str, Any] = {
+        "wall_strike": float(fx[wall_i]),
+        "wall_oi":     float(fo[wall_i]),
+        "lo":          float(sx.min()),
+        "hi":          float(sx.max()),
+        "oi":          round(total_oi, 2),
+        "com":         round(com, 2),
+        "n_strikes":   int(len(members)),
+        "is_shelf":    bool(len(members) > 1),
+        "grid":        grid,
+        "members":     [float(v) for v in sx],
+    }
+    if foc is not None:
+        shelf_oc = foc[members]
+        out["oi_change"] = round(float(shelf_oc.sum()), 2)
+        if flc is not None:
+            shelf_lc = flc[members]
+            denom = float(np.abs(so).sum())
+            wlc = float((shelf_lc * so).sum() / denom) if denom > 0 else 0.0
+            out["signal"] = _oi_buildup_signal(out["oi_change"], wlc)
+    if prev_com is not None:
+        out["migration"] = round(com - float(prev_com), 2)
+    return out
+
+
 # Signal metadata for UI / docs (single source of truth)
 SIGNAL_INFO = {
     "regime_flip_to_neg": ("Regime → Negative",

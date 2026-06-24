@@ -208,6 +208,15 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
 .wall-strong{color:var(--green);font-weight:600}
 .wall-medium{color:var(--amber)}
 .wall-weak  {color:var(--muted)}
+/* OI walls hover-detail (⊕ cell) — fixed popover, escapes .tw scroll clip */
+.wall-tip-cell{position:relative}
+.wall-tip-trigger{cursor:help;color:var(--acc);font-size:13px;line-height:1;
+  display:inline-block;padding:0 2px;outline:none}
+.wall-tip-trigger:hover,.wall-tip-trigger:focus{color:#fff}
+.wall-tip-pop{display:none;position:fixed;z-index:600;
+  min-width:520px;max-width:680px;padding:10px 12px;
+  background:var(--card);border:1px solid var(--border2);border-radius:6px;
+  box-shadow:0 8px 24px rgba(0,0,0,.55);text-align:left;white-space:normal}
 /* ── Option lens greeks card ── */
 .greeks-grid{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:10px}
 .greek-row{display:flex;justify-content:space-between;padding:4px 8px;
@@ -1051,12 +1060,21 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       <button data-ft="index">INDEX</button>
       <button data-ft="stock">STOCK</button>
     </div>
+    <span class="fl">SHELF FRAC</span>
+    <input type="number" id="wallsFracInput" value="0.40" step="0.05" min="0.05" max="0.95"
+      style="width:70px" title="Shelf member OI must exceed this fraction of the wall OI. Lower (~0.40) reveals broad shelves; higher (~0.65) isolates tight walls. Tune live, then bake the settled value into OI_SHELF_DEFAULTS.">
+    <span class="fl">EXPIRY</span>
+    <select id="wallsExpirySelect" style="font-family:var(--mono);font-size:10px;padding:3px 6px;min-width:110px"
+      title="Pin all symbols to this expiry. 'NEAREST' uses each symbol's own nearest live expiry.">
+      <option value="">NEAREST</option>
+    </select>
     <button class="btn" id="btnWalls">REFRESH</button>
+    <span style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-left:4px">▸ hover ⊕ for shelf + γ wall</span>
   </div>
   <div class="kpi-row" id="oiWallsKpis"></div>
   <div class="card">
-    <div class="card-title">CALL &amp; PUT WALLS — DISTANCE FROM SPOT
-      <span class="badge" style="margin-left:6px">STRENGTH = max OI ÷ avg OI</span>
+    <div class="card-title">OI WALLS &amp; SHELVES — with GAMMA WALL
+      <span class="badge" style="margin-left:6px">▸ row to see shelf band, migration &amp; γ-wall divergence</span>
       <span style="margin-left:auto">
         <input type="text" id="wallsSearch" placeholder="filter symbol…"
           oninput="filterTableBySymbol('oiWallsTable',this.value)"

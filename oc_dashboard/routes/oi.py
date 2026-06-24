@@ -1,5 +1,6 @@
 """OI endpoints — signals, walls, history."""
 from __future__ import annotations
+import numpy as np
 import pandas as pd
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -131,150 +132,229 @@ def oi_signals_all():
     return to_records(df)
 
 
+@router.get("/api/oi_walls_expiries")
+def oi_walls_expiries():
+    """Return distinct live expiry dates available in ocdata, for the OI walls expiry selector."""
+    rows = qdf(
+        f"""
+        SELECT DISTINCT CAST(expiry AS VARCHAR) AS expiry
+        FROM {tbl()}
+        WHERE expiry >= CURRENT_DATE
+          AND (ce_oi > 0 OR pe_oi > 0)
+        ORDER BY expiry
+        """
+    )
+    if rows.empty:
+        return []
+    return rows["expiry"].tolist()
+
+
 @router.get("/api/oi_walls")
-def oi_walls(filter_type: str = Query("all")):
+def oi_walls(
+    filter_type: str = Query("all"),
+    shelf_frac: float = Query(0.40, ge=0.05, le=0.95,
+                              description="shelf member OI >= this x wall OI (runtime-tunable)"),
+    expiry: str = Query(None, description="Fixed expiry date (YYYY-MM-DD). Omit for nearest."),
+):
     """
-    For each symbol at latest timestamp, find:
-    - Call wall  = strike with highest CE OI (resistance)
-    - Put wall   = strike with highest PE OI (support)
-    - Distance from spot and fut_price
-    - Wall strength = max_oi / avg_oi
-    - PCR at wall strikes
-    Sortable across all symbols.
+    For each symbol at its latest snapshot (NEAREST live expiry only), find:
+    - Call / Put WALL  = single highest CE/PE OI strike (classic resistance/support)
+    - Call / Put SHELF = band of adjacent high-OI PREFERRED strikes around the wall
+                         (exposure_core.oi_shelf — handles the round-number effect
+                         and NSE's irregular strike lattice). Carries lo/hi/CoM,
+                         aggregate build-up signal, and day-over-day CoM migration.
+    - GAMMA WALL       = strike with highest |net gamma| (net_gexv). Often DIFFERENT
+                         from the OI wall (e.g. KOTAKBANK OI wall 400 vs gamma wall
+                         405) — that divergence is itself the signal: the gamma
+                         wall is where dealer hedging actually pins/resists.
+    - Distances from spot/fut, wall strength, symbol-wide PCR, wall range.
+
+    Expiry is pinned to each symbol's NEAREST live expiry (MIN(expiry) >= today),
+    computed per symbol — indices keep their weekly, monthly stocks their monthly.
+    This differs from the legacy all-expiry blend (more correct: the pinning
+    happens where the hedging grip actually is).
+
+    shelf_frac is runtime-tunable for live observation; bake the settled value
+    into exposure_core.OI_SHELF_DEFAULTS later.
     """
+    import exposure_core as core
+
+    idx_set = set(config.NSE_INDICES)
     idx_list = ", ".join(f"'{s}'" for s in config.NSE_INDICES)
-    # Qualify with t. — `symbol` is ambiguous in the base CTE (t JOIN latest l)
     sym_filter = (
         f"AND t.symbol IN ({idx_list})"       if filter_type == "index"
         else f"AND t.symbol NOT IN ({idx_list})" if filter_type == "stock"
         else ""
     )
+    # When a fixed expiry is requested, pin all symbols to that date.
+    # Otherwise fall back to each symbol's nearest live expiry (original behaviour).
+    expiry_clause = f"AND t.expiry = '{expiry[:10]}'" if expiry else "AND t.expiry >= CURRENT_DATE"
+    nearest_cte = (
+        f"SELECT symbol, CAST('{expiry[:10]}' AS DATE) AS exp FROM ranked WHERE rk = 1 GROUP BY symbol"
+        if expiry
+        else "SELECT symbol, MIN(expiry) AS exp FROM ranked WHERE rk = 1 GROUP BY symbol"
+    )
+    # Pull the full per-strike ladder for each symbol's latest snapshot, pinned to
+    # the chosen expiry, plus the previous snapshot's LTP for the day-over-day
+    # build-up signal. Shelf/gamma-wall maths happen in Python.
     df = qdf(
         f"""
         WITH ranked AS (
-            -- tag each symbol's two most recent snapshots
             SELECT t.*,
                    DENSE_RANK() OVER (PARTITION BY t.symbol ORDER BY t.timestamp DESC) AS rk
             FROM {tbl()} t
             WHERE (t.ce_oi > 0 OR t.pe_oi > 0)
+              {expiry_clause}
             {sym_filter}
         ),
-        base AS (
-            SELECT symbol, strike_price,
-                   COALESCE(ce_oi,0)           AS ce_oi,
-                   COALESCE(pe_oi,0)           AS pe_oi,
-                   COALESCE(ce_ltp,0)          AS ce_ltp,
-                   COALESCE(pe_ltp,0)          AS pe_ltp,
-                   COALESCE(ce_iv, 0)          AS ce_iv,
-                   COALESCE(pe_iv, 0)          AS pe_iv,
-                   COALESCE(ce_oi_change, 0)   AS ce_oi_change,
-                   COALESCE(pe_oi_change, 0)   AS pe_oi_change,
-                   COALESCE(underlying_price,0) AS spot,
-                   COALESCE(fut_price,0)        AS fut_price,
-                   COALESCE(atm_strike,0)       AS atm_strike,
-                   COALESCE(lotsize,1)          AS lotsize
-            FROM ranked WHERE rk = 1
+        nearest AS (
+            -- each symbol's pinned expiry (fixed or nearest live)
+            {nearest_cte}
         ),
-        prev_base AS (
-            -- previous snapshot per symbol/strike (for real LTP/IV change)
-            SELECT symbol, strike_price,
-                   COALESCE(ce_ltp,0) AS ce_ltp,
-                   COALESCE(pe_ltp,0) AS pe_ltp,
-                   COALESCE(ce_iv, 0) AS ce_iv,
-                   COALESCE(pe_iv, 0) AS pe_iv
-            FROM ranked WHERE rk = 2
+        cur AS (
+            SELECT r.symbol, r.strike_price,
+                   COALESCE(r.ce_oi,0)            AS ce_oi,
+                   COALESCE(r.pe_oi,0)            AS pe_oi,
+                   COALESCE(r.ce_ltp,0)           AS ce_ltp,
+                   COALESCE(r.pe_ltp,0)           AS pe_ltp,
+                   COALESCE(r.ce_iv,0)            AS ce_iv,
+                   COALESCE(r.pe_iv,0)            AS pe_iv,
+                   COALESCE(r.ce_oi_change,0)     AS ce_oi_change,
+                   COALESCE(r.pe_oi_change,0)     AS pe_oi_change,
+                   COALESCE(r.net_gexv,0)         AS net_gexv,
+                   COALESCE(r.ce_gexv,0)          AS ce_gexv,
+                   COALESCE(r.pe_gexv,0)          AS pe_gexv,
+                   COALESCE(r.underlying_price,0) AS spot,
+                   COALESCE(r.fut_price,0)        AS fut_price,
+                   COALESCE(r.atm_strike,0)       AS atm_strike
+            FROM ranked r
+            JOIN nearest n ON r.symbol = n.symbol AND r.expiry = n.exp
+            WHERE r.rk = 1
         ),
-        agg AS (
-            SELECT symbol,
-                   MAX(spot)      AS spot,
-                   MAX(fut_price) AS fut_price,
-                   MAX(atm_strike) AS atm_strike,
-                   AVG(ce_oi)     AS avg_ce_oi,
-                   AVG(pe_oi)     AS avg_pe_oi,
-                   MAX(ce_oi)     AS max_ce_oi,
-                   MAX(pe_oi)     AS max_pe_oi,
-                   SUM(ce_oi)     AS total_ce_oi,
-                   SUM(pe_oi)     AS total_pe_oi
-            FROM base GROUP BY symbol
-        ),
-        ce_wall AS (
-            SELECT b.symbol,
-                   b.strike_price    AS ce_wall_strike,
-                   b.ce_oi           AS ce_wall_oi,
-                   b.ce_ltp                           AS ce_ltp,
-                   b.ce_oi_change                     AS ce_oi_chg,
-                   b.ce_iv                            AS ce_iv,
-                   -- real LTP/IV change vs previous snapshot
-                   b.ce_ltp - COALESCE(prev.ce_ltp, b.ce_ltp)  AS ce_ltp_chg,
-                   b.ce_iv  - COALESCE(prev.ce_iv,  b.ce_iv)   AS ce_iv_chg,
-                   -- build-up matrix: OI change × PRICE change (not price level)
-                   CASE WHEN b.ce_oi_change > 0 AND (b.ce_ltp - COALESCE(prev.ce_ltp,b.ce_ltp)) > 0 THEN 'Long Build-Up'
-                        WHEN b.ce_oi_change > 0 AND (b.ce_ltp - COALESCE(prev.ce_ltp,b.ce_ltp)) < 0 THEN 'Short Build-Up'
-                        WHEN b.ce_oi_change < 0 AND (b.ce_ltp - COALESCE(prev.ce_ltp,b.ce_ltp)) > 0 THEN 'Short Covering'
-                        WHEN b.ce_oi_change < 0 AND (b.ce_ltp - COALESCE(prev.ce_ltp,b.ce_ltp)) < 0 THEN 'Long Unwinding'
-                        ELSE 'Neutral' END            AS ce_signal
-            FROM base b
-            LEFT JOIN prev_base prev ON prev.symbol = b.symbol
-                AND prev.strike_price = b.strike_price
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY b.symbol ORDER BY b.ce_oi DESC) = 1
-        ),
-        pe_wall AS (
-            SELECT b.symbol,
-                   b.strike_price    AS pe_wall_strike,
-                   b.pe_oi           AS pe_wall_oi,
-                   b.pe_ltp                           AS pe_ltp,
-                   b.pe_oi_change                     AS pe_oi_chg,
-                   b.pe_iv                            AS pe_iv,
-                   b.pe_ltp - COALESCE(prev.pe_ltp, b.pe_ltp)  AS pe_ltp_chg,
-                   b.pe_iv  - COALESCE(prev.pe_iv,  b.pe_iv)   AS pe_iv_chg,
-                   CASE WHEN b.pe_oi_change > 0 AND (b.pe_ltp - COALESCE(prev.pe_ltp,b.pe_ltp)) > 0 THEN 'Long Build-Up'
-                        WHEN b.pe_oi_change > 0 AND (b.pe_ltp - COALESCE(prev.pe_ltp,b.pe_ltp)) < 0 THEN 'Short Build-Up'
-                        WHEN b.pe_oi_change < 0 AND (b.pe_ltp - COALESCE(prev.pe_ltp,b.pe_ltp)) > 0 THEN 'Short Covering'
-                        WHEN b.pe_oi_change < 0 AND (b.pe_ltp - COALESCE(prev.pe_ltp,b.pe_ltp)) < 0 THEN 'Long Unwinding'
-                        ELSE 'Neutral' END            AS pe_signal
-            FROM base b
-            LEFT JOIN prev_base prev ON prev.symbol = b.symbol
-                AND prev.strike_price = b.strike_price
-            QUALIFY ROW_NUMBER() OVER (PARTITION BY b.symbol ORDER BY b.pe_oi DESC) = 1
+        prev AS (
+            SELECT r.symbol, r.strike_price,
+                   COALESCE(r.ce_ltp,0) AS p_ce_ltp,
+                   COALESCE(r.pe_ltp,0) AS p_pe_ltp
+            FROM ranked r
+            JOIN nearest n ON r.symbol = n.symbol AND r.expiry = n.exp
+            WHERE r.rk = 2
         )
-        SELECT
-            a.symbol,
-            a.spot,
-            a.fut_price,
-            a.atm_strike,
-            c.ce_wall_strike,
-            c.ce_wall_oi,
-            p.pe_wall_strike,
-            p.pe_wall_oi,
-            -- distances from spot
-            c.ce_wall_strike - a.spot           AS ce_dist_spot,
-            a.spot - p.pe_wall_strike           AS pe_dist_spot,
-            -- distances from futures
-            c.ce_wall_strike - a.fut_price      AS ce_dist_fut,
-            a.fut_price - p.pe_wall_strike      AS pe_dist_fut,
-            -- wall strength (how thick vs average)
-            CASE WHEN a.avg_ce_oi > 0
-                 THEN ROUND(a.max_ce_oi / a.avg_ce_oi, 1) ELSE NULL END AS ce_wall_strength,
-            CASE WHEN a.avg_pe_oi > 0
-                 THEN ROUND(a.max_pe_oi / a.avg_pe_oi, 1) ELSE NULL END AS pe_wall_strength,
-            -- PCR
-            CASE WHEN a.total_ce_oi > 0
-                 THEN ROUND(a.total_pe_oi / a.total_ce_oi, 3) ELSE NULL END AS pcr,
-            -- distance between walls
-            c.ce_wall_strike - p.pe_wall_strike AS wall_range,
-            -- CE wall enrichment: LTP, IV, OI change at the wall strike
-            c.ce_ltp, c.ce_ltp_chg, c.ce_iv, c.ce_iv_chg, c.ce_oi_chg, c.ce_signal,
-            -- PE wall enrichment
-            p.pe_ltp, p.pe_ltp_chg, p.pe_iv, p.pe_iv_chg, p.pe_oi_chg, p.pe_signal
-        FROM agg a
-        JOIN ce_wall c ON a.symbol = c.symbol
-        JOIN pe_wall p ON a.symbol = p.symbol
-        ORDER BY a.symbol
+        SELECT c.*,
+               c.ce_ltp - COALESCE(p.p_ce_ltp, c.ce_ltp) AS ce_ltp_chg,
+               c.pe_ltp - COALESCE(p.p_pe_ltp, c.pe_ltp) AS pe_ltp_chg
+        FROM cur c
+        LEFT JOIN prev p ON p.symbol = c.symbol AND p.strike_price = c.strike_price
+        ORDER BY c.symbol, c.strike_price
         """
     )
     if df.empty:
         return []
-    return safe_response(to_records(df))
+
+    fp = {"FRAC": float(shelf_frac)}
+    rows = []
+    for symbol, g in df.groupby("symbol", sort=True):
+        g = g.sort_values("strike_price")
+        strikes = g["strike_price"].to_numpy(float)
+        ce_oi = g["ce_oi"].to_numpy(float)
+        pe_oi = g["pe_oi"].to_numpy(float)
+        ce_oi_chg = g["ce_oi_change"].to_numpy(float)
+        pe_oi_chg = g["pe_oi_change"].to_numpy(float)
+        ce_ltp_chg = g["ce_ltp_chg"].to_numpy(float)
+        pe_ltp_chg = g["pe_ltp_chg"].to_numpy(float)
+        net_gexv = g["net_gexv"].to_numpy(float)
+        spot = float(g["spot"].max())
+        fut = float(g["fut_price"].max())
+        atm = float(g["atm_strike"].max())
+        is_index = symbol in idx_set
+
+        # ---- shelves (CE = resistance band, PE = support band) ----
+        ce_shelf = core.oi_shelf(strikes, ce_oi, oi_change=ce_oi_chg,
+                                 ltp_change=ce_ltp_chg, symbol=symbol,
+                                 is_index=is_index, params=fp)
+        pe_shelf = core.oi_shelf(strikes, pe_oi, oi_change=pe_oi_chg,
+                                 ltp_change=pe_ltp_chg, symbol=symbol,
+                                 is_index=is_index, params=fp)
+        if ce_shelf is None or pe_shelf is None:
+            continue
+
+        # ---- gamma wall: strike with the largest |net gamma| ----
+        gamma_wall_strike = None
+        gamma_wall_val = None
+        if np.isfinite(net_gexv).any() and np.abs(net_gexv).max() > 0:
+            gi = int(np.argmax(np.abs(net_gexv)))
+            gamma_wall_strike = float(strikes[gi])
+            gamma_wall_val = float(net_gexv[gi])
+
+        # ---- symbol-wide stats (PCR, wall strength) ----
+        total_ce = float(ce_oi.sum())
+        total_pe = float(pe_oi.sum())
+        avg_ce = float(ce_oi[ce_oi > 0].mean()) if (ce_oi > 0).any() else 0.0
+        avg_pe = float(pe_oi[pe_oi > 0].mean()) if (pe_oi > 0).any() else 0.0
+        pcr = round(total_pe / total_ce, 3) if total_ce > 0 else None
+
+        ce_wall = ce_shelf["wall_strike"]
+        pe_wall = pe_shelf["wall_strike"]
+        ce_wall_oi = ce_shelf["wall_oi"]
+        pe_wall_oi = pe_shelf["wall_oi"]
+
+        # gamma-wall vs OI-wall divergence (the signal): gamma wall sits at a
+        # different strike than the CE OI wall → that strike does the pinning.
+        gamma_oi_divergence = (
+            gamma_wall_strike is not None
+            and abs(gamma_wall_strike - ce_wall) > 1e-6
+        )
+
+        rows.append({
+            "symbol":           symbol,
+            "spot":             spot,
+            "fut_price":        fut,
+            "atm_strike":       atm,
+            # ---- classic walls (back-compat with existing frontend fields) ----
+            "ce_wall_strike":   ce_wall,
+            "ce_wall_oi":       ce_wall_oi,
+            "pe_wall_strike":   pe_wall,
+            "pe_wall_oi":       pe_wall_oi,
+            "ce_dist_spot":     ce_wall - spot,
+            "pe_dist_spot":     spot - pe_wall,
+            "ce_dist_fut":      ce_wall - fut,
+            "pe_dist_fut":      fut - pe_wall,
+            "ce_wall_strength": round(ce_wall_oi / avg_ce, 1) if avg_ce > 0 else None,
+            "pe_wall_strength": round(pe_wall_oi / avg_pe, 1) if avg_pe > 0 else None,
+            "pcr":              pcr,
+            "wall_range":       ce_wall - pe_wall,
+            # ---- wall enrichment (signal at the wall strike) ----
+            "ce_signal":        ce_shelf.get("signal"),
+            "pe_signal":        pe_shelf.get("signal"),
+            # ---- CE shelf ----
+            "ce_shelf_lo":      ce_shelf["lo"],
+            "ce_shelf_hi":      ce_shelf["hi"],
+            "ce_shelf_oi":      ce_shelf["oi"],
+            "ce_shelf_com":     ce_shelf["com"],
+            "ce_shelf_n":       ce_shelf["n_strikes"],
+            "ce_is_shelf":      ce_shelf["is_shelf"],
+            "ce_shelf_members": ce_shelf["members"],
+            "ce_shelf_oi_chg":  ce_shelf.get("oi_change"),
+            "ce_shelf_signal":  ce_shelf.get("signal"),
+            # ---- PE shelf ----
+            "pe_shelf_lo":      pe_shelf["lo"],
+            "pe_shelf_hi":      pe_shelf["hi"],
+            "pe_shelf_oi":      pe_shelf["oi"],
+            "pe_shelf_com":     pe_shelf["com"],
+            "pe_shelf_n":       pe_shelf["n_strikes"],
+            "pe_is_shelf":      pe_shelf["is_shelf"],
+            "pe_shelf_members": pe_shelf["members"],
+            "pe_shelf_oi_chg":  pe_shelf.get("oi_change"),
+            "pe_shelf_signal":  pe_shelf.get("signal"),
+            # ---- gamma wall ----
+            "gamma_wall_strike":   gamma_wall_strike,
+            "gamma_wall_net_gexv": gamma_wall_val,
+            "gamma_oi_divergence": gamma_oi_divergence,
+            "shelf_frac":          float(shelf_frac),
+        })
+
+    if not rows:
+        return []
+    return safe_response(rows)
 
 
 
