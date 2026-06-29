@@ -77,44 +77,84 @@ def analysis_range(ref_price: float, exp_move: float, strike_int: float,
 # Gamma flip / transition
 # ═══════════════════════════════════════════════════════════════════
 
+NEUTRAL_BAND_FRAC = 0.05   # |net gamma at ref| within this fraction of GROSS gamma → "mixed"
+                           # (provisional; tune from post-backfill distribution)
+
+
 def gamma_flip(strikes, net_gex, ref_price=None,
-               smooth_window: int = 5) -> Tuple[Optional[float], Optional[float], str]:
+               smooth_window: int = 1,
+               neutral_band_frac: float = NEUTRAL_BAND_FRAC
+               ) -> Tuple[Optional[float], Optional[float], str]:
     """
-    Interpolated gamma-flip (zero-crossing) strike + nearest real strike + regime.
-    Regime is the sign of net gamma AT ref_price (spot/fut), not the top strike.
-    smooth_window: uniform filter size to suppress noise before zero-crossing search.
-    Set to 1 to disable. Default 5 — suppresses illiquid strike oscillations.
-    Returns (flip_interp, flip_nearest, regime). flip None if no crossing.
-    regime ∈ {positive, negative, all_positive, all_negative, no_crossing, insufficient}
+    Gamma-flip (zero-crossing) strike + nearest real strike + regime.
+
+    v2 (simpler, externally verifiable — spec §1.1, corrected):
+      - FLIP = per-strike net-gamma sign-change NEAREST ref_price (interpolated).
+        This is where LOCAL dealer gamma flips sign — matches the GEX screen.
+        (Cumulative-crossing was tried and rejected: it returned the wrong strike
+        on near-zero multi-crossing chains, e.g. DMART 4200 vs the real ~4325.)
+      - REGIME = sign of LOCAL net gamma interpolated AT ref_price, with a mixed
+        band: |gamma_at_ref| <= neutral_band_frac × gross gamma → "mixed".
+        Local-at-price (not aggregate, not cumulative) is the dealer regime price
+        actually sits in — robust on spiky near-zero curves (the DMART artifact).
+      - smooth_window default 1 (OFF) for verifiability. >1 applies a uniform
+        filter before detection (legacy; not used by the batch).
+      - Extremes (all_positive / all_negative) ONLY for genuinely monotone-sign
+        curves (no per-strike sign change anywhere). Near-zero multi-crossing is
+        never rounded to an extreme.
+      - Flip strike emitted whenever a crossing exists (incl. mixed regime).
+
+    Returns (flip_interp, flip_nearest, regime). flip None only if no crossing.
+    regime ∈ {positive, negative, mixed, all_positive, all_negative,
+              no_crossing, insufficient}
     """
-    from scipy.ndimage import uniform_filter1d
     g = np.asarray(net_gex, float)
     x = np.asarray(strikes, float)
-    # Smooth before zero-crossing detection if window > 1
+    # Optional legacy smoothing (default OFF)
     if smooth_window and smooth_window > 1 and len(g) >= smooth_window:
+        from scipy.ndimage import uniform_filter1d
         g = uniform_filter1d(g, size=smooth_window)
     if len(g) < 2:
         return None, None, "insufficient"
-    sc = np.where(np.sign(g[:-1]) != np.sign(g[1:]))[0]
-    if len(sc) == 0:
-        if (g >= 0).all():
-            return None, None, "all_positive"
-        if (g <= 0).all():
-            return None, None, "all_negative"
-        return None, None, "no_crossing"
+
     ref = ref_price if ref_price is not None else x[int(len(x) // 2)]
-    # interpolated flip per crossing; pick the one NEAREST ref_price (not first)
+    order = np.argsort(x)
+    xs, gs = x[order], g[order]
+
+    # Per-strike sign-change crossings (LOCAL gamma flips sign)
+    sc = np.where(np.sign(gs[:-1]) != np.sign(gs[1:]))[0]
+
     def _interp(i):
-        d = g[i + 1] - g[i]
-        return float(x[i]) if abs(d) < 1e-12 else float(x[i] - g[i] * (x[i + 1] - x[i]) / d)
-    flips = [_interp(int(j)) for j in sc]
-    best = int(np.argmin([abs(f - ref) for f in flips]))
-    i = int(sc[best])
-    flip = flips[best]
-    nearest = float(x[int(np.argmin(np.abs(x - flip)))])
-    gex_at_ref = float(g[int(np.argmin(np.abs(x - ref)))])
-    regime = "positive" if gex_at_ref >= 0 else "negative"
-    return round(flip, 2), nearest, regime
+        d = gs[i + 1] - gs[i]
+        return float(xs[i]) if abs(d) < 1e-12 else \
+            float(xs[i] - gs[i] * (xs[i + 1] - xs[i]) / d)
+
+    flip = nearest = None
+    if len(sc) > 0:
+        flips = [_interp(int(j)) for j in sc]
+        best = int(np.argmin([abs(f - ref) for f in flips]))
+        flip = round(flips[best], 2)
+        nearest = float(xs[int(np.argmin(np.abs(xs - flip)))])
+
+    # Regime from LOCAL net gamma interpolated at ref, mixed band scaled by gross
+    gamma_at_ref = float(np.interp(ref, xs, gs))
+    gross = float(np.abs(gs).sum())
+    band = gross * neutral_band_frac
+    pos_all = bool((gs >= 0).all())
+    neg_all = bool((gs <= 0).all())
+
+    if pos_all and len(sc) == 0:
+        regime = "all_positive"
+    elif neg_all and len(sc) == 0:
+        regime = "all_negative"
+    elif abs(gamma_at_ref) <= band:
+        regime = "mixed"
+    elif gamma_at_ref > 0:
+        regime = "positive"
+    else:
+        regime = "negative"
+
+    return flip, nearest, regime
 
 
 def transition_width(strikes, net_gex, ref_price=None) -> Optional[float]:
@@ -139,6 +179,78 @@ def lopsidedness(net_gex) -> float:
     g = np.asarray(net_gex, float)
     gross = float(np.abs(g).sum())
     return round(float(g.sum()) / gross, 4) if gross > 1e-9 else 0.0
+
+
+GAMMA_SHELF_FRAC = 0.5   # shelf member |net gamma| must be >= this × peak |net gamma|
+                         # (provisional; tune from post-backfill distribution)
+
+
+def gamma_shelf(strikes, net_gex, frac: float = GAMMA_SHELF_FRAC,
+                prev_com: Optional[float] = None) -> Optional[Dict]:
+    """Dominant |net gamma| shelf — the band of adjacent strikes carrying the
+    largest dealer gamma inventory (spec §3.1). Analogous to oi_shelf but on
+    |net gamma| per strike, NOT premium-weighted OI, and WITHOUT the round-number
+    preferred-strike mask (that effect is OI-liquidity-specific, not gamma).
+
+    Walk contiguously out from the peak |net gamma| strike while neighbours stay
+    >= frac × peak; stop at the first strike below threshold (a real gamma trough).
+
+    Args:
+        strikes:  1-D strike array (any order).
+        net_gex:  matching per-strike NET gamma (signed; CE_gamma×oi×lot − PE…).
+        frac:     shelf membership threshold as a fraction of peak |net gamma|.
+        prev_com: previous-session shelf center, for migration.
+
+    Returns dict (or None if no usable gamma):
+        center          |gamma|-weighted center of mass of the shelf (Q1b COM)
+        width           number of strikes in the shelf
+        peak_strike     strike of max |net gamma|
+        peak_value      SIGNED net gamma at the peak strike
+        single_strike   True when width == 1 (sharp, fragile pin)
+        lo, hi          shelf strike bounds
+        concentration   peak |net gamma| / total |net gamma| over the whole input
+                        range (defense-strength input; high = concentrated)
+        migration       center - prev_com (if prev_com given) — +ve = shelf up
+    """
+    x = np.asarray(strikes, float)
+    g = np.asarray(net_gex, float)
+    if x.size == 0 or g.size == 0:
+        return None
+    order = np.argsort(x)
+    xs, gs = x[order], g[order]
+    ag = np.abs(gs)
+    total_abs = float(ag.sum())
+    if ag.max() <= 0 or total_abs <= 0:
+        return None
+
+    peak_i = int(np.argmax(ag))
+    thr = ag[peak_i] * frac
+    lo = peak_i
+    while lo - 1 >= 0 and ag[lo - 1] >= thr:
+        lo -= 1
+    hi = peak_i
+    while hi + 1 < len(ag) and ag[hi + 1] >= thr:
+        hi += 1
+
+    members = np.arange(lo, hi + 1)
+    sx, sa = xs[members], ag[members]
+    tot = float(sa.sum())
+    com = float((sx * sa).sum() / tot) if tot > 0 else float(xs[peak_i])
+    width = int(len(members))
+
+    out: Dict[str, Any] = {
+        "center":        round(com, 2),
+        "width":         width,
+        "peak_strike":   float(xs[peak_i]),
+        "peak_value":    round(float(gs[peak_i]), 4),
+        "single_strike": bool(width == 1),
+        "lo":            float(sx.min()),
+        "hi":            float(sx.max()),
+        "concentration": round(float(ag[peak_i] / total_abs), 4),
+    }
+    if prev_com is not None:
+        out["migration"] = round(com - float(prev_com), 2)
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -209,8 +321,9 @@ def basis_deadzone(basis_pct, deadzone: float = BASIS_DEADZONE_PCT) -> bool:
 REGIME_COLOR_RAMP = {
     "all_positive": {"color": "#0c8f4d", "order": 0, "label": "all positive"},   # deep green
     "positive":     {"color": "#10b981", "order": 1, "label": "positive"},        # green
-    "negative":     {"color": "#f59e0b", "order": 2, "label": "negative"},        # orange
-    "all_negative": {"color": "#dc2626", "order": 3, "label": "all negative"},    # deep red
+    "mixed":        {"color": "#9ca3af", "order": 2, "label": "mixed"},           # grey (both signs)
+    "negative":     {"color": "#f59e0b", "order": 3, "label": "negative"},        # orange
+    "all_negative": {"color": "#dc2626", "order": 4, "label": "all negative"},    # deep red
 }
 REGIME_COLOR_FALLBACK = {"color": "#3d5270", "order": 99, "label": ""}  # muted / unknown
 
@@ -674,9 +787,11 @@ METRIC_INFO = {
         "Primary price reference. Spot (underlying) shown in tooltip; the basis "
         "between them carries cost-of-carry + positioning."),
     "gex_regime": ("REGIME",
-        "Net gamma sign at the strike nearest price (at-spot regime).",
+        "Net gamma sign at price (local-at-fut regime), with a mixed band.",
         "Positive = dealers long gamma, hedging DAMPENS moves (vol-suppression / pin). "
-        "Negative = dealers short gamma, hedging AMPLIFIES moves (vol-expansion risk)."),
+        "Negative = dealers short gamma, hedging AMPLIFIES moves (vol-expansion risk). "
+        "Mixed = both signs present near price (near-zero / unstable). all_positive / "
+        "all_negative only when the whole curve is one sign."),
     "days_in_regime": ("DAYS",
         "Consecutive sessions in the current gamma regime.",
         "Higher = established / persistent regime. Just-flipped (low) = fresh, less "
@@ -696,6 +811,16 @@ METRIC_INFO = {
         "Above flip = positive-gamma (pinning) zone; below = negative (amplifying), or "
         "vice-versa per regime. The structural boundary price tends to gravitate to / "
         "react around."),
+    "gamma_shelf_center": ("γ SHELF",
+        "Center of mass of the dominant gamma shelf — the band of strikes carrying the "
+        "largest dealer gamma inventory (Q1/Q1b: where hedging is concentrated).",
+        "This is the hedging center of mass. A single-strike shelf (marked ◆) is a sharp, "
+        "fragile pin; a wide shelf is distributed defense. Hover for width / peak."),
+    "migration_effectiveness": ("MIG EFF",
+        "|spot move %| / |gamma-COM move %| vs the previous session.",
+        "≈1 = orderly (dealers repositioning in step with price); ≫1 = price running "
+        "away from a static structure (unstable / chasing); ≈0 = COM repositioning "
+        "without spot (anticipatory). Blank when COM barely moves."),
     "flip_velocity": ("FLIP Δ/d",
         "Flip migration speed in points per calendar day (vs previous session).",
         "Sign = direction of drift; larger magnitude = structure shifting faster. "

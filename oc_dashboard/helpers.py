@@ -58,6 +58,7 @@ def _build_gamma_profile(
             COALESCE(ce_oi,           0) AS ce_oi,
             COALESCE(pe_oi,           0) AS pe_oi,
             COALESCE(underlying_price,0) AS spot,
+            COALESCE(fut_price, underlying_price, 0) AS fut_price,
             COALESCE(days_to_expiry,  0) AS dte,
             COALESCE(atm_strike,      0) AS atm_strike,
             lotsize                       AS raw_lot,
@@ -74,6 +75,7 @@ def _build_gamma_profile(
         return pd.DataFrame(), 0, 0, 1
 
     spot     = float(df["spot"].iloc[0])
+    fut      = float(df["fut_price"].iloc[0]) or spot
     dte      = float(df["dte"].iloc[0])
     lot_size = max(int(df["raw_lot"].iloc[0]) if df["raw_lot"].iloc[0] is not None else 1, 1)
     strikes  = df["strike_price"].values
@@ -81,20 +83,22 @@ def _build_gamma_profile(
     put_gex  = df["pe_gamma"].values * df["pe_oi"].values * lot_size
     net_gex  = call_gex - put_gex   # sign: positive = call gamma dominant
 
-    # Adaptive range from ATM IV (expected move + buffer)
+    # Adaptive range from ATM IV (expected move + buffer). Futures-based (Black-76):
+    # range + flip reference use fut_price, consistent with the exposure surface.
     atm_mask = np.abs(strikes - df["atm_strike"].iloc[0]) < 1e-6
     if not atm_mask.any():
         # Fallback: nearest strike to atm_strike
         atm_mask = np.zeros(len(strikes), dtype=bool)
         atm_mask[int(np.argmin(np.abs(strikes - df["atm_strike"].iloc[0])))] = True
     atm_iv   = float(df.loc[df["strike_price"] == strikes[atm_mask][0], "ce_iv"].iloc[0]) if atm_mask.any() else 0
-    lo, hi   = gamma_analysis_range(spot, atm_iv=atm_iv, dte=dte)
+    lo, hi   = gamma_analysis_range(fut, atm_iv=atm_iv, dte=dte)
 
     # Flip point: computed on ACTUAL discrete strikes (not linspace) for accuracy.
     # Linspace maps multiple levels to same strike, shifting the zero-crossing.
+    # ref_price = fut (futures-based) so the flip/regime match the exposure screener.
     rng_mask   = (strikes >= lo) & (strikes <= hi)
     flip_point, flip_nearest, _ = _core.gamma_flip(
-        strikes[rng_mask], net_gex[rng_mask], ref_price=spot
+        strikes[rng_mask], net_gex[rng_mask], ref_price=fut
     )
 
     # Linspace grid for VISUAL chart only (smooth curve)
@@ -115,6 +119,7 @@ def _build_gamma_profile(
     # Attach flip point to the df so callers can read it directly
     result_df.attrs["flip_point"]   = flip_point
     result_df.attrs["flip_nearest"] = flip_nearest
+    result_df.attrs["fut"]          = fut   # futures reference for regime test
     return result_df, spot, dte, lot_size
 
 
@@ -182,7 +187,12 @@ def _gamma_analysis_inline(
     nearest = int(np.argmin(np.abs(ns_col - spot)))
     gamma_at_spot = float(g[nearest])
 
-    regime = "Positive Gamma" if (gamma_flip is None or spot >= gamma_flip) else "Negative Gamma"
+    # Regime test is futures-based (Black-76) to match the flip reference and the
+    # exposure screener. fut from attrs; fall back to spot if absent.
+    fut_ref = gdf.attrs.get("fut") if hasattr(gdf, "attrs") else None
+    if fut_ref is None:
+        fut_ref = spot
+    regime = "Positive Gamma" if (gamma_flip is None or fut_ref >= gamma_flip) else "Negative Gamma"
 
     # Magnet zone
     max_g = float(gdf["total_gamma_billions"].max())

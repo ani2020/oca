@@ -568,13 +568,16 @@ async function loadGex(){
       const cg=prof.map(r=>r.call_gamma_billions),pg=prof.map(r=>r.put_gamma_billions),tg=prof.map(r=>r.total_gamma_billions);
       const pshapes=[];
       if(gp.gamma_flip!=null)pshapes.push({type:'line',x0:gp.gamma_flip,x1:gp.gamma_flip,y0:0,y1:1,yref:'paper',line:{color:C.red,width:2,dash:'dot'}});
+      if(gp.fut!=null)pshapes.push({type:'line',x0:gp.fut,x1:gp.fut,y0:0,y1:1,yref:'paper',line:{color:C.acc2,width:1.5,dash:'dash'}});
+      if(gp.spot!=null)pshapes.push({type:'line',x0:gp.spot,x1:gp.spot,y0:0,y1:1,yref:'paper',line:{color:C.acc,width:1,dash:'dot'}});
       if(gp.magnet)pshapes.push({type:'rect',x0:gp.magnet.lower,x1:gp.magnet.upper,y0:0,y1:1,yref:'paper',fillcolor:'rgba(0,200,240,.05)',line:{width:0}});
       plot('gammaProfileChart',[
         {name:'Call GEX',x:lvl,y:cg,type:'scatter',mode:'lines',fill:'tozeroy',line:{color:C.green,width:1.5},fillcolor:'rgba(16,185,129,.1)'},
         {name:'Put GEX', x:lvl,y:pg,type:'scatter',mode:'lines',fill:'tozeroy',line:{color:C.red,  width:1.5},fillcolor:'rgba(244,63,94,.1)'},
         {name:'Total',   x:lvl,y:tg,type:'scatter',mode:'lines',line:{color:C.acc,width:2.5}},
       ],{...LB,shapes:pshapes,xaxis:{...LB.xaxis,title:'Price Level'},yaxis:{...LB.yaxis,title:'GEX (₹B)'}});
-      const regime=gp.spot>=(gp.gamma_flip||0)?'Positive Gamma':'Negative Gamma';
+      const _ref = gp.fut!=null?gp.fut:gp.spot;
+      const regime=_ref>=(gp.gamma_flip||0)?'Positive Gamma':'Negative Gamma';
       document.getElementById('gexKpis').innerHTML=[
         {label:'SPOT',value:fmt(gp.spot),sub:''},
         {label:'GAMMA FLIP',value:gp.gamma_flip!=null?fmt(gp.gamma_flip,0):'—',sub:regime,subcls:regime==='Positive Gamma'?'up':'down'},
@@ -2721,6 +2724,9 @@ function renderExposureScreener(d){
     {key:'symbol',      label:'SYMBOL', fmt:(v)=>`<span style="cursor:pointer;color:var(--acc);font-weight:600"
                                         onclick="jumpHistory('${v}')" title="Open trend history for ${v}">${v}</span>`},
     ...droppedCol,
+    {key:'_defend',     label:'DEFEND', fmt:(v,r)=>defendCell(r, r._idx),
+                        sortValue:(v,r)=>{const h=_defenseHoldProb(r);return h?h.p:-1;},
+                        exportValue:(v,r)=>{const h=_defenseHoldProb(r);return h?h.p:'';}},
     // #9c: primary price = FUT (fut_price); spot shown in tooltip
     {key:'fut_price',   label:'FUT',     fmt:(v,r)=>v!=null?`<span title="spot: ${r&&r.spot!=null?fmt(r.spot,1):'—'}">${fmt(v,1)}</span>`:'—', exportValue:v=>v==null?'':v},
     {key:'gex_regime',  label:'REGIME',  fmt:(v,r)=>regimePillWithDays(v, r)},
@@ -2729,7 +2735,9 @@ function renderExposureScreener(d){
     {key:'net_gex_sign',label:'AGG',     fmt:v=>aggSignIcon(v), exportValue:v=>v||''},
     {key:'net_gex_norm',label:'LOPSIDED', fmt:v=>v!=null?sspan(v,3):'—'},
     {key:'gamma_flip',  label:'γ FLIP',  fmt:v=>v!=null?fmt(v,0):'—'},
+    {key:'gamma_shelf_center',label:'γ SHELF', fmt:(v,r)=>gammaShelfCell(v, r)},
     {key:'flip_velocity',label:'FLIP Δ/d', fmt:v=>v!=null?sspan(v,1):'—'},
+    {key:'migration_effectiveness',label:'MIG EFF', fmt:v=>migEffCell(v)},
     {key:'flip_norm_distance',label:'FLIP DIST',fmt:v=>v!=null?sspan(v,2):'—'},
     {key:'transition_width_norm',label:'TRANS W', fmt:v=>v!=null?fmt(v,2):'—'},
     {key:'neg_gamma_fraction',label:'NEG γ%', fmt:v=>v!=null?fmt(v*100,0)+'%':'—'},
@@ -2747,7 +2755,143 @@ function renderExposureScreener(d){
   ];
   // attach column help (meaning + interpret) as th tooltip from METRIC_INFO
   esCols.forEach(c=>{ const m=_metricInfo[c.key]; if(m) c.help = m.meaning+' → '+m.interpret; });
+  _esData = rows;                       // stash for the ⊕ DEFEND tooltip
+  rows.forEach((r,i)=>{ r._idx=i; });   // stable index (survives DOM re-sort)
   document.getElementById('esTable').innerHTML = makeTbl(rows, esCols);
+  _wireExpTips();
+}
+
+// ═════════════════════════════════════════════════════════════════
+// Exposure narrative labels + defense-zone-hold probability
+// Pure functions over stored columns (design: exposure_narrative_design.md).
+// Thresholds locked from ~12k-row backfill distributions.
+// ═════════════════════════════════════════════════════════════════
+let _esData = [];   // last screener payload, for the DEFEND ⊕ tooltip
+
+// Signed distance from gamma COM to fut, in expected-move units.
+function _comDistEM(r){
+  if(r==null||r.gamma_shelf_center==null||r.fut_price==null||!r.expected_move) return null;
+  return (r.gamma_shelf_center - r.fut_price)/r.expected_move;
+}
+
+// 1. Where is dealer positioning? (gamma COM vs price)
+function _narrPositioning(r){
+  const d=_comDistEM(r);
+  if(d==null) return '—';
+  const ad=Math.abs(d);
+  if(ad<=0.25) return 'Defending at-the-money (COM ≈ price)';
+  return `Support stacked ${d>0?'above':'below'} (COM ${d>0?'+':'−'}${ad.toFixed(2)} EM)`;
+}
+
+// 2. How is inventory distributed? (concentration spread + lopsidedness tilt)
+function _narrDistribution(r){
+  const conc=r.concentration, lop=r.net_gex_norm;
+  const spread = conc==null?'—':(conc>0.37?'Concentrated':(conc>0.27?'Moderate':'Diffuse'));
+  const tilt = lop==null?'balanced':(lop>0.29?'call-heavy':(lop<-0.29?'put-heavy':'balanced'));
+  let s=`${spread}, ${tilt}`;
+  if(r.gamma_shelf_width===1 && conc!=null && conc>0.37 && r.gamma_shelf_peak_strike!=null)
+    s += ` · single-strike pin at ${fmt(r.gamma_shelf_peak_strike,0)}`;
+  return s;
+}
+
+// 3. How is it changing? (COM migration magnitude/direction + persistence + basis)
+function _narrChange(r){
+  const mig=r.gamma_com_migration, em=r.expected_move;
+  let mag='—';
+  if(mig!=null && em){
+    const a=Math.abs(mig)/em;
+    mag = a<0.25?'Stable':(a<=0.75?'Drifting':'Repositioning');
+    if(a>=0.25) mag += mig>0?' up':' down';
+  } else if(mig===0){ mag='Stable'; }
+  let s=mag;
+  if(r.days_in_regime!=null) s+=` (${r.days_in_regime}d in regime)`;
+  if(r.basis_chg!=null && Math.abs(r.basis_chg)>=16.3)
+    s += r.basis_chg>0?' · basis widening':' · basis compressing';
+  return s;
+}
+
+// Defense-zone-hold probability — empirical additive model (validated ±3.5pts).
+// base by width band + concentration adj + regime adj, clamped [5,95].
+// null when no flip zone exists (monotone curve → no transition_width).
+function _defenseHoldProb(r){
+  const twn=r.transition_width_norm, conc=r.concentration, reg=r.gex_regime;
+  if(twn==null) return null;
+  const wb = twn<=0.15?'tight':(twn<=0.24?'moderate':'wide');
+  let p = wb==='tight'?31:(wb==='moderate'?46:58);
+  if(conc!=null){ if(conc>0.37) p+=4; else if(conc<=0.27) p-=4; }
+  if(reg==='positive'||reg==='all_positive') p+=3;
+  else if(reg==='negative'||reg==='all_negative') p-=4;
+  p=Math.max(5,Math.min(95,p));
+  return {p:Math.round(p), bucket:(p<40?'Low':(p<=55?'Moderate':'High')), wb};
+}
+
+// DEFEND cell — compact ⊕ trigger + hold-prob chip; full narrative in the popover.
+function defendCell(r, idx){
+  const h=_defenseHoldProb(r);
+  const chip = h
+    ? `<span style="font-family:var(--mono);font-size:10px;color:${
+        h.bucket==='High'?'var(--green)':(h.bucket==='Low'?'var(--red)':'var(--amber)')}">${h.p}%</span>`
+    : '<span style="color:var(--muted);font-size:10px">—</span>';
+  return `<span class="wall-tip-trigger" tabindex="0" data-esidx="${idx}"
+            style="margin-right:5px">⊕</span>${chip}`;
+}
+
+// Popover HTML — three narrative groups + COM distance + hold-prob breakdown.
+function _expDetailTip(r){
+  const d=_comDistEM(r);
+  const h=_defenseHoldProb(r);
+  const row=(lbl,val)=>`<div style="display:flex;gap:10px;margin:2px 0">
+    <span style="color:var(--muted);min-width:96px;font-size:10px">${lbl}</span>
+    <span style="font-size:11px">${val}</span></div>`;
+  let hold;
+  if(h){
+    const col=h.bucket==='High'?'var(--green)':(h.bucket==='Low'?'var(--red)':'var(--amber)');
+    hold=`<span style="color:${col};font-weight:600">${h.p}% — ${h.bucket}</span>
+      <span style="color:var(--muted);font-size:9px"> (${h.wb} zone${
+        (r.gex_regime||'').indexOf('negative')>=0&&h.wb==='wide'?', width-dominated':''})</span>`;
+  } else {
+    hold='<span style="color:var(--muted)">no flip zone (one-sided γ)</span>';
+  }
+  return `<div style="font-family:var(--mono);min-width:240px;max-width:300px">
+    <div style="font-weight:600;margin-bottom:5px;color:var(--acc)">${r.symbol}
+      <span style="color:var(--muted);font-weight:400">· defense readout</span></div>
+    ${row('Positioning', _narrPositioning(r))}
+    ${row('Distribution', _narrDistribution(r))}
+    ${row('Changing', _narrChange(r))}
+    <div style="border-top:1px solid var(--bd);margin:5px 0"></div>
+    ${row('COM dist', d==null?'—':`${d>0?'+':''}${d.toFixed(2)} EM from price`)}
+    ${row('Zone holds', hold)}
+    <div style="color:var(--muted);font-size:9px;margin-top:5px;line-height:1.3">
+      Empirical next-day hold rate. Wider zones hold more (partly mechanical);
+      signal is concentration + regime tilt within a width band.</div>
+  </div>`;
+}
+
+// Tooltip wiring — mirrors the OI-walls popover (shared .wall-tip-pop element).
+function _showExpTip(trigger){
+  const idx=parseInt(trigger.dataset.esidx,10);
+  const r=_esData[idx]; if(!r) return;
+  const el=_ensureWallTipEl();
+  el.innerHTML=_expDetailTip(r);
+  el.style.display='block';
+  const tr=trigger.getBoundingClientRect();
+  const pw=el.offsetWidth, ph=el.offsetHeight, vw=window.innerWidth, vh=window.innerHeight;
+  let left=tr.right-pw; if(left<8) left=8; if(left+pw>vw-8) left=vw-8-pw;
+  let top=tr.bottom+6; if(top+ph>vh-8) top=tr.top-ph-6; if(top<8) top=8;
+  el.style.left=left+'px'; el.style.top=top+'px';
+}
+function _wireExpTips(){
+  const tbl=document.querySelector('#esTable table');
+  if(!tbl) return;
+  tbl.querySelectorAll('.wall-tip-trigger[data-esidx]').forEach(t=>{
+    t.addEventListener('mouseenter',()=>{ t._over=true;
+      const el=_ensureWallTipEl(); el._triggerOver=true; _showExpTip(t); });
+    t.addEventListener('mouseleave',()=>{ t._over=false;
+      const el=document.getElementById('wallTipPop'); if(el) el._triggerOver=false;
+      _hideWallTip(); });
+    t.addEventListener('focus',()=>_showExpTip(t));
+    t.addEventListener('blur',()=>_hideWallTip());
+  });
 }
 
 // ── Regime colour ramp (mirrors exposure_core.REGIME_COLOR_RAMP) ──
@@ -2756,8 +2900,9 @@ function renderExposureScreener(d){
 const REGIME_RAMP = {
   all_positive:{color:'#0c8f4d',order:0,label:'all positive'},  // deep green
   positive:    {color:'#10b981',order:1,label:'positive'},      // green
-  negative:    {color:'#f59e0b',order:2,label:'negative'},      // orange
-  all_negative:{color:'#dc2626',order:3,label:'all negative'},  // deep red
+  mixed:       {color:'#9ca3af',order:2,label:'mixed'},         // grey (both signs)
+  negative:    {color:'#f59e0b',order:3,label:'negative'},      // orange
+  all_negative:{color:'#dc2626',order:4,label:'all negative'},  // deep red
 };
 function regimeColor(v){ return (REGIME_RAMP[v]||{color:'var(--muted)',label:(v||'')}); }
 // Ordered colour box (the word is the tooltip, not the visible text).
@@ -2772,12 +2917,42 @@ function regimeBox(v){
 function regimePill(v){ return regimeBox(v); }
 function regimePillWithDays(v){ return regimeBox(v); }
 
-// days_in_regime badge — green if positive regime, red if negative, intensity hints persistence
+// days_in_regime badge — green if positive regime, red if negative, grey if mixed; intensity hints persistence
 function daysInRegimeBadge(days, regime){
   if(days==null) return '—';
-  const pos = regime && regime.indexOf('positive')>=0;
-  const col = pos ? 'var(--green)' : 'var(--red)';
+  let col = 'var(--red)';
+  if(regime && regime.indexOf('positive')>=0) col = 'var(--green)';
+  else if(regime === 'mixed') col = 'var(--muted)';
   return `<span style="font-family:var(--mono);font-size:10px;color:${col};font-weight:600">${days}d</span>`;
+}
+
+// γ shelf cell — center of mass of the dominant gamma shelf; flags single-strike
+// (sharp, fragile pin) and shows shelf width on hover.
+function gammaShelfCell(v, r){
+  if(v==null) return '—';
+  const w = r && r.gamma_shelf_width;
+  const single = r && r.gamma_shelf_single_strike;
+  const peak = r && r.gamma_shelf_peak_strike;
+  const tip = `shelf center ${fmt(v,0)}` +
+              (w!=null?` · width ${w} strike${w==1?'':'s'}`:'') +
+              (peak!=null?` · peak ${fmt(peak,0)}`:'') +
+              (single?' · SINGLE STRIKE (sharp pin)':'');
+  const col = single ? 'var(--amber)' : 'var(--fg)';
+  const mark = single ? ' ◆' : '';
+  return `<span title="${tip}" style="font-family:var(--mono);font-size:10px;color:${col}">${fmt(v,0)}${mark}</span>`;
+}
+
+// migration effectiveness = |spot move%| / |COM move%|. ≈1 orderly (COM tracks
+// spot); ≫1 price running from a static structure (caution); ≈0 anticipatory.
+function migEffCell(v){
+  if(v==null) return '—';
+  let col = 'var(--green)';                 // ≈ 1 orderly
+  if(v >= 2.5) col = 'var(--red)';          // price far outrunning structure
+  else if(v >= 1.6 || v <= 0.4) col = 'var(--amber)';
+  const tip = v>=1.6 ? 'price running ahead of dealer repositioning'
+            : (v<=0.4 ? 'COM repositioning without spot (anticipatory)'
+                      : 'orderly: COM tracking spot');
+  return `<span title="${tip}" style="font-family:var(--mono);font-size:10px;color:${col}">${fmt(v,2)}</span>`;
 }
 
 // compression badge — shows coiling state + consecutive days

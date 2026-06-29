@@ -66,8 +66,9 @@ def gamma_profile(
     if gdf.empty:
         raise HTTPException(404, "No data for gamma profile")
     gamma_flip, magnet = _flip_and_magnet(gdf)
+    fut = gdf.attrs.get("fut") if hasattr(gdf, "attrs") else None
     return safe_response({
-        "spot": spot, "gamma_flip": gamma_flip,
+        "spot": spot, "fut": fut, "gamma_flip": gamma_flip,
         "magnet": magnet, "profile": to_records(gdf),
     })
 
@@ -157,7 +158,9 @@ def gamma_analysis(
     result = _gamma_analysis_inline(
         gdf=gdf, spot=spot, dte=dte, atm_iv=atm_iv, atr=atr,
     )
-    result.update(symbol=symbol, expiry=expiry, spot=spot, dte=dte,
+    result.update(symbol=symbol, expiry=expiry, spot=spot,
+                  fut=gdf.attrs.get("fut") if hasattr(gdf, "attrs") else None,
+                  dte=dte,
                   atm_iv_pct=round(atm_iv_pct, 2) if atm_iv_pct else None)
     return safe_response(result)
 
