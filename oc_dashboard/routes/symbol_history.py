@@ -81,18 +81,20 @@ def symbol_history_metrics_meta():
 
 
 @router.get("/api/symbol_history/dates")
-def symbol_history_dates(symbol: Optional[str] = Query(None)):
+def symbol_history_dates(symbol: Optional[str] = Query(None),
+                         expiry_rank: int = Query(0)):
     """Available EOD dates (most recent first). If symbol given, restrict to dates
     that symbol actually has data on (per-symbol scrape gaps mean a global date
-    list can be ahead of a given ticker)."""
+    list can be ahead of a given ticker). Scoped to the chosen expiry rank."""
     if not _exposure_table_exists():
         raise HTTPException(404, "exposure_eod table not found — run the batch compute")
     if symbol:
         df = qdf("SELECT DISTINCT CAST(date AS VARCHAR) AS date FROM exposure_eod "
-                 "WHERE symbol = ? ORDER BY date DESC", [symbol])
+                 "WHERE symbol = ? AND expiry_rank = ? ORDER BY date DESC",
+                 [symbol, expiry_rank])
     else:
         df = qdf("SELECT DISTINCT CAST(date AS VARCHAR) AS date FROM exposure_eod "
-                 "ORDER BY date DESC")
+                 "WHERE expiry_rank = ? ORDER BY date DESC", [expiry_rank])
     return safe_response({"dates": [str(d) for d in df["date"].tolist()]})
 
 
@@ -106,10 +108,14 @@ def symbol_history_symbols():
 
 
 def _load_symbol_series(symbol: str, date_from: Optional[str],
-                        date_to: Optional[str]) -> List[Dict]:
-    """One query for one symbol → date-ordered, dead-zoned, strength-annotated rows."""
-    where = ["symbol = ?"]
-    params: List[Any] = [symbol]
+                        date_to: Optional[str],
+                        expiry_rank: int = 0) -> List[Dict]:
+    """One query for one symbol → date-ordered, dead-zoned, strength-annotated rows.
+    Single expiry rank (0 = NEAR, 1 = NEXT) so the series is one row per ascending
+    date — required by _apply_basis_deadzone and _strength_series, which assume a
+    single contiguous per-date chain."""
+    where = ["symbol = ?", "expiry_rank = ?"]
+    params: List[Any] = [symbol, expiry_rank]
     if date_from:
         where.append("date >= CAST(? AS DATE)")
         params.append(date_from)
@@ -136,6 +142,7 @@ def symbol_history(
     symbol:    str = Query(..., description="ticker (single symbol today; N-ready)"),
     date_from: Optional[str] = Query(None, description="YYYY-MM-DD inclusive"),
     date_to:   Optional[str] = Query(None, description="YYYY-MM-DD inclusive; default latest"),
+    expiry_rank: int = Query(0, description="0 = NEAR (front monthly), 1 = NEXT monthly"),
 ):
     """Per-symbol EOD trend series.
 
@@ -160,8 +167,9 @@ def symbol_history(
     # Default date_to = symbol's latest available DATA date (not wall-clock today
     # — weekends/holidays/missed scrapes must not 404 or truncate the window).
     if not date_to:
-        row = qdf("SELECT CAST(MAX(date) AS VARCHAR) AS d FROM exposure_eod WHERE symbol = ?",
-                  [symbols[0]])
+        row = qdf("SELECT CAST(MAX(date) AS VARCHAR) AS d FROM exposure_eod "
+                  "WHERE symbol = ? AND expiry_rank = ?",
+                  [symbols[0], expiry_rank])
         if row.empty or row["d"].iloc[0] is None:
             raise HTTPException(404, f"No data for {symbols[0]} in exposure_eod")
         date_to = str(row["d"].iloc[0])[:10]
@@ -177,7 +185,7 @@ def symbol_history(
 
     series: Dict[str, List[Dict]] = {}
     for sym in symbols:
-        series[sym] = _load_symbol_series(sym, date_from, date_to)
+        series[sym] = _load_symbol_series(sym, date_from, date_to, expiry_rank)
 
     # Build the regime ramp only for regimes actually present (small, shared map).
     regimes_seen = set()
@@ -192,5 +200,6 @@ def symbol_history(
         "series":     series,
         "date_from":  date_from,
         "date_to":    date_to,
+        "expiry_rank": expiry_rank,
         "regime_ramp": regime_ramp,
     })

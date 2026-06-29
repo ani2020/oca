@@ -68,6 +68,7 @@ def exposure_screener(
     index_name:   Optional[str] = Query(None, description="filter to index constituents"),
     min_confidence: str = Query("low", description="low|medium|high minimum"),
     sort_by:      str = Query("net_gex_norm", description="ranking column"),
+    expiry_rank:  int = Query(0, description="0 = NEAR (front monthly), 1 = NEXT monthly"),
     limit:        int = Query(200),
 ):
     if not _exposure_table_exists():
@@ -77,7 +78,8 @@ def exposure_screener(
     if screen_date:
         d = screen_date
     else:
-        row = qdf("SELECT MAX(date) AS d FROM exposure_eod")
+        row = qdf("SELECT MAX(date) AS d FROM exposure_eod WHERE expiry_rank = ?",
+                  [expiry_rank])
         if row.empty or row["d"].iloc[0] is None:
             raise HTTPException(404, "No data in exposure_eod")
         d = str(row["d"].iloc[0])
@@ -94,14 +96,14 @@ def exposure_screener(
                     "ON ic.symbol = e.symbol AND ic.index_name = ?")
         idx_params = [index_name]
 
-    # Base query for the screen date
+    # Base query for the screen date — one row per symbol at the chosen expiry rank
     df = qdf(f"""
         SELECT e.*
         FROM exposure_eod e
         {idx_join}
-        WHERE e.date = CAST(? AS DATE)
+        WHERE e.date = CAST(? AS DATE) AND e.expiry_rank = ?
         ORDER BY e.symbol
-    """, idx_params + [d])
+    """, idx_params + [d, expiry_rank])
 
     if df.empty:
         return safe_response({"date": d, "view": view, "rows": [], "counts": {}})
@@ -114,8 +116,9 @@ def exposure_screener(
     # prior available date. Returns today's row enriched with yesterday's signals.
     if view == "dropped":
         prev = qdf("""
-            SELECT MAX(date) AS d FROM exposure_eod WHERE date < CAST(? AS DATE)
-        """, [d])
+            SELECT MAX(date) AS d FROM exposure_eod
+            WHERE date < CAST(? AS DATE) AND expiry_rank = ?
+        """, [d, expiry_rank])
         if prev.empty or prev["d"].iloc[0] is None:
             return safe_response({"date": d, "view": view, "rows": [], "counts": {},
                                   "indicator_counts": {}, "prev_date": None, "total": 0})
@@ -123,13 +126,13 @@ def exposure_screener(
         # Symbols with a signal yesterday
         had = qdf("""
             SELECT symbol, signals AS prev_signals FROM exposure_eod
-            WHERE date = CAST(? AS DATE) AND signals != ''
-        """, [pdate])
+            WHERE date = CAST(? AS DATE) AND expiry_rank = ? AND signals != ''
+        """, [pdate, expiry_rank])
         # Symbols with a signal today
         now = qdf("""
             SELECT symbol FROM exposure_eod
-            WHERE date = CAST(? AS DATE) AND signals != ''
-        """, [d])
+            WHERE date = CAST(? AS DATE) AND expiry_rank = ? AND signals != ''
+        """, [d, expiry_rank])
         now_set = set(now["symbol"].tolist())
         dropped_map = {r.symbol: r.prev_signals
                        for r in had.itertuples() if r.symbol not in now_set}
@@ -174,8 +177,9 @@ def exposure_screener(
     # Signal counts across the (pre-limit) screen date for the summary bar
     full = qdf(f"""
         SELECT signals FROM exposure_eod
-        WHERE date = CAST(? AS DATE) AND signals IS NOT NULL AND signals != ''
-    """, [d])
+        WHERE date = CAST(? AS DATE) AND expiry_rank = ?
+          AND signals IS NOT NULL AND signals != ''
+    """, [d, expiry_rank])
     counts: Dict[str, int] = {}
     for s in full["signals"].tolist():
         for sig in str(s).split(","):
@@ -188,8 +192,8 @@ def exposure_screener(
         SELECT
             SUM(CASE WHEN regime_compression THEN 1 ELSE 0 END) AS compressing,
             SUM(CASE WHEN compression_release THEN 1 ELSE 0 END) AS releasing
-        FROM exposure_eod WHERE date = CAST(? AS DATE)
-    """, [d])
+        FROM exposure_eod WHERE date = CAST(? AS DATE) AND expiry_rank = ?
+    """, [d, expiry_rank])
     indicator_counts = {
         "regime_compression": int(ind["compressing"].iloc[0] or 0),
         "compression_release": int(ind["releasing"].iloc[0] or 0),
@@ -198,6 +202,7 @@ def exposure_screener(
     return safe_response({
         "date":   d,
         "view":   view,
+        "expiry_rank": expiry_rank,
         "rows":   to_records(df),
         "counts": counts,
         "indicator_counts": indicator_counts,

@@ -2523,6 +2523,7 @@ function renderExposureFlow(d){
 
 wireToggleGroup('esViewGroup');
 document.getElementById('btnEsLoad')?.addEventListener('click', loadExposureScreener);
+document.getElementById('esExpiryRank')?.addEventListener('change', loadExposureScreener);
 document.getElementById('esViewGroup')?.addEventListener('click', ()=>setTimeout(loadExposureScreener,50));
 document.getElementById('btnEsCsv')?.addEventListener('click', ()=>csvBtn('esTable', ()=>{
   const d=document.getElementById('esDate')?.value||new Date().toISOString().slice(0,10);
@@ -2577,12 +2578,13 @@ async function loadExposureScreener(){
   const signal = document.getElementById('esSignal')?.value||'';
   const regime = document.getElementById('esRegime')?.value||'';
   const conf   = document.getElementById('esConf')?.value||'medium';
+  const erank  = document.getElementById('esExpiryRank')?.value||'0';
 
   document.getElementById('esTable').innerHTML='<div class="loading"><div class="spinner"></div>Scanning…</div>';
   document.getElementById('esCounts').innerHTML='';
 
   try{
-    const params=new URLSearchParams({view, min_confidence:conf, sort_by:'net_gex_norm'});
+    const params=new URLSearchParams({view, min_confidence:conf, sort_by:'net_gex_norm', expiry_rank:erank});
     if(d) params.set('screen_date', d);
     if(signal) params.set('signal', signal);
     if(regime) params.set('regime', regime);
@@ -3069,7 +3071,8 @@ async function loadHistory(){
   if(!sym){ document.getElementById('hsBlocks').innerHTML='<div class="empty">Select a symbol</div>'; return; }
   document.getElementById('hsBlocks').innerHTML='<div class="loading"><div class="spinner"></div>Loading trend…</div>';
   try{
-    const p = new URLSearchParams({symbol:sym});
+    const erank = document.getElementById('hsExpiryRank')?.value||'0';
+    const p = new URLSearchParams({symbol:sym, expiry_rank:erank});
     if(from) p.set('date_from', from);
     if(to)   p.set('date_to', to);
     const data = await api(`/api/symbol_history?${p}`);
@@ -3439,6 +3442,7 @@ function jumpHistory(sym){
   // Capture the screener's selected date BEFORE switching views (read it now so
   // there's no dependency on DOM ordering later).
   const esDate = document.getElementById('esDate')?.value || '';
+  const esRank = document.getElementById('esExpiryRank')?.value || '0';
   // Remember the currently-active view so BACK can return to it.
   const origin = document.querySelector('.nav-btn.active')?.dataset.view || 'expscreen';
   document.querySelector('[data-view="history"]').click();
@@ -3455,10 +3459,13 @@ function jumpHistory(sym){
       }
       sel.value = sym;
     }
+    // carry the screener's NEAR/NEXT expiry rank into the history view
+    const rsel = document.getElementById('hsExpiryRank');
+    if(rsel) rsel.value = esRank;
     // anchor TO on the screener date if present, else the symbol's latest data date
     let toVal = esDate;
     if(!toVal){
-      try{ const dd = await api(`/api/symbol_history/dates?symbol=${encodeURIComponent(sym)}`);
+      try{ const dd = await api(`/api/symbol_history/dates?symbol=${encodeURIComponent(sym)}&expiry_rank=${esRank}`);
            toVal = (dd.dates||[])[0] || ''; }catch(e){}
     }
     const to = document.getElementById('hsTo'), from = document.getElementById('hsFrom');
@@ -3481,6 +3488,7 @@ function jumpHistory(sym){
 document.getElementById('btnHsBack')?.addEventListener('click', goBackFromHistory);
 document.getElementById('btnHsLoad')?.addEventListener('click', loadHistory);
 document.getElementById('hsSymbol')?.addEventListener('change', loadHistory);
+document.getElementById('hsExpiryRank')?.addEventListener('change', loadHistory);
 document.getElementById('btnHsGuide')?.addEventListener('click', ()=>{
   const g=document.getElementById('hsGuide');
   g.style.display = g.style.display==='none' ? '' : 'none';

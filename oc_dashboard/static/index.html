@@ -1093,6 +1093,11 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   <div class="filter-bar">
     <span class="fl">DATE</span>
     <select id="esDate" style="min-width:130px"></select>
+    <span class="fl">EXPIRY</span>
+    <select id="esExpiryRank" style="min-width:90px" title="NEAR = front monthly, NEXT = next monthly">
+      <option value="0" selected>NEAR</option>
+      <option value="1">NEXT</option>
+    </select>
     <div class="toggle-group" id="esViewGroup" style="margin-left:8px">
       <button class="active" data-ev="changed">WHAT CHANGED</button>
       <button data-ev="all">FULL UNIVERSE</button>
@@ -1148,6 +1153,11 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
             title="Return to the view you came from">← BACK</button>
     <span class="fl">SYMBOL</span>
     <select id="hsSymbol" style="min-width:140px"></select>
+    <span class="fl">EXPIRY</span>
+    <select id="hsExpiryRank" style="min-width:90px" title="NEAR = front monthly, NEXT = next monthly">
+      <option value="0" selected>NEAR</option>
+      <option value="1">NEXT</option>
+    </select>
     <span class="fl">FROM</span>
     <input type="date" id="hsFrom" style="min-width:140px">
     <span class="fl">TO</span>
