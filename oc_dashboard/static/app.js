@@ -2726,9 +2726,6 @@ function renderExposureScreener(d){
     {key:'symbol',      label:'SYMBOL', fmt:(v)=>`<span style="cursor:pointer;color:var(--acc);font-weight:600"
                                         onclick="jumpHistory('${v}')" title="Open trend history for ${v}">${v}</span>`},
     ...droppedCol,
-    {key:'_defend',     label:'DEFEND', fmt:(v,r)=>defendCell(r, r._idx),
-                        sortValue:(v,r)=>{const h=_defenseHoldProb(r);return h?h.p:-1;},
-                        exportValue:(v,r)=>{const h=_defenseHoldProb(r);return h?h.p:'';}},
     // #9c: primary price = FUT (fut_price); spot shown in tooltip
     {key:'fut_price',   label:'FUT',     fmt:(v,r)=>v!=null?`<span title="spot: ${r&&r.spot!=null?fmt(r.spot,1):'—'}">${fmt(v,1)}</span>`:'—', exportValue:v=>v==null?'':v},
     {key:'gex_regime',  label:'REGIME',  fmt:(v,r)=>regimePillWithDays(v, r)},
@@ -2754,6 +2751,9 @@ function renderExposureScreener(d){
     {key:'signals',     label:'SIGNALS', fmt:v=>signalIcons(v), sortValue:v=>signalSeverityKey(v), exportValue:v=>v||''},
     {key:'confidence',  label:'CONF',    fmt:v=>confBadge(v)},
     {key:'next_day_realized_move',label:'NEXT MOVE%',fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'_defend',     label:'DEFEND', fmt:(v,r)=>defendCell(r, r._idx),
+                        sortValue:(v,r)=>{const h=_defenseHoldProb(r);return h?h.p:-1;},
+                        exportValue:(v,r)=>{const h=_defenseHoldProb(r);return h?h.p:'';}},
   ];
   // attach column help (meaning + interpret) as th tooltip from METRIC_INFO
   esCols.forEach(c=>{ const m=_metricInfo[c.key]; if(m) c.help = m.meaning+' → '+m.interpret; });
@@ -2776,13 +2776,22 @@ function _comDistEM(r){
   return (r.gamma_shelf_center - r.fut_price)/r.expected_move;
 }
 
-// 1. Where is dealer positioning? (gamma COM vs price)
+// 1. Where is dealer positioning? (gamma COM vs price, and gamma-COM vs OI-COM)
 function _narrPositioning(r){
   const d=_comDistEM(r);
   if(d==null) return '—';
   const ad=Math.abs(d);
-  if(ad<=0.25) return 'Defending at-the-money (COM ≈ price)';
-  return `Support stacked ${d>0?'above':'below'} (COM ${d>0?'+':'−'}${ad.toFixed(2)} EM)`;
+  let s = ad<=0.25 ? 'Defending at-the-money (COM ≈ price)'
+                   : `Support stacked ${d>0?'above':'below'} (COM ${d>0?'+':'−'}${ad.toFixed(2)} EM)`;
+  // gamma-COM vs OI-COM divergence leg (dealer_divergence): where hedging gamma
+  // concentrates vs where open positions sit. Aligned = OI confirms the pin.
+  if(r.dealer_divergence_label && r.oi_com_inrange!=null){
+    const lbl = r.dealer_divergence_label;
+    const tag = lbl==='aligned' ? 'OI-confirmed'
+              : (lbl==='diverging' ? 'OI-diverging' : 'OI strongly diverging');
+    s += ` · γ-COM vs OI-COM ${fmt(r.oi_com_inrange,0)}: ${tag}`;
+  }
+  return s;
 }
 
 // 2. How is inventory distributed? (concentration spread + lopsidedness tilt)
@@ -2834,8 +2843,8 @@ function defendCell(r, idx){
     ? `<span style="font-family:var(--mono);font-size:10px;color:${
         h.bucket==='High'?'var(--green)':(h.bucket==='Low'?'var(--red)':'var(--amber)')}">${h.p}%</span>`
     : '<span style="color:var(--muted);font-size:10px">—</span>';
-  return `<span class="wall-tip-trigger" tabindex="0" data-esidx="${idx}"
-            style="margin-right:5px">⊕</span>${chip}`;
+  return `${chip}<span class="wall-tip-trigger" tabindex="0" data-esidx="${idx}"
+            style="margin-left:5px">⊕</span>`;
 }
 
 // Popover HTML — three narrative groups + COM distance + hold-prob breakdown.

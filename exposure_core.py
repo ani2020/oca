@@ -254,6 +254,72 @@ def gamma_shelf(strikes, net_gex, frac: float = GAMMA_SHELF_FRAC,
 
 
 # ═══════════════════════════════════════════════════════════════════
+# Dealer divergence: gamma-COM vs OI-COM (spec §3.3)
+# ═══════════════════════════════════════════════════════════════════
+# Dealers' GAMMA center of mass (where hedging pressure concentrates) vs their
+# OI center of mass (where open positions sit) can diverge. When they align, the
+# gamma shelf and the OI book agree on the level; when they diverge, the gamma
+# pin sits away from the OI pile — the pin is gamma-driven, not OI-confirmed, and
+# more fragile.
+#
+# CRITICAL — both COMs MUST be computed over the SAME in-range strike slice (the
+# adaptive analysis_range around fut). A full-chain OI-COM is dragged by stale
+# deep-OTM/ITM OI (validated on EICHERMOT: full-chain 7420 vs in-range 7141 at
+# spot 7101 — a 300+pt artifact). The batch passes the gamma shelf's own range
+# slice so the two centers are apples-to-apples by construction.
+#
+# Combined CE+PE OI-COM (one stable reference) — NOT the side nearer the gamma
+# center (that minimises the gap by selection and flips reference day to day).
+
+DEALER_DIVERGENCE_BANDS = {
+    "aligned":            0.5,   # |gap| / expected_move < this
+    "diverging":          1.5,   # < this (and >= aligned)
+    # >= diverging → "strongly_diverging"
+}
+
+
+def oi_com_inrange(strikes, ce_oi, pe_oi) -> Optional[float]:
+    """Combined CE+PE open-interest center of mass over the GIVEN strike slice.
+    Caller is responsible for passing only the in-range strikes (same slice the
+    gamma shelf uses) — this function does NOT range-filter, so that the range
+    definition lives in exactly one place (analysis_range, applied by the caller)."""
+    x = np.asarray(strikes, float)
+    c = np.asarray(ce_oi, float)
+    p = np.asarray(pe_oi, float)
+    if x.size == 0:
+        return None
+    tot = c + p
+    s = float(tot.sum())
+    if s <= 0:
+        return None
+    return round(float((x * tot).sum() / s), 2)
+
+
+def dealer_divergence(gamma_com: Optional[float], oi_com: Optional[float],
+                      expected_move: Optional[float],
+                      bands: Optional[Dict] = None) -> Tuple[Optional[float], Optional[str]]:
+    """Classify gamma-COM vs OI-COM divergence, expected-move-normalised.
+
+    Returns (divergence_value, label). divergence_value = (gamma_com - oi_com) /
+    expected_move (SIGNED: +ve = gamma shelf sits ABOVE the OI pile). label is the
+    three-state band on |divergence_value|. Either may be None when inputs are
+    missing or expected_move is non-positive."""
+    b = {**DEALER_DIVERGENCE_BANDS, **(bands or {})}
+    if (gamma_com is None or oi_com is None
+            or expected_move is None or expected_move <= 0):
+        return None, None
+    dv = (float(gamma_com) - float(oi_com)) / float(expected_move)
+    a = abs(dv)
+    if a < b["aligned"]:
+        label = "aligned"
+    elif a < b["diverging"]:
+        label = "diverging"
+    else:
+        label = "strongly_diverging"
+    return round(dv, 4), label
+
+
+# ═══════════════════════════════════════════════════════════════════
 # Basis (futures vs spot) — cash/futures positioning layer
 # ═══════════════════════════════════════════════════════════════════
 

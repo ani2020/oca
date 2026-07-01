@@ -78,6 +78,15 @@ def compute_snapshot(snap: pd.DataFrame, fut: float, exp_move: float,
     # + hedging center of mass, with width / peak / single-strike + migration.
     shelf = core.gamma_shelf(r_strikes, net_gex, prev_com=prev_gamma_com)
 
+    # In-range combined CE+PE OI center of mass — SAME range slice as the gamma
+    # shelf (rng), so gamma-COM vs OI-COM is apples-to-apples. Full-chain OI-COM
+    # would be dragged by stale deep-OTM/ITM OI; the range restriction is the fix.
+    oi_com = core.oi_com_inrange(r_strikes,
+                                 rng["ce_oi"].values, rng["pe_oi"].values)
+    # dealer_divergence = (gamma_shelf_center - oi_com) / expected_move, 3-state.
+    gshelf_center = (shelf or {}).get("center")
+    dd_val, dd_label = core.dealer_divergence(gshelf_center, oi_com, exp_move)
+
     # Peaks and regime fractions from greek-GEX net_gex
     pp_idx = int(np.argmax(net_gex))
     pn_idx = int(np.argmin(net_gex))
@@ -122,6 +131,10 @@ def compute_snapshot(snap: pd.DataFrame, fut: float, exp_move: float,
         "concentration":            (shelf or {}).get("concentration"),
         "gamma_com_migration":      (shelf or {}).get("migration"),
         "_gamma_com":               (shelf or {}).get("center"),  # carried for prev-day seeding
+        # OI center of mass (in-range, CE+PE) + dealer divergence vs gamma COM
+        "oi_com_inrange":           oi_com,
+        "dealer_divergence":        dd_val,
+        "dealer_divergence_label":  dd_label,
         "ce_vanna":        round(float(rng["ce_vanna_ex"].sum()), 2),
         "pe_vanna":        round(float(rng["pe_vanna_ex"].sum()), 2),
         "net_vanna":       round(float(rng["net_vanna_ex"].sum()), 2),
@@ -352,7 +365,9 @@ def _store(con, rows: List[Dict]):
         "gamma_shelf_center","gamma_shelf_width","gamma_shelf_peak_strike",
         "gamma_shelf_peak_value","gamma_shelf_single_strike","concentration",
         "gamma_com_migration",
-        # NOTE: flip_velocity + signals + compression/day-counters + dealer_divergence
+        # OI-COM + dealer divergence (Stage-1, same-snapshot — gamma vs OI center)
+        "oi_com_inrange","dealer_divergence","dealer_divergence_label",
+        # NOTE: flip_velocity + signals + compression/day-counters
         # + migration_effectiveness + concentration_stability are populated by the
         # Stage-2 SQL pass (run_stage2), not Stage 1.
     ]
@@ -707,12 +722,13 @@ def _ensure_schema(con):
         ("gamma_shelf_single_strike", "BOOLEAN"),
         ("concentration",             "DOUBLE"),
         ("gamma_com_migration",       "DOUBLE"),
+        # OI center of mass (in-range CE+PE) — paired with gamma COM for divergence
+        ("oi_com_inrange",            "DOUBLE"),
         # Stage-2 derived
         ("migration_effectiveness",   "DOUBLE"),
         ("concentration_stability",   "DOUBLE"),
-        # dealer_divergence (spec §3.3) reserved — populated once OI-shelf COM is
-        # available to the batch (shared exposure_core shelf refactor). Columns
-        # created now so the schema is stable across the backfill.
+        # dealer_divergence (spec §3.3): (gamma_shelf_center - oi_com_inrange)
+        # / expected_move, 3-state label. Computed in Stage 1 (same-snapshot).
         ("dealer_divergence",         "DOUBLE"),
         ("dealer_divergence_label",   "VARCHAR"),
     ]
