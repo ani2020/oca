@@ -3,7 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 from datetime import date, datetime, timedelta
-from typing import Optional
+from typing import Optional, Dict
 from fastapi import APIRouter, HTTPException, Query
 from ..db import qdf, tbl, to_records, safe_response, _ts_lo_hi, latest_ts, latest_data_date
 from ..cache import cache_get
@@ -213,6 +213,7 @@ def oi_walls(
         ),
         cur AS (
             SELECT r.symbol, r.strike_price,
+                   CAST(r.expiry AS VARCHAR)      AS expiry,
                    COALESCE(r.ce_oi,0)            AS ce_oi,
                    COALESCE(r.pe_oi,0)            AS pe_oi,
                    COALESCE(r.ce_ltp,0)           AS ce_ltp,
@@ -224,6 +225,10 @@ def oi_walls(
                    COALESCE(r.net_gexv,0)         AS net_gexv,
                    COALESCE(r.ce_gexv,0)          AS ce_gexv,
                    COALESCE(r.pe_gexv,0)          AS pe_gexv,
+                   COALESCE(r.ce_gamma,0)         AS ce_gamma,
+                   COALESCE(r.pe_gamma,0)         AS pe_gamma,
+                   COALESCE(r.lotsize,1)          AS lotsize,
+                   COALESCE(r.days_to_expiry,0)   AS dte,
                    COALESCE(r.underlying_price,0) AS spot,
                    COALESCE(r.fut_price,0)        AS fut_price,
                    COALESCE(r.atm_strike,0)       AS atm_strike
@@ -250,6 +255,30 @@ def oi_walls(
     if df.empty:
         return []
 
+    # Stored analysis range per symbol from exposure_eod, keyed to the SAME expiry
+    # each symbol is pinned to here. Using the batch's stored range_lo/range_hi
+    # guarantees the gamma wall uses the LITERALLY IDENTICAL window as the exposure
+    # gamma shelf (same EWMA-smoothed IV, same prev-range clamp) — instead of an
+    # unsmoothed re-computation that blows the range out (ABB: raw-IV range reached
+    # 7500, stored range 6802-7155). Matched on (symbol, expiry) at the latest
+    # stored EOD date; a ~1-day-stale envelope is fine (it's expected-move-wide).
+    # No row for an expiry (e.g. today's 0-DTE in NEAREST mode) → recompute fallback.
+    stored_range: Dict[tuple, tuple] = {}
+    try:
+        rr = qdf("""
+            WITH latest AS (SELECT MAX(date) AS d FROM exposure_eod)
+            SELECT e.symbol, CAST(e.expiry AS VARCHAR) AS expiry,
+                   e.range_lo, e.range_hi
+            FROM exposure_eod e, latest
+            WHERE e.date = latest.d
+              AND e.range_lo IS NOT NULL AND e.range_hi IS NOT NULL
+        """)
+        for _r in rr.itertuples():
+            stored_range[(_r.symbol, str(_r.expiry)[:10])] = (float(_r.range_lo), float(_r.range_hi))
+    except Exception:
+        # exposure_eod absent/older schema → fall back to recompute for all
+        stored_range = {}
+
     fp = {"FRAC": float(shelf_frac)}
     rows = []
     for symbol, g in df.groupby("symbol", sort=True):
@@ -262,6 +291,10 @@ def oi_walls(
         ce_ltp_chg = g["ce_ltp_chg"].to_numpy(float)
         pe_ltp_chg = g["pe_ltp_chg"].to_numpy(float)
         net_gexv = g["net_gexv"].to_numpy(float)
+        ce_gamma = g["ce_gamma"].to_numpy(float)
+        pe_gamma = g["pe_gamma"].to_numpy(float)
+        lot = float(g["lotsize"].median()) if (g["lotsize"] > 0).any() else 1.0
+        dte = float(g["dte"].median())
         spot = float(g["spot"].max())
         fut = float(g["fut_price"].max())
         atm = float(g["atm_strike"].max())
@@ -277,13 +310,54 @@ def oi_walls(
         if ce_shelf is None or pe_shelf is None:
             continue
 
-        # ---- gamma wall: strike with the largest |net gamma| ----
+        # ---- gamma wall (greek-GEX, range-restricted, pos/neg split) ----
+        # Migrated from |net_gexv| (spot²-scaled, sign-agnostic, full-chain) to
+        # greek-GEX = ce_gamma·ce_oi·lot − pe_gamma·pe_oi·lot — the SAME gamma the
+        # exposure screen's flip/regime/shelf use, restricted to the SAME adaptive
+        # analysis_range around fut. Split into the dominant POSITIVE-gamma strike
+        # (dealer long-gamma pin / magnet) and the dominant NEGATIVE-gamma strike
+        # (put-wall amplification point). The old single |max| wall conflated them.
+        net_greek = ce_gamma * ce_oi * lot - pe_gamma * pe_oi * lot
+        # Range: prefer the exposure batch's STORED range for this (symbol, expiry)
+        # so the window is identical to the gamma shelf (EWMA-smoothed IV + prev-range
+        # clamp). Only recompute — unsmoothed — when no stored row exists for this
+        # expiry (e.g. today's 0-DTE in NEAREST mode, which has ~0 gamma anyway).
+        sym_expiry = str(g["expiry"].iloc[0])[:10] if "expiry" in g.columns else None
+        sr = stored_range.get((symbol, sym_expiry))
+        if sr is not None:
+            lo, hi = sr
+        else:
+            atm_i = int(np.argmin(np.abs(strikes - atm))) if atm > 0 else int(np.argmin(np.abs(strikes - fut)))
+            atm_iv = float(g["ce_iv"].to_numpy(float)[atm_i]) if len(g) else 0.0
+            em = core.expected_move(fut, atm_iv, dte)
+            si = core.strike_interval(strikes)
+            lo, hi, _ = core.analysis_range(fut, em, si)
+        rmask = (strikes >= lo) & (strikes <= hi)
+
+        gamma_wall_pos_strike = gamma_wall_pos_val = None
+        gamma_wall_neg_strike = gamma_wall_neg_val = None
+        if rmask.any():
+            r_str = strikes[rmask]
+            r_ng = net_greek[rmask]
+            if np.isfinite(r_ng).any() and r_ng.max() > 0:
+                pi = int(np.argmax(r_ng))
+                gamma_wall_pos_strike = float(r_str[pi])
+                gamma_wall_pos_val = float(r_ng[pi])
+            if np.isfinite(r_ng).any() and r_ng.min() < 0:
+                ni = int(np.argmin(r_ng))
+                gamma_wall_neg_strike = float(r_str[ni])
+                gamma_wall_neg_val = float(r_ng[ni])
+
+        # Back-compat: legacy single gamma wall = whichever side has the larger
+        # |greek-GEX| (the dominant pin). Existing frontend fields keep working.
         gamma_wall_strike = None
         gamma_wall_val = None
-        if np.isfinite(net_gexv).any() and np.abs(net_gexv).max() > 0:
-            gi = int(np.argmax(np.abs(net_gexv)))
-            gamma_wall_strike = float(strikes[gi])
-            gamma_wall_val = float(net_gexv[gi])
+        _cand = [(gamma_wall_pos_strike, gamma_wall_pos_val),
+                 (gamma_wall_neg_strike, gamma_wall_neg_val)]
+        _cand = [(s, v) for s, v in _cand if s is not None]
+        if _cand:
+            s, v = max(_cand, key=lambda sv: abs(sv[1]))
+            gamma_wall_strike, gamma_wall_val = s, v
 
         # ---- symbol-wide stats (PCR, wall strength) ----
         total_ce = float(ce_oi.sum())
@@ -348,6 +422,11 @@ def oi_walls(
             # ---- gamma wall ----
             "gamma_wall_strike":   gamma_wall_strike,
             "gamma_wall_net_gexv": gamma_wall_val,
+            # greek-GEX gamma walls, split (range-restricted, same gamma as exposure)
+            "gamma_wall_pos_strike": gamma_wall_pos_strike,
+            "gamma_wall_pos_val":    gamma_wall_pos_val,
+            "gamma_wall_neg_strike": gamma_wall_neg_strike,
+            "gamma_wall_neg_val":    gamma_wall_neg_val,
             "gamma_oi_divergence": gamma_oi_divergence,
             "shelf_frac":          float(shelf_frac),
         })

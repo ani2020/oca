@@ -542,8 +542,13 @@ def gamma_analysis_range(spot, expected_move=None, atm_iv=None, dte=None,
     if expected_move and expected_move > 0:
         em = expected_move
     elif atm_iv and atm_iv > 0 and dte and dte > 0:
-        # Fallback: compute from IV
-        em = spot * (atm_iv / 100.0) * math.sqrt(dte / 365.0)
+        # Fallback: delegate to exposure_core rather than re-deriving IV x sqrt(T)
+        # here. This used to inline `sqrt(dte / 365.0)`, which silently diverged
+        # from the batch the moment the batch moved to the trading-day convention
+        # (243) — the live dashboard would have drawn a range 23% narrower than the
+        # stored exposure_eod rows for the same symbol and date. One formula, one
+        # constant, one place.
+        em = _core.expected_move(spot, atm_iv, dte)
     else:
         em = spot * 0.05  # last resort: 5% fixed
 

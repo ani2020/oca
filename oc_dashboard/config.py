@@ -5,6 +5,13 @@ from pathlib import Path
 DB_FILE  = "oc.duckdb"
 DB_TABLE = "ocdata"
 
+# Front-month (NEAR) selection threshold for snapshot-level aggregates.
+# Mirrors DTE_EXCLUDE in oc_exposure_eod.py: monthly contracts with DTE <= this
+# are skipped so NEAR is always the tradeable front month, not the expiring one.
+# Keep these two in sync — the overview and the exposure screen must agree on
+# which expiry constitutes "the market" for a symbol.
+DTE_EXCLUDE_OVERVIEW = 3
+
 NSE_INDICES = {
     "NIFTY", "BANKNIFTY", "FINNIFTY", "MIDCPNIFTY",
     "NIFTYNXT50", "SENSEX", "NIFTYIT",

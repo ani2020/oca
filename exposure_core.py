@@ -47,11 +47,79 @@ def strike_interval(strikes: np.ndarray) -> float:
     return float(np.median(diffs)) if len(diffs) else 0.0
 
 
+TRADING_DAYS_YEAR = 243.0
+# NSE trading days per year. Measured, not assumed: 116 distinct trading days were
+# observed between 2026-01-23 and 2026-07-16 (174 calendar days), which annualises
+# to 243.3. Independent cross-check: 365 - 104 weekend days = 261 weekdays, less
+# the ~20 NSE public holidays in that window (Republic Day, Holi, Good Friday,
+# Ambedkar Jayanti, Maharashtra Day, ...) = ~241.
+#
+# Do NOT use 252 — that is the NYSE figure and NSE closes ~11 more days a year.
+# Do NOT tune this below ~241 to close the residual gap to theory. Validated over
+# 12,018 rows / 131 symbols / 6 complete expiry cycles, mean |realised move| / EM:
+#
+#     divisor 365 (old): 0.991    252: 0.824    243: 0.809    232: 0.790
+#     theory (E|X|/sigma for a calibrated 1-sigma band) = sqrt(2/pi) = 0.798
+#
+# 232 scores marginally closer, but only by absorbing the vol risk premium into a
+# calendar constant. That premium is not stable: the per-cycle implied best divisor
+# ranged 357-683 across the same six cycles, so a 10-day divisor change (2.1% of
+# theory) is ~15x smaller than the cycle-to-cycle noise (31% of theory). 243 is a
+# calendar measurement and stays true; the residual belongs in an explicit
+# premium adjustment if it is ever worth modelling.
+#
+# IMPORTANT — this constant is NOT a global convention switch. Two other places
+# use 365 and must stay that way:
+#   * oc_processor._resolve_iv / greeks solve IV at t_years = dte/365. atm_iv is
+#     therefore a "365-convention" number, and the 243 figure above was calibrated
+#     against those exact IVs. Re-basing the IV solve as well would double-count
+#     the correction and invalidate the validation.
+#   * basis_annualized scales by 365/dte because cost of carry accrues on calendar
+#     days — money charges interest over weekends and holidays.
+
+
 def expected_move(ref_price: float, atm_iv: float, dte: float) -> float:
-    """Expected move = ref × IV × sqrt(T). Falls back to 5% if inputs missing."""
+    """Expected 1-sigma move from now to expiry. Falls back to 5% if inputs missing.
+
+    T is measured in TRADING days, not calendar days: option vol is quoted on a
+    trading-day basis because price only diffuses when the market is open. The
+    previous dte/365 scaling therefore under-stated every move by sqrt(365/243)
+    = 1.23x, which showed up as only 60.2% of realised moves landing inside +/-1 EM
+    where a calibrated 1-sigma band should contain 68.3%. Under dte/243 that
+    coverage is 68.5%.
+
+    NOTE: dte is a CALENDAR day count, so dte/TRADING_DAYS_YEAR slightly overstates
+    elapsed trading time (a 30-calendar-day window holds ~21 trading days, not
+    30 x 243/365 = 20.0 ... close, but not exact). A true trading-day countdown
+    needs an NSE holiday calendar; the approximation is empirically well within
+    the noise and errs marginally wide, which is the safer direction for a range.
+
+    This is an EXPIRY-HORIZON quantity and scales with sqrt(dte). Do not use it to
+    forecast a single session — the ratio (1-day move / expected_move) is then
+    ~1/sqrt(dte), so any model built on it measures days-to-expiry rather than
+    market structure. Use expected_move_1d() for next-day work.
+    """
     if atm_iv and atm_iv > 0 and dte and dte > 0:
-        return ref_price * (atm_iv / 100.0) * math.sqrt(dte / 365.0)
+        return ref_price * (atm_iv / 100.0) * math.sqrt(dte / TRADING_DAYS_YEAR)
     return ref_price * 0.05
+
+
+def expected_move_1d(ref_price: float, atm_iv: float) -> float:
+    """Expected 1-sigma move over ONE trading session.
+
+    Deliberately separate from expected_move(): a next-day forecast must not carry
+    the sqrt(dte) horizon factor. Comparing a one-session realised move against an
+    expiry-horizon EM is what produced the spurious 'hold rate' gradient (62.6% at
+    low EM rising to 91.4% at high EM) — that gradient was almost entirely
+    1/sqrt(dte), since the EM quartiles sorted on dte (9.3 -> 24.5 days), not on
+    market structure. Against a true 1-day horizon the same rate is flat (~54-64%)
+    across every dte bucket, which is what makes it usable as a baseline.
+
+    The 5% fallback mirrors expected_move()'s, de-annualised to one session.
+    """
+    if atm_iv and atm_iv > 0:
+        return ref_price * (atm_iv / 100.0) * math.sqrt(1.0 / TRADING_DAYS_YEAR)
+    return ref_price * 0.05 / math.sqrt(TRADING_DAYS_YEAR)
 
 
 def analysis_range(ref_price: float, exp_move: float, strike_int: float,
@@ -172,6 +240,138 @@ def transition_width(strikes, net_gex, ref_price=None) -> Optional[float]:
     best = int(np.argmin([abs(_interp(int(j)) - ref) for j in sc]))
     i = int(sc[best])
     return float(abs(x[i + 1] - x[i]))
+
+
+DEGENERATE_WIDTH_NORM = 1.0
+# transition_width_norm above this is arithmetically undefined, not "very wide".
+# transition_width is floored at one strike_interval (it IS the gap between the
+# two strikes straddling the flip), so once strike_interval > expected_move the
+# ratio exceeds 1.0 purely because the grid is coarser than the move it is meant
+# to resolve — no dealer behaviour is being measured. Observed on SAIL
+# (interval 7.5 / EM 7.11 = 1.05) and YESBANK (1.0 / 0.98 = 1.02).
+
+
+def width_norm(tw: Optional[float], exp_move: float) -> Optional[float]:
+    """transition_width normalised by expected move, or None when undefined.
+
+    Returns None — not a large number — in the degenerate regime, because the
+    tight/moderate/wide bands downstream are only meaningful while the strike
+    grid is finer than the expected move. Emitting 1.05 there would invite a
+    "very wide zone" reading of what is really "grid too coarse to tell".
+
+    Caveat for any caller: even in the valid range this ratio correlates 0.83
+    with strike_interval/expected_move across the backfill, so it is largely a
+    grid-density (liquidity-tier) proxy rather than a measure of dealer zone
+    geometry. Control for the stored grid_density column before drawing
+    behavioural conclusions from it.
+    """
+    if not tw or not exp_move or exp_move <= 0:
+        return None
+    wn = tw / exp_move
+    if wn > DEGENERATE_WIDTH_NORM:
+        return None
+    return round(wn, 4)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Skew — 25-delta risk reversal / butterfly
+# ═══════════════════════════════════════════════════════════════════
+
+RR_TARGET_DELTA = 0.25
+
+
+def _interp_iv_at_delta(deltas, ivs, target: float = RR_TARGET_DELTA) -> Optional[float]:
+    """Linear interpolation of IV at |delta| = target across one wing.
+
+    deltas must be ABSOLUTE deltas for a single option type on its OTM side, so
+    the ladder is monotone in strike. Returns None when target is not bracketed —
+    never extrapolates. A wing whose deltas do not reach 0.25 (deep-discount
+    futures, thin chains) has no observable 25-delta point and must say so rather
+    than invent one.
+    """
+    d = np.asarray(deltas, float)
+    v = np.asarray(ivs, float)
+    ok = np.isfinite(d) & np.isfinite(v) & (v > 0)
+    d, v = d[ok], v[ok]
+    if len(d) < 2:
+        return None
+    order = np.argsort(-d)          # descending |delta|
+    d, v = d[order], v[order]
+    if target > d[0] or target < d[-1]:
+        return None                 # not bracketed
+    for i in range(len(d) - 1):
+        hi, lo = d[i], d[i + 1]
+        if lo <= target <= hi:
+            span = hi - lo
+            if abs(span) < 1e-12:
+                return float(v[i])
+            w = (target - lo) / span
+            return float(v[i + 1] + w * (v[i] - v[i + 1]))
+    return None
+
+
+def risk_reversal_25(strikes, atm_strike, ce_delta, ce_iv, ce_ltp,
+                     pe_delta, pe_iv, pe_ltp, atm_iv: Optional[float] = None) -> Dict[str, Optional[float]]:
+    """25-delta risk reversal and butterfly from the OTM wings.
+
+        RR25 = IV(25d call) - IV(25d put)      negative => puts bid => downside skew
+        BF25 = (IV(25d call) + IV(25d put))/2 - IV(ATM)    smile curvature
+
+    Returns {'rr25', 'bf25', 'iv_25c', 'iv_25p'}; any value may be None.
+
+    Three constraints, each load-bearing:
+
+    1. OTM ONLY (calls at/above ATM, puts at/below). ITM IV is nearly all intrinsic
+       value, so vega is tiny and the IV solve is ill-conditioned — NSE does not even
+       publish it, and where the pipeline back-solves one it is noise. A single ITM
+       IV of 46 on a 0.86-delta call is enough to destroy the measure.
+
+    2. TRADED STRIKES ONLY (ltp > 0). This is the subtle one. oc_processor._resolve_iv
+       back-solves IV from LTP against the FUTURES price, but silently falls back to
+       NSE's published IV — which is SPOT-anchored with different rate/dividend
+       assumptions — whenever LTP is 0. The two conventions differ by a mean 13.9 vol
+       points (median 13.6, max 59.4) on the 2026-07-16 book. Interpolating across
+       that seam would swamp a risk reversal that lives on a few tenths of a point.
+       Untraded strikes also break delta monotonicity: 248 of the 282 non-monotone
+       ladder points on that date were untraded strikes carrying NSE IVs.
+       A bid/ask-mid fallback was considered and rejected: the untraded strikes in
+       the 0.15-0.35 delta band had a median bid/ask spread of 80% of premium and
+       not one passed even a lenient 50% filter, so their mid carries no information.
+
+    3. NO EXTRAPOLATION. If a wing's deltas never reach 0.25, return None.
+
+    Sign convention matches FX desks (RR = call vol - put vol). Empirically the NSE
+    indices print negative (BANKNIFTY -0.68, NIFTY -0.42, FINNIFTY -0.41 on
+    2026-07-16) while single stocks skew positive (DIXON +1.12, RELIANCE +0.74) —
+    index put skew from portfolio hedging, single-stock call skew from retail call
+    demand. That split is the expected structure and is a useful sanity check.
+    """
+    out: Dict[str, Optional[float]] = {"rr25": None, "bf25": None,
+                                       "iv_25c": None, "iv_25p": None}
+    k   = np.asarray(strikes, float)
+    cd  = np.asarray(ce_delta, float)
+    civ = np.asarray(ce_iv, float)
+    clt = np.asarray(ce_ltp, float)
+    pd_ = np.asarray(pe_delta, float)
+    piv = np.asarray(pe_iv, float)
+    plt = np.asarray(pe_ltp, float)
+    if atm_strike is None or not np.isfinite(float(atm_strike)):
+        return out
+
+    call_m = (k >= float(atm_strike)) & (civ > 0) & (clt > 0)
+    put_m  = (k <= float(atm_strike)) & (piv > 0) & (plt > 0)
+
+    iv_c = _interp_iv_at_delta(cd[call_m], civ[call_m])
+    iv_p = _interp_iv_at_delta(np.abs(pd_[put_m]), piv[put_m])
+    out["iv_25c"] = round(iv_c, 4) if iv_c is not None else None
+    out["iv_25p"] = round(iv_p, 4) if iv_p is not None else None
+    if iv_c is None or iv_p is None:
+        return out
+
+    out["rr25"] = round(iv_c - iv_p, 4)
+    if atm_iv is not None and atm_iv > 0:
+        out["bf25"] = round((iv_c + iv_p) / 2.0 - float(atm_iv), 4)
+    return out
 
 
 def lopsidedness(net_gex) -> float:
@@ -482,7 +682,26 @@ def derive_signals(curr: Dict, prev: Optional[Dict],
     return ",".join(fired), active
 
 
-def confidence(total_oi: float, n_strikes: int, tw_norm: Optional[float]) -> str:
+_UNSET = object()   # distinguishes "caller omitted atm_iv" from "atm_iv is None"
+
+
+def confidence(total_oi: float, n_strikes: int, tw_norm: Optional[float],
+               atm_iv: Any = _UNSET) -> str:
+    """Row-level trust tag.
+
+    atm_iv is a hard gate, not a tie-breaker: a row whose ATM IV could not be
+    read has no expected_move anchor, so its *_norm geometry and iv_change are
+    unusable no matter how many strikes or how much OI sit behind it. Before
+    this gate existed such rows were still stamped "high" (29 of 32 occurrences
+    in Jun-Jul 2026), which is precisely why the failure stayed invisible — the
+    pipeline computed a degenerate value and then certified it as trustworthy.
+
+    The _UNSET sentinel (rather than a None default) is deliberate: None is the
+    *failure* value the gate must catch, so it cannot also mean "not supplied".
+    Legacy three-arg callers skip the gate; callers that pass atm_iv=None get it.
+    """
+    if atm_iv is not _UNSET and not (atm_iv is not None and atm_iv > 0):
+        return "low"
     if n_strikes >= 8 and total_oi > 0 and (tw_norm or 1) < 0.5:
         return "high"
     if n_strikes >= 4:
@@ -872,6 +1091,27 @@ METRIC_INFO = {
         "+1 = all positive gamma (pure vol-suppression), -1 = all negative (pure "
         "amplification), near 0 = balanced / mixed regime. Sign = which gamma dominates; "
         "magnitude = how dominant."),
+    "rr25": ("RR25",
+        "25-delta risk reversal: IV(25d call) - IV(25d put), in vol points.",
+        "Negative = puts bid over calls = the market is paying up for downside; "
+        "positive = call skew. Read it against the gamma columns rather than with "
+        "them: it is near-orthogonal to net_gex_norm (corr -0.13), so agreement is "
+        "genuine confirmation and disagreement is a real signal. NSE indices "
+        "normally print negative (portfolio hedging demand) while single stocks "
+        "often print positive (retail call demand) - compare a name to its own "
+        "history, not to the cross-section. NULL when a wing never reaches 25 delta."),
+    "bf25": ("BF25",
+        "25-delta butterfly: mean of the two 25d wing IVs minus ATM IV.",
+        "Smile curvature, and the companion to RR25: RR25 says which wing is bid, "
+        "BF25 says whether BOTH wings are bid relative to ATM. High BF25 with flat "
+        "RR25 = the market is paying for movement in either direction."),
+    "grid_density": ("GRID",
+        "strike_interval / expected_move - how fine the strike grid is vs the move "
+        "it has to resolve.",
+        "Diagnostic, not a trading signal. Low = dense grid (indices, liquid "
+        "large-caps); high = coarse grid (illiquid mid-caps). Present because "
+        "transition_width_norm correlates 0.83 with it: control for this column "
+        "before reading any behavioural claim off zone width."),
     "gamma_flip": ("γ FLIP",
         "Gamma balance point — strike where net dealer gamma crosses zero.",
         "Above flip = positive-gamma (pinning) zone; below = negative (amplifying), or "

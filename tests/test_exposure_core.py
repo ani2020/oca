@@ -2,6 +2,8 @@
 import sys, pathlib
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
 
+import math
+
 import numpy as np
 import pytest
 import exposure_core as core
@@ -21,9 +23,45 @@ def test_strike_interval_irregular():
 
 # ── expected_move ──────────────────────────────────────────────────
 def test_expected_move_basic():
-    # 23400 × 0.15 × sqrt(23/365) ≈ 881
+    # 23400 x 0.15 x sqrt(23/243) ~= 1080  (TRADING days, not calendar)
     em = core.expected_move(23400, 15.0, 23)
-    assert 870 < em < 890
+    assert 1070 < em < 1090
+
+
+def test_expected_move_uses_trading_day_convention():
+    """T must be scaled by trading days, not calendar days.
+
+    Regression guard: the original dte/365 scaling under-stated every move by
+    sqrt(365/243) = 1.226x, so only 60.2% of realised moves landed inside +/-1 EM
+    where a calibrated 1-sigma band should hold 68.3% (validated over 12,018 rows
+    / 6 expiry cycles). 243 is the measured NSE figure, NOT the NYSE 252."""
+    assert core.TRADING_DAYS_YEAR == 243.0
+    em = core.expected_move(1000.0, 20.0, 30)
+    assert em == pytest.approx(1000.0 * 0.20 * math.sqrt(30 / 243.0))
+    # and it is materially wider than the old calendar-day form
+    old = 1000.0 * 0.20 * math.sqrt(30 / 365.0)
+    assert em / old == pytest.approx(math.sqrt(365.0 / 243.0), rel=1e-9)
+
+
+def test_expected_move_1d_has_no_horizon_factor():
+    """The 1-day EM must be independent of dte.
+
+    This is the whole point of the separate function: expected_move() scales with
+    sqrt(dte), so using it as a next-day forecast makes (1d move / EM) ~ 1/sqrt(dte)
+    and any model built on that ratio measures days-to-expiry, not structure."""
+    e1 = core.expected_move_1d(1000.0, 20.0)
+    assert e1 == pytest.approx(1000.0 * 0.20 * math.sqrt(1.0 / 243.0))
+    # one session of the horizon EM at dte=1 is the same thing
+    assert e1 == pytest.approx(core.expected_move(1000.0, 20.0, 1))
+
+
+def test_expected_move_1d_fallback():
+    # no IV -> 5% annual fallback de-annualised to one session
+    assert core.expected_move_1d(1000.0, 0) == pytest.approx(
+        1000.0 * 0.05 / math.sqrt(243.0))
+    assert core.expected_move_1d(1000.0, None) == pytest.approx(
+        1000.0 * 0.05 / math.sqrt(243.0))
+
 
 def test_expected_move_fallback():
     # no IV → 5% fallback
@@ -197,10 +235,48 @@ def test_signal_no_prev_returns_empty():
 
 
 # ── confidence ─────────────────────────────────────────────────────
+def test_width_norm_valid_range():
+    """Normal case: grid finer than the expected move, ratio is meaningful."""
+    assert core.width_norm(50.0, 337.6) == 0.1481      # NIFTY-like
+    assert core.width_norm(10.0, 10.0) == 1.0          # boundary is inclusive
+
+
+def test_width_norm_degenerate_returns_none():
+    """strike_interval > expected_move => the metric is undefined, not 'wide'.
+
+    transition_width is floored at one strike interval, so a coarse grid forces
+    the ratio above 1.0 regardless of dealer behaviour. Emitting the number would
+    invite a 'very wide zone' reading of what is really 'grid too coarse to tell'.
+    Real observed cases from the 2026-07-16 snapshot."""
+    assert core.width_norm(7.5, 7.11) is None          # SAIL   -> would be 1.0545
+    assert core.width_norm(1.0, 0.98) is None          # YESBANK-> would be 1.0199
+
+
+def test_width_norm_null_inputs():
+    assert core.width_norm(None, 100.0) is None        # monotone curve, no flip
+    assert core.width_norm(50.0, 0.0) is None          # no expected-move anchor
+    assert core.width_norm(0.0, 100.0) is None
+
+
 def test_confidence_levels():
     assert core.confidence(1000, 10, 0.3) == "high"
     assert core.confidence(1000, 5, 0.8) == "medium"
     assert core.confidence(0, 2, None) == "low"
+
+
+def test_confidence_atm_iv_gate():
+    """A row with no readable ATM IV is never trustworthy, however thick the
+    chain: without an IV anchor there is no expected_move, so every *_norm
+    metric on the row is meaningless. Regression guard for the Jun-Jul 2026
+    bug where 29 of 32 zero-IV rows were stamped 'high'."""
+    # None (no leg quoted) and 0.0 (legacy sentinel) both demote to low
+    assert core.confidence(1000, 10, 0.3, None) == "low"
+    assert core.confidence(1000, 10, 0.3, 0.0) == "low"
+    # A real reading leaves the existing ladder untouched
+    assert core.confidence(1000, 10, 0.3, 15.4) == "high"
+    assert core.confidence(1000, 5, 0.8, 15.4) == "medium"
+    # Omitting the arg entirely skips the gate (back-compat with 3-arg callers)
+    assert core.confidence(1000, 10, 0.3) == "high"
 
 
 # ── basis dead-zone (history view + screener basis) ────────────────

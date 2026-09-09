@@ -251,6 +251,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="nav-btn" data-view="trend">STRIKE TREND</button>
     <button class="nav-btn" data-view="delta">SCREENER</button>
     <button class="nav-btn" data-view="expscreen">EXPOSURE SCREENER</button>
+    <button class="nav-btn" data-view="playbook">PLAYBOOK</button>   <!-- NEW -->
     <button class="nav-btn" data-view="history">HISTORY</button>
     <button class="nav-btn" data-view="settings">SETTINGS</button>
     <button class="nav-btn" data-view="vix">VIX</button>
@@ -303,6 +304,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
                  border-radius:4px;font-family:var(--mono);font-size:10px"></span>
   </div>
   <!-- Recent exposure signals strip (query-only from exposure_eod) -->
+  <div id="ovMarketState" style="display:none;margin-bottom:8px"></div>
   <div id="ovSignalStrip" style="display:none;margin-bottom:8px"></div>
   <div id="overviewCards" class="ticker-grid"><div class="loading"><div class="spinner"></div>Loading…</div></div>
   <div class="sh">AGGREGATE OI SIGNALS</div>
@@ -1180,6 +1182,49 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
 
   <!-- Per-symbol blocks render here (list-of-blocks; length-1 today, N-ready) -->
   <div id="hsBlocks"><div class="empty">Pick a symbol and click LOAD — or click any ticker elsewhere to jump here.</div></div>
+</div>
+<!-- ══ PLAYBOOK ════════════════════════════════════════════════════
+     Codified §2/§3 checklists as a scored screen. Reuses the exposure
+     screener's DATE + EXPIRY RANK selectors (shared ids esDate/esExpiryRank)
+     so the two screens stay on the same cut. -->
+<div class="view" id="view-playbook">
+  <div class="filter-bar">
+    <button class="btn sec" id="btnPbBack" style="display:none;font-size:10px">← BACK</button>
+    <span class="fl">DATE</span>
+    <select id="pbDate" style="min-width:130px"
+      title="Shares the screener date. Pick here or on the Exposure Screener — they stay in sync."></select>
+    <span class="fl">EXPIRY</span>
+    <select id="pbExpiryRank" style="min-width:90px" title="NEAR = front monthly, NEXT = next monthly">
+      <option value="0" selected>NEAR</option>
+      <option value="1">NEXT</option>
+    </select>
+    <div class="toggle-group" id="pbTabs" style="margin-left:8px">
+      <button class="active" data-pbtab="sell"   title="New short-premium setup — guide §2 sell checklist">SELL</button>
+      <button data-pbtab="manage" title="Existing-position adjustment triggers — guide §2 decision tree">MANAGE</button>
+      <button data-pbtab="buy"    title="Long-premium / buy setup — guide §2 buy section">BUY</button>
+    </div>
+    <label class="chk-label" style="margin-left:6px">
+      <input type="checkbox" id="pbShowAll"> SHOW ALL
+      <span style="color:var(--muted);font-size:9px">(incl. weak/hold)</span>
+    </label>
+    <input type="text" id="pbSearch" placeholder="filter ticker…" style="width:120px"
+           oninput="filterTableBySymbol('pbTable',this.value)">
+    <button class="btn" id="btnPbLoad">LOAD</button>
+    <button class="btn sec" style="font-size:9px" id="btnPbGuide" title="How the score works">ⓘ GUIDE</button>
+    <button class="btn sec" style="font-size:9px" id="btnPbCsv" title="Download current tab as CSV">⬇ CSV</button>
+  </div>
+
+  <div id="pbGuide" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;
+    background:var(--card);border:1px solid var(--border);font-family:var(--mono);
+    font-size:10px;color:var(--muted);line-height:1.7"></div>
+
+  <div class="card">
+    <div class="card-title">PLAYBOOK
+      <span class="badge" id="pbDateBadge"></span>
+      <span class="badge" style="margin-left:4px">VERDICT = band(score), capped by ✕ hard gates · click symbol → HISTORY</span>
+    </div>
+    <div class="tw" id="pbTable"><div class="empty">Pick a date and click LOAD</div></div>
+  </div>
 </div>
 
 <div class="view" id="view-market">

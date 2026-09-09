@@ -49,12 +49,21 @@ EARNINGS_WINDOW  = 2      # ± days around earnings to flag
 
 def compute_snapshot(snap: pd.DataFrame, fut: float, exp_move: float,
                      prev_range_half: Optional[float] = None,
-                     prev_gamma_com: Optional[float] = None) -> Dict[str, Any]:
+                     prev_gamma_com: Optional[float] = None,
+                     atm_iv: Optional[float] = None) -> Dict[str, Any]:
     """Compute all exposure metrics for one ticker's EOD snapshot (one expiry).
-    Pure math delegated to exposure_core. Futures-based throughout (Black-76)."""
+    Pure math delegated to exposure_core. Futures-based throughout (Black-76).
+
+    atm_iv is optional and used only to anchor bf25 (the 25d butterfly); rr25 and
+    the gamma metrics do not need it, so a None ATM reading degrades bf25 alone.
+    """
     snap = snap.sort_values("strike_price")
     strikes = snap["strike_price"].values
     strike_int = core.strike_interval(strikes)
+    # ATM strike as reported by the exchange (constant across the chain); used to
+    # split the OTM wings for the skew calc.
+    atm_k = float(snap["atm_strike"].iloc[0]) if "atm_strike" in snap.columns \
+            and len(snap) and snap["atm_strike"].iloc[0] > 0 else None
 
     lo, hi, half = core.analysis_range(fut, exp_move, strike_int, prev_range_half)
     mask = (strikes >= lo) & (strikes <= hi)
@@ -94,6 +103,20 @@ def compute_snapshot(snap: pd.DataFrame, fut: float, exp_move: float,
     peak_neg = float(r_strikes[pn_idx]) if net_gex[pn_idx] < 0 else None
 
     neg_frac = float((net_gex < 0).sum() / len(net_gex)) if len(net_gex) else None
+
+    # 25-delta risk reversal / butterfly — computed on the FULL chain (snap), NOT
+    # the range-restricted slice (rng). The 25d wings are a property of the vol
+    # surface, not of the gamma analysis window: they can sit outside range_lo/hi,
+    # and the range is about to widen ~23% with the trading-day EM fix, so tying
+    # skew to the range would make it silently drift with an unrelated parameter.
+    # risk_reversal_25 applies its own OTM + traded-strike filters.
+    skew = core.risk_reversal_25(
+        strikes, atm_k,
+        snap["ce_delta"].values, snap["ce_iv"].values, snap["ce_ltp"].values,
+        snap["pe_delta"].values, snap["pe_iv"].values, snap["pe_ltp"].values,
+        atm_iv=atm_iv,
+    )
+
     # net_gexv-based aggregate (spot²-scaled) kept ONLY for the stored net_gex
     # magnitude + AGG sign column (display scale); structural metrics use net_gex.
     net_gexv_sum = float(rng["net_gexv"].values.sum())
@@ -117,9 +140,32 @@ def compute_snapshot(snap: pd.DataFrame, fut: float, exp_move: float,
         "net_gex_norm":    core.lopsidedness(net_gex),
         "gex_regime":      regime,
         "transition_width": tw,
-        "transition_width_norm": round(tw / exp_move, 4)
-                                 if tw and exp_move > 0 else None,
+        # transition_width is quantised to the strike grid by construction — it is
+        # the distance between the two adjacent strikes straddling the flip, so it
+        # equals one strike_interval ~90% of the time. Dividing by expected_move
+        # therefore yields a ratio dominated by grid density rather than by dealer
+        # zone geometry (corr 0.83 with strike_interval/expected_move over 13.5k
+        # rows). Two consequences, both handled here:
+        #
+        #  1. When strike_interval > expected_move the ratio mechanically exceeds
+        #     1.0 and the metric is simply undefined (the grid is coarser than the
+        #     move it is meant to resolve). Emit None rather than a number that
+        #     invites comparison against the tight/moderate/wide bands.
+        #  2. grid_density is stored alongside so any analysis can control for the
+        #     confound instead of unknowingly measuring liquidity tier.
+        #
+        # See DEGENERATE_WIDTH_NORM in exposure_core for the threshold rationale.
+        "transition_width_norm": core.width_norm(tw, exp_move),
+        "grid_density":    round(strike_int / exp_move, 4) if exp_move > 0 else None,
         "neg_gamma_fraction": round(neg_frac, 4) if neg_frac is not None else None,
+        # 25-delta skew: rr25 = IV(25d call) - IV(25d put). Negative = puts bid =
+        # downside skew. Near-orthogonal to the gamma columns (|corr| <= 0.28 vs
+        # net_gex_norm / vanna / neg_frac on 2026-07-16), i.e. genuinely new
+        # information rather than a restatement of positioning.
+        "rr25":            skew["rr25"],
+        "bf25":            skew["bf25"],
+        "iv_25c":          skew["iv_25c"],
+        "iv_25p":          skew["iv_25p"],
         "peak_pos_gamma_strike": peak_pos,
         "peak_neg_gamma_strike": peak_neg,
         # Gamma shelf (Q1/Q1b/Q3 raw facts). None-safe unpack.
@@ -220,6 +266,7 @@ def _fetch_snapshot(con, symbol: str, expiry: str, d: str) -> pd.DataFrame:
             COALESCE(distance_from_atm, 999) AS dist_atm,
             COALESCE(days_to_expiry, 0)    AS dte,
             COALESCE(ce_iv, 0)             AS ce_iv,
+            COALESCE(pe_iv, 0)             AS pe_iv,
             COALESCE(ce_oi_change, 0)      AS ce_oi_change,
             COALESCE(pe_oi_change, 0)      AS pe_oi_change,
             COALESCE(ce_oi, 0)             AS ce_oi,
@@ -232,6 +279,8 @@ def _fetch_snapshot(con, symbol: str, expiry: str, d: str) -> pd.DataFrame:
             COALESCE(pe_bid_ask_spread, 0) AS pe_baq,
             COALESCE(ce_gamma, 0)          AS ce_gamma,
             COALESCE(pe_gamma, 0)          AS pe_gamma,
+            COALESCE(ce_delta, 0)          AS ce_delta,
+            COALESCE(pe_delta, 0)          AS pe_delta,
             COALESCE(lotsize, 1)            AS lotsize,
             COALESCE(net_gexv, 0)          AS net_gexv,
             COALESCE(ce_vanna_ex, 0)       AS ce_vanna_ex,
@@ -256,12 +305,47 @@ def _fetch_snapshot(con, symbol: str, expiry: str, d: str) -> pd.DataFrame:
     return df
 
 
-def _atm_iv(snap: pd.DataFrame) -> float:
-    """ATM IV from the row nearest distance_from_atm = 0."""
+def _is_num(v: Any) -> bool:
+    """True only for a real, finite number.
+
+    Guards the None/NaN boundary between pandas and plain Python: values seeded
+    back from DuckDB arrive through pandas, so a stored NULL surfaces as
+    np.float64('nan') on a float64 column — which is both truthy and `is not
+    None`, and therefore slips past the obvious guards and propagates silently.
+    """
+    if v is None:
+        return False
+    try:
+        return math.isfinite(float(v))
+    except (TypeError, ValueError):
+        return False
+
+
+def _atm_iv(snap: pd.DataFrame) -> Optional[float]:
+    """ATM IV from the row nearest distance_from_atm = 0.
+
+    Averages the CE and PE legs when both quoted: at ATM put-call parity keeps
+    the two within a few tenths of a vol point, so the mean is a strictly better
+    estimator than either leg alone. Falls back to whichever leg did quote.
+
+    Why the fallback matters: NSE publishes nothing at all (no IV, no LTP, no
+    bid/ask, no OI) for a leg with no market — newly introduced strikes after a
+    corporate action (ADANIPOWER post-split, BANKBARODA post-dividend) or simply
+    an untraded leg (LT/TIINDIA/NBCC/HDFCAMC). Reading CE alone then yielded 0.0
+    even when a perfectly good PE IV sat on the same strike, and the 0.0 flowed
+    straight into atm_iv and iv_change (e.g. 0 - 31.24 = -31.24).
+
+    Returns None — never 0.0 — when neither leg quoted, so "no data" stays
+    distinguishable from "zero vol" for every downstream consumer.
+    """
     if snap.empty:
-        return 0.0
+        return None
     near = snap.iloc[(snap["dist_atm"].abs()).argmin()]
-    return float(near["ce_iv"]) if near["ce_iv"] > 0 else 0.0
+    ce = float(near["ce_iv"]) if _is_num(near["ce_iv"]) and near["ce_iv"] > 0 else None
+    pe = float(near["pe_iv"]) if _is_num(near["pe_iv"]) and near["pe_iv"] > 0 else None
+    if ce is not None and pe is not None:
+        return (ce + pe) / 2.0
+    return ce if ce is not None else pe
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -291,24 +375,43 @@ def process_date(con, symbols: List[str], d: str,
                 atm_iv = _atm_iv(snap)
 
                 # Smoothed IV (EWMA over history) — per (symbol, rank)
+                # atm_iv may be None (neither ATM leg quoted); only real readings
+                # enter the EWMA history, so a gap never poisons the smoothed
+                # series or the expected_move derived from it.
                 hist = iv_hist.setdefault(key, [])
-                if atm_iv > 0:
+                if atm_iv is not None and atm_iv > 0:
                     hist.append(atm_iv)
                     if len(hist) > IV_SMOOTH_SPAN * 3:
                         hist[:] = hist[-IV_SMOOTH_SPAN * 3:]
-                iv_sm = core.ewma_last(hist, IV_SMOOTH_SPAN) if hist else atm_iv
+                if hist:
+                    iv_sm = core.ewma_last(hist, IV_SMOOTH_SPAN)
+                elif atm_iv is not None:
+                    iv_sm = atm_iv
+                else:
+                    # No reading today and no history to fall back on: expected_move
+                    # would be 0, making every *_norm metric a divide-by-zero. Skip
+                    # the row rather than emit unusable geometry.
+                    continue
 
                 em = core.expected_move(fut, iv_sm, dte)
 
                 prev = prev_rows.get(key)
                 prev_half = prev.get("_range_half") if prev else None
                 prev_gcom = prev.get("_gamma_com") if prev else None
-                m = compute_snapshot(snap, fut, em, prev_half, prev_gcom)
+                m = compute_snapshot(snap, fut, em, prev_half, prev_gcom,
+                                     atm_iv=atm_iv)
                 if "_skip" in m:
                     continue
 
-                # IV change vs prev day (same rank)
-                iv_chg = (atm_iv - prev.get("atm_iv", atm_iv)) if prev else 0.0
+                # IV change vs prev day (same rank). None/NaN-safe on both sides:
+                # prev rows are seeded from the DB via pandas, so a stored NULL
+                # atm_iv arrives as np.float64('nan') — truthy and not None — which
+                # a naive guard would let through and silently write NaN back.
+                prev_iv = prev.get("atm_iv") if prev else None
+                if prev_iv is not None and not _is_num(prev_iv):
+                    prev_iv = None
+                iv_chg = (atm_iv - float(prev_iv)) \
+                    if (atm_iv is not None and prev_iv is not None) else None
 
                 # flip_velocity is computed in the Stage-2 SQL pass (window
                 # functions), not here — Stage 1 is per-snapshot only.
@@ -328,12 +431,13 @@ def process_date(con, symbols: List[str], d: str,
                     "basis":           basis,
                     "basis_pct":       basis_pct,
                     "basis_annualized": basis_ann,
-                    "atm_iv":          round(atm_iv, 2),
+                    "atm_iv":          round(atm_iv, 2) if atm_iv is not None else None,
                     "atm_iv_smoothed": round(float(iv_sm), 2),
-                    "iv_change":       round(iv_chg, 2),
+                    "iv_change":       round(iv_chg, 2) if iv_chg is not None else None,
                     "confidence":      core.confidence(m["total_oi_in_range"],
                                                    m["n_strikes"],
-                                                   m.get("transition_width_norm")),
+                                                   m.get("transition_width_norm"),
+                                                   atm_iv),
                     "near_earnings":   False,  # filled by events join (Phase A.2)
                 })
                 sigs, active = core.derive_signals(m, prev)
@@ -367,6 +471,10 @@ def _store(con, rows: List[Dict]):
         "gamma_com_migration",
         # OI-COM + dealer divergence (Stage-1, same-snapshot — gamma vs OI center)
         "oi_com_inrange","dealer_divergence","dealer_divergence_label",
+        # Strike-grid confound control (see _ensure_schema)
+        "grid_density",
+        # 25-delta skew (rr25 / bf25 and the two wing IVs behind them)
+        "rr25","bf25","iv_25c","iv_25p",
         # NOTE: flip_velocity + signals + compression/day-counters
         # + migration_effectiveness + concentration_stability are populated by the
         # Stage-2 SQL pass (run_stage2), not Stage 1.
@@ -731,6 +839,23 @@ def _ensure_schema(con):
         # / expected_move, 3-state label. Computed in Stage 1 (same-snapshot).
         ("dealer_divergence",         "DOUBLE"),
         ("dealer_divergence_label",   "VARCHAR"),
+        # strike_interval / expected_move. Stored so analysis can CONTROL for the
+        # strike-grid confound rather than unknowingly measure it: transition_width
+        # is grid-quantised, so transition_width_norm correlates 0.83 with this
+        # column and its tight/moderate/wide bands largely stratify symbols by
+        # liquidity tier (indices have the finest grids) rather than by dealer
+        # defence geometry. Any behavioural claim built on width_norm should be
+        # re-checked within grid_density strata.
+        ("grid_density",              "DOUBLE"),
+        # 25-delta skew (spec: RR25 = IV(25d call) - IV(25d put), vol points).
+        # Negative = puts bid = downside skew. Computed on the full chain from OTM,
+        # TRADED strikes only — see risk_reversal_25 in exposure_core for why both
+        # restrictions are load-bearing. NULL (never 0) when a wing does not reach
+        # 25 delta, so "no observable skew point" stays distinct from "flat skew".
+        ("rr25",                      "DOUBLE"),
+        ("bf25",                      "DOUBLE"),
+        ("iv_25c",                    "DOUBLE"),
+        ("iv_25p",                    "DOUBLE"),
     ]
     for col, typ in add:
         try:
