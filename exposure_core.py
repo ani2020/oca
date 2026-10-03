@@ -48,6 +48,137 @@ def strike_interval(strikes: np.ndarray) -> float:
 
 
 TRADING_DAYS_YEAR = 243.0
+
+# ── em_1d : one-session expected move ─────────────────────────────────
+# expected_move() is a 1-sigma move to EXPIRY. em_1d is the NEXT-SESSION move,
+# and it is deliberately NOT built from ATM IV alone.
+#
+# Calibration on 19,269 rows (cash_eod settlement closes joined to exposure_eod,
+# rank-0, dte>3). Target for a correctly scaled 1-sigma band is
+# E|X|/sigma = sqrt(2/pi) = 0.798:
+#     IV only            0.762      (band too wide - the vol risk premium)
+#     0.25*IV + 0.75*HV  0.787
+#     0.15*IV + 0.85*HV  0.795
+#     0.10*IV + 0.90*HV  0.799   <- used
+#     HV only            0.809      (band too narrow)
+#
+# HV dominates because realised vol is the better predictor of the NEXT day;
+# implied carries a persistent premium. Do not read the weights as "IV is
+# useless" - the IV leg is what moves first when a regime breaks, and this
+# sample covers one quiet regime (2025-12 to 2026-09). Revisit after a vol event.
+#
+# CAVEAT: fitting E|X|/sigma gets the average right, not the shape. 1-sigma
+# coverage runs 72.0% against a theoretical 68.3%, and 2-sigma covers 93.1%
+# against 95.4% - too much mass in the middle AND in the far tail. Treat any
+# 2-sigma band built from this as optimistic.
+EM1D_W_IV = 0.10
+EM1D_W_HV = 0.90
+
+# HV20 construction. NSE does NOT adjust bhavcopy prevclose on ex-dates (verified
+# on VEDL 2026-04-30: close 271.55 against prevclose 773.60, unadjusted), and
+# prevclose is in fact exactly LAG(close), so it carries no adjustment at all.
+# Without a corporate-actions feed the only defence is to drop pathological
+# returns: a single -104% log return put VEDL's HV20 at 372% for a month.
+# Excluding |r| > 0.15 caps the observed maximum at 76% and moves the calibration
+# by 0.003 - it costs nothing and removes a catastrophic tail.
+HV_WINDOW_DAYS   = 20      # trailing sessions, lagged 1 (no look-ahead)
+HV_MAX_ABS_RET   = 0.15    # drop |log return| above this before estimating
+HV_MIN_OBS       = 20      # below this, hv20 is NULL rather than a thin guess
+
+# ── IV Rank / Percentile ────────────────────────────────────────────
+# Computed ONCE by the nightly into exposure_eod, then read by the dashboard.
+# It used to be derived per-request inside routes/iv.py; putting a second copy
+# in the screener would have been a third. One calculation, many readers.
+#
+# Ranking raw front-month ATM IV makes the number a function of the roll cycle:
+# mean IV Rank ran 16.8 at DTE 0-4 against 47.5 at DTE 15-21 — a 31pt swing with
+# no change in vol regime, so every name in expiry week looked like cheap vol.
+# (A linear CORR test misses this entirely, returning ~0.03, because the shape
+# is a hump not a line. Check bucketed means, never correlation.)
+#
+# Interpolating rank-0 and rank-1 to a fixed 30-day point in TOTAL VARIANCE —
+# what India VIX does — cuts the spread to 9.8pt and lifts expiry week to 26.3.
+# Where rank-1 is missing (~45% of symbol-days) fall back to ranking rank-0
+# inside a DTE band, which gets the spread to 12.7pt.
+#
+# The two series are ranked SEPARATELY and never pooled: a blended history took
+# its minimum from a `band` row while `cm30` bottomed higher, moving NIFTY's
+# IV Rank from 13.7 to 17.4 for no reason but the mixing.
+IVRANK_CM_TARGET_DTE = 30          # constant-maturity point, calendar days
+IVRANK_DTE_BAND      = (15, 35)    # fallback band when rank-1 is unavailable
+IVRANK_MIN_SAMPLES   = 20          # below this, rank/pctile are NULL
+IVRANK_LOOKBACK_DAYS = 90          # trailing window
+
+# ── Empirical band-hold probability ───────────────────────────────────
+# P(the underlying finishes INSIDE a +/- z*sigma band), measured rather than
+# assumed. Use this, never NORM.DIST - the Gaussian is badly optimistic exactly
+# where premium sellers operate:
+#
+#       z      empirical    normal    breaches vs normal
+#      1.0        67.6%      68.3%       1.0x
+#      1.5        82.7%      86.6%       1.3x
+#      2.0        90.6%      95.4%       2.0x
+#      2.5        94.5%      98.8%       4.6x
+#      3.0        96.6%      99.7%      11.0x
+#
+# Two things the measurement settled:
+#
+# 1. HORIZON DOES NOT MATTER. 5/10/20/30-session horizons gave hold rates within
+#    ~2pp of each other at every z, so the distribution is scale-invariant in z
+#    and the table needs no horizon axis.
+#
+# 2. TRAILING VOL LEVEL MATTERS A LOT. At the same nominal z=2.0 the quietest
+#    HV quintile held 83.5% against 96.3% for the most volatile - a 4.5x
+#    difference in breach rate. That is mean reversion: a quiet name's hv20
+#    understates forward vol (the quietest quintile was followed by 1.47x its
+#    trailing level), so its z-bands are too narrow. Those are also the names
+#    that screen best on band width, so ignoring this inverts the ranking.
+#
+# Source: 725,412 observations, bhavcopy cash_eod EQ closes 2025-11 to 2026-09,
+# 5- and 20-session horizons pooled, corporate-action returns excluded per
+# HV_MAX_ABS_RET. Bands are on trailing hv20 (annualised %).
+# REFRESH after materially more history; these are not analytic constants.
+HOLD_HV_BANDS = (20.0, 30.0, 40.0, 52.0)     # hv20 cut points -> 5 bands
+HOLD_Z_GRID   = (1.0, 1.25, 1.5, 1.75, 2.0, 2.25, 2.5, 3.0)
+HOLD_PROB_LUT = {
+    1: (59.6, 68.1, 74.6, 79.5, 83.2, 86.1, 88.5, 91.9),   # hv < 20
+    2: (61.7, 71.0, 78.5, 84.1, 88.2, 91.1, 93.3, 96.1),   # 20-30
+    3: (66.8, 76.1, 83.0, 87.9, 91.4, 93.8, 95.5, 97.5),   # 30-40
+    4: (72.2, 80.9, 87.0, 91.1, 93.8, 95.7, 96.9, 98.3),   # 40-52
+    5: (79.5, 87.0, 91.7, 94.6, 96.3, 97.4, 98.2, 99.0),   # hv >= 52
+}
+
+
+def hv_band(hv20: float) -> int:
+    """1..5 bucket for a trailing hv20, matching HOLD_PROB_LUT keys."""
+    if hv20 is None:
+        return 3
+    for i, cut in enumerate(HOLD_HV_BANDS, start=1):
+        if hv20 < cut:
+            return i
+    return len(HOLD_HV_BANDS) + 1
+
+
+def hold_prob(z: float, hv20: float):
+    """Empirical P(finish inside +/- z sigma), linearly interpolated on z.
+
+    Returns None when z is unusable. Clamped at the grid edges: below the first
+    z the table says nothing useful, and above the last extrapolation would be
+    exactly the optimism this table exists to avoid.
+    """
+    if z is None or z != z or z <= 0:
+        return None
+    row = HOLD_PROB_LUT[hv_band(hv20)]
+    g = HOLD_Z_GRID
+    if z <= g[0]:
+        return round(row[0] * z / g[0], 1)      # straight line to (0, 0)
+    if z >= g[-1]:
+        return row[-1]
+    for i in range(len(g) - 1):
+        if g[i] <= z <= g[i + 1]:
+            f = (z - g[i]) / (g[i + 1] - g[i])
+            return round(row[i] + f * (row[i + 1] - row[i]), 1)
+    return None
 # NSE trading days per year. Measured, not assumed: 116 distinct trading days were
 # observed between 2026-01-23 and 2026-07-16 (174 calendar days), which annualises
 # to 243.3. Independent cross-check: 365 - 104 weekend days = 261 weekdays, less
@@ -189,8 +320,21 @@ def gamma_flip(strikes, net_gex, ref_price=None,
     order = np.argsort(x)
     xs, gs = x[order], g[order]
 
-    # Per-strike sign-change crossings (LOCAL gamma flips sign)
-    sc = np.where(np.sign(gs[:-1]) != np.sign(gs[1:]))[0]
+    # An all-zero profile has no gamma structure at all. It used to fall through
+    # to `pos_all = (gs >= 0).all() == True` and get labelled "all_positive" —
+    # i.e. the strongest possible pinning claim, made on a chain with no OI.
+    if not np.any(np.abs(gs) > 0):
+        return None, None, "no_gamma"
+
+    # Per-strike sign-change crossings (LOCAL gamma flips sign).
+    # STRICT PRODUCT, not a comparison of np.sign(): np.sign(0.0) is 0.0, so
+    # `sign(a) != sign(b)` fires whenever a strike has EXACTLY zero net gamma
+    # next to a non-zero one — even when both neighbours share a sign. Zero-GEX
+    # strikes are not rare (37.7% of ocdata rows in Sep-2026), so a genuinely
+    # all-positive chain with one dead strike reported a spurious flip AT that
+    # strike and was denied its "all_positive" label. gs[i]*gs[i+1] < 0 is true
+    # only for a real sign change.
+    sc = np.where(gs[:-1] * gs[1:] < 0)[0]
 
     def _interp(i):
         d = gs[i + 1] - gs[i]
@@ -230,7 +374,9 @@ def transition_width(strikes, net_gex, ref_price=None) -> Optional[float]:
     Uses the crossing NEAREST ref_price (consistent with gamma_flip), not the first."""
     g = np.asarray(net_gex, float)
     x = np.asarray(strikes, float)
-    sc = np.where(np.sign(g[:-1]) != np.sign(g[1:]))[0]
+    # Strict product — see the note in gamma_flip(). np.sign() treats an exactly
+    # zero strike as its own sign and manufactures crossings around dead strikes.
+    sc = np.where(g[:-1] * g[1:] < 0)[0]
     if len(sc) == 0:
         return None
     ref = ref_price if ref_price is not None else x[int(len(x) // 2)]
@@ -1041,10 +1187,16 @@ SIGNAL_INFO = {
         "Vol expansion likely; favor protection / long premium."),
     "regime_flip_to_pos": ("Regime → Positive",
         "Gamma flipped to positive (pinning) regime. Favor premium selling near the flip."),
+    # Text is INTERPOLATED from DEFAULTS, not hardcoded. The previous literal
+    # said ">15% of expected move" long after DRIFT_FRAC was raised to 0.25,
+    # so the tooltip described a threshold the code had stopped using.
     "flip_drift_up": ("Flip Drifting Up",
-        "Gamma balance point migrating higher (>15% of expected move). Resistance/pin rising."),
+        f"Gamma balance point migrating higher (>{DEFAULTS['DRIFT_FRAC']:.0%} of expected "
+        f"move, and only while the flip sits within {DEFAULTS['DRIFT_MAX_NORM_DIST']:g} EM "
+        "of price). Resistance/pin rising."),
     "flip_drift_down": ("Flip Drifting Down",
-        "Gamma balance point migrating lower. Support broadening downward."),
+        f"Gamma balance point migrating lower (>{DEFAULTS['DRIFT_FRAC']:.0%} of expected "
+        f"move, same relevance gate). Support broadening downward."),
     "pin_strengthening": ("Pin Strengthening",
         "Transition zone narrowing under positive gamma — sharper pin. Sell premium around flip."),
     "instability_widening": ("Instability Widening",

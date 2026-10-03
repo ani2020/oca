@@ -20,47 +20,82 @@ def oi_change(
     # Use the DB's ce_oi_change column (NSE's own computed delta vs their last
     # reference) rather than subtracting consecutive snapshots — gives meaningful
     # intraday context rather than tiny 4-minute movements.
+    #
+    # LTP, however, MUST be a change, not a level. Previously the build-up
+    # classifier was handed ce_ltp/pe_ltp directly; since an LTP is never
+    # negative, the `ltp < 0` arms were unreachable and this screen could only
+    # ever emit "Long Build-Up", "Short Covering" or "Neutral" — two of the four
+    # states did not exist. So pull the previous snapshot's LTP too, the same
+    # way oi_walls does, and diff it. Join on (expiry, strike) because this
+    # endpoint spans every live expiry, not one.
     df = qdf(
         f"""
-        SELECT
-            STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS timestamp,
-            strike_price,
-            CAST(expiry AS VARCHAR)         AS expiry,
-            COALESCE(ce_oi,        0)       AS ce_oi,
-            COALESCE(pe_oi,        0)       AS pe_oi,
-            COALESCE(ce_oi_change, 0)       AS ce_oi_chg,
-            COALESCE(pe_oi_change, 0)       AS pe_oi_chg,
-            COALESCE(ce_ltp,       0)       AS ce_ltp,
-            COALESCE(pe_ltp,       0)       AS pe_ltp,
-            COALESCE(ce_volume,    0)       AS ce_volume,
-            COALESCE(pe_volume,    0)       AS pe_volume,
-            COALESCE(ce_delta,     0)       AS ce_delta,
-            COALESCE(ce_prem_oi_chg, 0)     AS ce_prem_oi_chg,
-            COALESCE(pe_prem_oi_chg, 0)     AS pe_prem_oi_chg,
-            COALESCE(underlying_price, 0)   AS spot
-        FROM {tbl()}
-        WHERE symbol = ?
-          AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol = ?)
-          AND expiry >= CURRENT_DATE
-          AND (COALESCE(ce_ltp,0) + COALESCE(pe_ltp,0)) > 0
-        ORDER BY expiry, strike_price
+        WITH ranked AS (
+            SELECT t.*,
+                   DENSE_RANK() OVER (ORDER BY t.timestamp DESC) AS rk
+            FROM {tbl()} t
+            WHERE t.symbol = ?
+              AND t.expiry >= CURRENT_DATE
+        ),
+        cur AS (
+            SELECT
+                STRFTIME(r.timestamp, '%Y-%m-%d %H:%M') AS timestamp,
+                r.strike_price,
+                CAST(r.expiry AS VARCHAR)         AS expiry,
+                COALESCE(r.ce_oi,        0)       AS ce_oi,
+                COALESCE(r.pe_oi,        0)       AS pe_oi,
+                COALESCE(r.ce_oi_change, 0)       AS ce_oi_chg,
+                COALESCE(r.pe_oi_change, 0)       AS pe_oi_chg,
+                COALESCE(r.ce_ltp,       0)       AS ce_ltp,
+                COALESCE(r.pe_ltp,       0)       AS pe_ltp,
+                COALESCE(r.ce_volume,    0)       AS ce_volume,
+                COALESCE(r.pe_volume,    0)       AS pe_volume,
+                COALESCE(r.ce_delta,     0)       AS ce_delta,
+                COALESCE(r.ce_prem_oi_chg, 0)     AS ce_prem_oi_chg,
+                COALESCE(r.pe_prem_oi_chg, 0)     AS pe_prem_oi_chg,
+                COALESCE(r.underlying_price, 0)   AS spot
+            FROM ranked r
+            WHERE r.rk = 1
+              AND (COALESCE(r.ce_ltp,0) + COALESCE(r.pe_ltp,0)) > 0
+        ),
+        prev AS (
+            SELECT r.strike_price,
+                   CAST(r.expiry AS VARCHAR) AS expiry,
+                   COALESCE(r.ce_ltp,0) AS p_ce_ltp,
+                   COALESCE(r.pe_ltp,0) AS p_pe_ltp
+            FROM ranked r
+            WHERE r.rk = 2
+        )
+        SELECT c.*,
+               c.ce_ltp - COALESCE(p.p_ce_ltp, c.ce_ltp) AS ce_ltp_chg,
+               c.pe_ltp - COALESCE(p.p_pe_ltp, c.pe_ltp) AS pe_ltp_chg
+        FROM cur c
+        LEFT JOIN prev p
+               ON p.strike_price = c.strike_price
+              AND p.expiry       = c.expiry
+        ORDER BY c.expiry, c.strike_price
         """,
-        [symbol, symbol],
+        [symbol],
     )
     if df.empty:
         raise HTTPException(404, f"No OI data for {symbol}")
 
-    # Compute LTP signal direction from ce_oi_change sign convention:
-    # positive OI change + positive LTP = longs entering
-    def _sig(oi, ltp):
-        if oi > 0 and ltp > 0: return "Long Build-Up"
-        if oi > 0 and ltp < 0: return "Short Build-Up"
-        if oi < 0 and ltp > 0: return "Short Covering"
-        if oi < 0 and ltp < 0: return "Long Unwinding"
+    # OI/price build-up classification. Both arguments are CHANGES:
+    #   OI up   + premium up   -> new longs paying up          (Long Build-Up)
+    #   OI up   + premium down -> new shorts writing            (Short Build-Up)
+    #   OI down + premium up   -> shorts buying back            (Short Covering)
+    #   OI down + premium down -> longs liquidating             (Long Unwinding)
+    # Matches exposure_core._oi_buildup_signal so the OI screen and the OI Walls
+    # shelf signal agree. A flat premium (no prior snapshot) falls to Neutral.
+    def _sig(oi, ltp_chg):
+        if oi > 0 and ltp_chg > 0: return "Long Build-Up"
+        if oi > 0 and ltp_chg < 0: return "Short Build-Up"
+        if oi < 0 and ltp_chg > 0: return "Short Covering"
+        if oi < 0 and ltp_chg < 0: return "Long Unwinding"
         return "Neutral"
 
-    df["ce_signal"] = df.apply(lambda r: _sig(r["ce_oi_chg"], r["ce_ltp"]), axis=1)
-    df["pe_signal"] = df.apply(lambda r: _sig(r["pe_oi_chg"], r["pe_ltp"]), axis=1)
+    df["ce_signal"] = df.apply(lambda r: _sig(r["ce_oi_chg"], r["ce_ltp_chg"]), axis=1)
+    df["pe_signal"] = df.apply(lambda r: _sig(r["pe_oi_chg"], r["pe_ltp_chg"]), axis=1)
 
     # Add Vol/OI ratio — high ratio = fresh positioning
     df["ce_vol_oi"] = df.apply(
@@ -87,16 +122,30 @@ def oi_signals_all():
     # Single set-based query (was a 2-query-per-symbol loop = ~262 round-trips).
     # DENSE_RANK tags each symbol's two most recent snapshots; aggregate the
     # latest-vs-previous diff for ALL symbols in one pass.
+    #
+    # The window function ran unscoped over the WHOLE table -- every row ever
+    # scraped, back to 2026-01-23 (27.4M rows and growing ~110k/day as of
+    # 2026-09). DENSE_RANK needs a full sort of everything it's given, so this
+    # sorted the entire history on every Overview refresh just to find each
+    # symbol's 2 most recent timestamps, and gets slower every day the scraper
+    # runs. The `bound`/WHERE below restricts the sort to the last 7 days
+    # BEFORE ranking (7, not 2, to safely span a long weekend plus a holiday --
+    # verified against a simulated 4-day gap, where a 2-day window returned zero
+    # valid symbols; 7 days does not), cutting the sorted volume by roughly two
+    # orders of magnitude at the current table size with an identical result
+    # (verified byte-for-byte against the unscoped query on a synthetic table).
     df = qdf(
         f"""
-        WITH ranked AS (
+        WITH bound AS (SELECT MAX(timestamp) AS mx FROM {tbl()}),
+        ranked AS (
             SELECT symbol, timestamp, strike_price, expiry,
                    COALESCE(ce_oi, 0)  AS ce_oi,
                    COALESCE(pe_oi, 0)  AS pe_oi,
                    COALESCE(ce_ltp, 0) AS ce_ltp,
                    COALESCE(pe_ltp, 0) AS pe_ltp,
                    DENSE_RANK() OVER (PARTITION BY symbol ORDER BY timestamp DESC) AS rk
-            FROM {tbl()}
+            FROM {tbl()}, bound
+            WHERE timestamp >= bound.mx - INTERVAL '7 days'
         ),
         two AS (
             SELECT * FROM ranked WHERE rk <= 2

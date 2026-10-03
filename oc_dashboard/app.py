@@ -30,9 +30,9 @@ from .nse import init_nse_fetcher
 
 # Route modules
 from .routes import (
-    meta, overview, gex, oi, iv, screener, shockers,
+    meta, overview, gex, oi, iv, screener, screener_vol, shockers,
     divergence, flow, smartmoney, exposure, screener_exposure, market, icici,
-    symbol_history, market_state,
+    symbol_history, market_state, rv_forecast, vrp, wheel,
 )
 
 
@@ -109,6 +109,12 @@ app.include_router(gex.router, tags=["gex"])
 app.include_router(oi.router, tags=["oi"])
 app.include_router(iv.router, tags=["iv"])
 app.include_router(screener.router, tags=["screener"])
+# Model-ranked vol screener. ADDITIVE -- screener.router above is untouched and
+# its straddle/strangle tabs stay in the UI as the control. The new model has 71
+# expiries of backtest and forward evidence starting 2026-09-18; the two run
+# side by side on identical candidates until the comparison has ~20-30 resolved
+# expiries, which is roughly two years at monthly cadence.
+app.include_router(screener_vol.router, tags=["vol_screener"])
 app.include_router(shockers.router, tags=["shockers"])
 app.include_router(divergence.router, tags=["divergence"])
 app.include_router(flow.router, tags=["flow"])
@@ -119,6 +125,18 @@ app.include_router(symbol_history.router, tags=["symbol_history"])
 app.include_router(market.router, tags=["market"])
 app.include_router(market_state.router, tags=["market_state"])
 app.include_router(icici.router, tags=["icici"])
+# RV forecast monitor -- Phase 0 (next-day only), EXPERIMENTAL. Reads rv.duckdb,
+# a separate DB the offline rv_build.py/rv_model.py pipeline writes to after
+# close; see routes/rv_forecast.py and areas/rv-forecast.md.
+app.include_router(rv_forecast.router, tags=["rv_forecast"])
+# VRP (variance risk premium) dashboard -- Phases 1-4, EXPERIMENTAL. Reads
+# vrp.duckdb, a separate DB the offline vrp_build.py/vrp_signals.py pipeline
+# writes to after close; see routes/vrp.py and areas/vrp-dashboard.md.
+app.include_router(vrp.router, tags=["vrp"])
+# WHEEL -- wheel / short-premium backtest runs and paper books, EXPERIMENTAL.
+# Reads wheel_bt.duckdb (oc/wheel_bt.py + the 17:45 oc/wheel_paper.py job) and,
+# for trade drill-downs, SPAN rows from bhavcopy.duckdb; see routes/wheel.py.
+app.include_router(wheel.router, tags=["wheel"])
 
 
 # ---------------------------------------------------------------------------

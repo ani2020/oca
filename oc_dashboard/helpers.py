@@ -240,10 +240,15 @@ def _gamma_analysis_inline(
     bullish_break = round(upper_boundary + ga, 0) if upper_boundary and ga else None
     bearish_break = round(lower_boundary - ga, 0) if lower_boundary and ga else None
 
-    # Expected range
+    # Expected range — 1-sigma move over ONE session.
+    # NOTE: `atm_iv` arrives here as a FRACTION (gex.py passes atm_iv_pct/100),
+    # unlike _build_gamma_profile above which passes percent. Delegate to
+    # exposure_core so the 243 trading-day constant lives in one place; that
+    # helper expects percent, hence the *100. This previously inlined
+    # sqrt(1/252) — the NYSE day count, not NSE's 243.
     exp_range = None
     if atm_iv and atm_iv > 0:
-        raw_move = spot * atm_iv * np.sqrt(1 / 252)
+        raw_move = _core.expected_move_1d(spot, atm_iv * 100.0)
         scale    = 1 / math.sqrt(1 + lambda_gamma * abs(gamma_at_spot))
         exp_range = round(raw_move * scale, 2)
 
@@ -570,7 +575,14 @@ def gamma_flip_from_strikes(strikes, net_gex_values):
 
 def _eod_df(symbol: str, expiry_filter: str, exp_params: list,
             date_from: str, date_to: str) -> "pd.DataFrame":
-    """Fetch EOD (≤15:30) snapshot per strike per date."""
+    """Fetch EOD (<=15:30) snapshot per strike per date per EXPIRY.
+
+    Grain is (dt, strike_price, expiry). The expiry key is not optional: without
+    it the CTE picks one MAX(timestamp) per (dt, strike) across ALL expiries and
+    the join then matches every expiry sharing that timestamp. On NIFTY that was
+    a ~6x row fan-out (133 strikes -> 805 rows spanning 18 maturities), silently
+    multiplying every downstream OI/GEX aggregate in 'all expiry' mode.
+    """
     ef = expiry_filter
     return qdf(
         f"""
@@ -578,15 +590,23 @@ def _eod_df(symbol: str, expiry_filter: str, exp_params: list,
             SELECT
                 CAST(timestamp AS DATE) AS dt,
                 strike_price,
+                expiry,
                 MAX(timestamp)          AS eod_ts
             FROM {tbl()}
             WHERE symbol = ?
               AND CAST(timestamp AS DATE) >= CAST(? AS DATE)
               AND CAST(timestamp AS DATE) <= CAST(? AS DATE)
               AND STRFTIME(timestamp, '%H:%M') <= '15:30'
-              AND expiry >= CURRENT_DATE
+              -- Was `expiry >= CURRENT_DATE`: survivorship + look-ahead. It
+              -- dropped every contract that had already expired by the time
+              -- the query ran, so the same historical window returned
+              -- different rows next month, and early dates kept only the
+              -- far-dated (illiquid-at-the-time) contracts. Anchor on the
+              -- window instead: a contract alive at date_from is kept for the
+              -- days it actually traded.
+              AND expiry >= CAST(? AS DATE)
               {ef}
-            GROUP BY dt, strike_price
+            GROUP BY dt, strike_price, expiry
         )
         SELECT
             CAST(e.dt AS VARCHAR)          AS dt,
@@ -638,14 +658,15 @@ def _eod_df(symbol: str, expiry_filter: str, exp_params: list,
         JOIN eod_ts e
           ON  t.symbol       = ?
           AND t.strike_price = e.strike_price
+          AND t.expiry       = e.expiry
           AND t.timestamp    = e.eod_ts
         WHERE 1=1 {ef}
-        ORDER BY e.dt, t.strike_price
+        ORDER BY e.dt, t.expiry, t.strike_price
         """,
         # Param order matches ? positions:
-        # 1=symbol(CTE) 2=date_from 3=date_to 4=expiry(CTE)
-        # 5=symbol(JOIN) 6=expiry(outer WHERE)
-        [symbol, date_from, date_to] + exp_params
+        # 1=symbol(CTE) 2=date_from 3=date_to 4=date_from(expiry floor)
+        # 5..=expiry(CTE)  then symbol(JOIN)  then expiry(outer WHERE)
+        [symbol, date_from, date_to, date_from] + exp_params
         + [symbol] + exp_params,
     )
 

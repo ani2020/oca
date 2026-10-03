@@ -256,6 +256,9 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="nav-btn" data-view="settings">SETTINGS</button>
     <button class="nav-btn" data-view="vix">VIX</button>
     <button class="nav-btn" data-view="market">MARKET INFO</button>
+    <button class="nav-btn" data-view="rvfcst">RV FCST</button>
+    <button class="nav-btn" data-view="vrp">VRP</button>
+    <button class="nav-btn" data-view="wheel">WHEEL</button>
   </nav>
   <div id="marketClock" class="market-clock" style="margin-right:8px"></div>
   <div class="topbar-right">
@@ -813,6 +816,9 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
 <div class="view" id="view-delta">
   <div class="pagetab-bar" id="screenerPageTabs">
     <button class="pagetab active" data-ptab="sp-delta">DELTA / PREMIUM</button>
+    <button class="pagetab" data-ptab="sp-straddle">STRADDLE</button>
+    <button class="pagetab" data-ptab="sp-strangle">STRANGLE</button>
+    <button class="pagetab" data-ptab="sp-vol">STRADDLE (EV)</button>
     <button class="pagetab" data-ptab="sp-divergence">DIVERGENCE</button>
     <button class="pagetab" data-ptab="sp-shockers">SHOCKERS</button>
     <button class="pagetab" data-ptab="sp-movers">MOVERS</button>
@@ -835,6 +841,9 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
       <button data-ft="index">INDEX</button>
       <button data-ft="stock">STOCK</button>
     </div>
+    <span class="fl">EXPIRY</span><select id="dsExpiry" style="min-width:120px"><option value="all">ALL EXPIRIES</option></select>
+    <span class="fl">MIN OI</span><input type="number" id="dsMinOi" value="0" min="0" step="1000" style="width:80px" title="Per-leg open interest floor — drops illiquid strikes">
+    <span class="fl">MIN VOL</span><input type="number" id="dsMinVol" value="0" min="0" step="100" style="width:70px" title="Per-leg traded volume floor">
     <span class="fl">TIMESTAMP</span><select id="dsTimestamp" style="min-width:140px"></select><span id="dsTimestampSym" style="font-family:var(--mono);font-size:9px;color:var(--muted)"></span>
     <button class="btn" id="btnDs">LOAD</button>
   </div>
@@ -849,7 +858,10 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <div class="card-title">
       OPTIONS IN Δ RANGE <span id="dsRangeLabel" class="badge">5–30</span>
       <span style="margin-left:auto">
-        <button class="btn sec" id="btnFetchMargin" style="font-size:9px;padding:4px 10px">FETCH MARGIN (ICICI)</button>
+        <input type="text" id="dsSearch" placeholder="filter symbol…"
+          oninput="filterTableBySymbol('dsTable',this.value)"
+          style="width:120px;font-size:10px;padding:3px 7px">
+        <button class="btn sec" id="btnFetchMargin" style="font-size:9px;padding:4px 10px;margin-left:6px">FETCH MARGIN (ICICI)</button>
       </span>
     </div>
     <div class="tw" id="dsTable"><div class="loading"><div class="spinner"></div>Select filters and click LOAD</div></div>
@@ -880,6 +892,146 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   </div><!-- /stab-ds-premium -->
 
 </div>
+  <!-- ── Model-ranked straddle (EV) ──────────────────────────────────
+       Sits NEXT TO the existing STRADDLE tab rather than replacing it. The
+       ranking model has 71 expiries of backtest and forward evidence only from
+       2026-09-18, so the old view is the control and the two are compared on
+       identical candidates. Reads the nightly prediction log, not a live
+       recompute, so what is shown is exactly what was logged and later graded.
+  -->
+  <div class="pagetab-panel" id="sp-vol">
+    <div class="filter-bar">
+      <span class="fl">FILTER</span>
+      <div class="toggle-group" id="volFilterGroup">
+        <button class="active" data-ft="all">ALL</button>
+        <button data-ft="index">INDEX</button>
+        <button data-ft="stock">STOCK</button>
+      </div>
+      <span class="fl">EXPIRY</span>
+      <select id="volRank" style="min-width:110px">
+        <option value="0">NEAREST</option>
+        <option value="1">NEXT</option>
+      </select>
+      <span class="fl">SHOW</span>
+      <div class="toggle-group" id="volGateGroup">
+        <button class="active" data-ft="gated">PASSED</button>
+        <button data-ft="all">ALL + REJECTS</button>
+      </div>
+      <button class="btn" id="btnVol">LOAD</button>
+      <button class="btn sec" style="font-size:9px" id="btnVolGuide" title="How to read this page">ⓘ GUIDE</button>
+      <span id="volAsof" style="font-family:var(--mono);font-size:9px;color:var(--muted)"></span>
+    </div>
+    <div id="volGuide" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;
+      background:var(--card);border:1px solid var(--border);font-family:var(--mono);
+      font-size:10px;color:var(--muted);line-height:1.7"></div>
+    <div class="kpi-row" id="volKpis"></div>
+    <div class="card">
+      <div class="card-title">
+        STRADDLE — MODEL RANKED
+        <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+          <input type="text" id="volSearch" placeholder="filter symbol…"
+            oninput="filterTableBySymbol('volTable',this.value)"
+            style="width:120px;font-size:10px;padding:3px 7px">
+          <span class="btn" style="font-size:9px;padding:3px 8px"
+            onclick="csvBtn('volTable',()=>'straddle_ev_'+(document.getElementById('volAsof')?.textContent||'').replace(/\D/g,'')+'.csv')">CSV</span>
+        </span>
+      </div>
+      <div id="volTable"><div class="empty">Click LOAD</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">MODEL TRACKING</div>
+      <div id="volCompare"><div class="empty">—</div></div>
+    </div>
+  </div>
+
+  <div class="pagetab-panel" id="sp-straddle">
+    <div class="filter-bar">
+      <span class="fl">FILTER</span>
+      <div class="toggle-group" id="strFilterGroup">
+        <button class="active" data-ft="all">ALL</button>
+        <button data-ft="index">INDEX</button>
+        <button data-ft="stock">STOCK</button>
+      </div>
+      <span class="fl">EXPIRY</span>
+      <select id="strRank" style="min-width:110px">
+        <option value="0">NEAREST</option>
+        <option value="1">NEXT</option>
+      </select>
+      <span class="fl">MIN OI</span>
+      <input type="number" id="strMinOi" value="0" min="0" step="1000" style="width:80px"
+             title="Applied to BOTH legs — a straddle needs two liquid sides">
+      <button class="btn" id="btnStr">LOAD</button>
+    </div>
+    <div class="kpi-row" id="strKpis"></div>
+    <div class="card">
+      <div class="card-title">
+        ATM SHORT STRADDLE
+        <span style="margin-left:auto">
+          <input type="text" id="strSearch" placeholder="filter symbol…"
+            oninput="filterTableBySymbol('strTable',this.value)"
+            style="width:120px;font-size:10px;padding:3px 7px">
+        </span>
+      </div>
+      <div style="font-size:9px;color:var(--muted);padding:0 10px 6px;line-height:1.4">
+        BE/HV is the richness read: straddle premium divided by the move recent
+        realised vol implies over the same days-to-expiry. Above 1.00 the market
+        pays more than realised movement justifies. Comparing premium to EM
+        instead would be circular — both come from the same ATM IV.
+        Margin is SPAN-netted across the two legs, not 2× a single leg.
+      </div>
+      <div class="tw" id="strTable"><div class="loading"><div class="spinner"></div>Click LOAD</div></div>
+    </div>
+  </div><!-- /sp-straddle -->
+
+  <div class="pagetab-panel" id="sp-strangle">
+    <div class="filter-bar">
+      <span class="fl">FILTER</span>
+      <div class="toggle-group" id="sgFilterGroup">
+        <button class="active" data-ft="all">ALL</button>
+        <button data-ft="index">INDEX</button>
+        <button data-ft="stock">STOCK</button>
+      </div>
+      <span class="fl">DELTA</span>
+      <div class="toggle-group" id="sgDeltaGroup">
+        <button data-dt="10">10Δ</button>
+        <button data-dt="15">15Δ</button>
+        <button class="active" data-dt="20">20Δ</button>
+        <button data-dt="25">25Δ</button>
+      </div>
+      <input type="range" id="sgDelta" min="5" max="40" step="1" value="20" style="width:110px">
+      <span id="sgDeltaLabel" class="badge">20Δ</span>
+      <span class="fl">EXPIRY</span>
+      <select id="sgRank" style="min-width:110px">
+        <option value="0">NEAREST</option>
+        <option value="1">NEXT</option>
+      </select>
+      <span class="fl">MIN OI</span>
+      <input type="number" id="sgMinOi" value="0" min="0" step="1000" style="width:80px"
+             title="Applied to BOTH legs">
+      <button class="btn" id="btnSg">LOAD</button>
+    </div>
+    <div class="kpi-row" id="sgKpis"></div>
+    <div class="card">
+      <div class="card-title">
+        SHORT STRANGLE <span id="sgDeltaBadge" class="badge">20Δ</span>
+        <span style="margin-left:auto">
+          <input type="text" id="sgSearch" placeholder="filter symbol…"
+            oninput="filterTableBySymbol('sgTable',this.value)"
+            style="width:120px;font-size:10px;padding:3px 7px">
+        </span>
+      </div>
+      <div style="font-size:9px;color:var(--muted);padding:0 10px 6px;line-height:1.4">
+        Strikes are at-or-beyond the target delta — never a tighter band than asked for.
+        Z is how far each breakeven sits in units of realised vol over the remaining DTE;
+        Z MIN is the side that breaks first. P(HOLD) is EMPIRICAL, not Gaussian, and is
+        conditioned on trailing vol: at the same nominal 2σ the quietest names held 83.2%
+        against 96.3% for the most volatile. A normal distribution would have claimed 95.4%
+        for both.
+      </div>
+      <div class="tw" id="sgTable"><div class="loading"><div class="spinner"></div>Click LOAD</div></div>
+    </div>
+  </div><!-- /sp-strangle -->
+
   <div class="pagetab-panel" id="sp-divergence">
   <div class="filter-bar">
     <span class="fl">MODE</span>
@@ -1263,6 +1415,268 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
   <div class="subtab-panel" id="stab-market-board">
     <div class="card"><div class="card-title">BOARD MEETINGS</div>
       <div class="tw" id="boardMeetingsTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+</div>
+
+<!-- ══ RV FORECAST MONITOR ═══════════════════════════════════════════ -->
+<!-- Phase 0 (next-day only). EXPERIMENTAL -- reads a rolling pseudo-OOS
+     backtest log, not a live nightly forecast yet. See areas/rv-forecast.md
+     and oc_dashboard/routes/rv_forecast.py. -->
+<div class="view" id="view-rvfcst">
+  <div class="filter-bar">
+    <span class="fl">HORIZON</span>
+    <select id="rvHorizon" style="min-width:130px">
+      <option value="next_day">NEXT-DAY</option>
+      <option value="rest_of_day">REST-OF-DAY</option>
+    </select>
+    <span class="fl">MODEL</span>
+    <select id="rvModel" style="min-width:170px">
+      <option value="ols_aug">OLS AUG (STOCKS, POOLED)</option>
+      <option value="ols_idx">OLS IDX (NIFTY/BANKNIFTY/FINNIFTY)</option>
+      <option value="naive">NAIVE (CONTROL)</option>
+    </select>
+    <button class="btn" id="btnRvFcst">REFRESH</button>
+    <span id="rvBadge" class="badge">—</span>
+  </div>
+  <div class="kpi-row" id="rvKpis"></div>
+  <div id="rvHorizonNote" style="font-family:var(--mono);font-size:9px;color:var(--muted);margin:-4px 0 10px"></div>
+  <div class="g2" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">MODEL SCORECARD
+        <span class="badge" title="QLIKE and MZ a/b are straddle_core's canonical estimators (pooled, two-way clustered SE). r2_within is skill at predicting THIS stock's day-to-day move, not just its typical level -- see the tooltip on that column.">QLIKE · BIAS · MZ</span>
+      </div>
+      <div id="rvScorecard"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">FORECAST VS REALISED
+        <span id="rvScatterBadge" class="badge">next-day ann. vol % · selected model</span>
+      </div>
+      <div id="rvScatter" class="chart"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">LATEST FORECAST <span id="rvLatestAsof" class="badge">—</span>
+      <span style="margin-left:auto">
+        <input type="text" id="rvSearch" placeholder="filter symbol…"
+          oninput="filterRvBySymbol(this.value)"
+          style="width:120px;font-size:10px;padding:3px 7px">
+        <button class="btn sec" style="font-size:9px;margin-left:6px"
+          onclick="csvBtn('rvLatestTable',()=>'rv_fcst_latest_'+(document.getElementById('rvModel')?.value||'')+'.csv')">⬇ CSV</button>
+      </span>
+    </div>
+    <div class="tw" id="rvLatestTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+  </div>
+</div>
+
+<!-- ══ VRP DASHBOARD ═══════════════════════════════════════════════ -->
+<!-- Phases 1-4 built and validated (parity, weekly forward, standardized rank,
+     constant-maturity IV, regime warning + backtest, harvesting signals).
+     EXPERIMENTAL -- reads vrp.duckdb, an offline EOD batch (vrp_build.py /
+     vrp_signals.py). See areas/vrp-dashboard.md and oc_dashboard/routes/vrp.py. -->
+<div class="view" id="view-vrp">
+  <div class="filter-bar">
+    <span class="fl">HORIZON</span>
+    <select id="vrpHorizon" style="min-width:90px">
+      <option value="30d">30-DAY</option>
+      <option value="7d">7-DAY</option>
+    </select>
+    <span class="fl">ANCHOR</span>
+    <select id="vrpAnchor" style="min-width:110px" title="fwd = ATM strike nearest the forward (strips skew out of &quot;ATM&quot;); spot = strike nearest spot (the live/screener definition)">
+      <option value="fwd">FORWARD</option>
+      <option value="spot">SPOT</option>
+    </select>
+    <span class="fl">CHART SYMBOL</span>
+    <select id="vrpChartSymbol" style="min-width:110px">
+      <option value="NIFTY">NIFTY</option>
+      <option value="BANKNIFTY">BANKNIFTY</option>
+      <option value="FINNIFTY">FINNIFTY</option>
+    </select>
+    <span class="fl">LOOKBACK</span>
+    <select id="vrpLookback" style="min-width:90px" title="How many trading days the two charts below show">
+      <option value="90">90D</option>
+      <option value="180" selected>180D</option>
+      <option value="365">1Y</option>
+      <option value="750">3Y</option>
+      <option value="9999">ALL</option>
+    </select>
+    <button class="btn" id="btnVrpRefresh">REFRESH</button>
+    <button class="btn sec" style="font-size:9px" id="btnVrpGuide" title="How to read this page">ⓘ GUIDE</button>
+    <span id="vrpBadge" class="badge">—</span>
+  </div>
+  <div id="vrpGuide" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;
+    background:var(--card);border:1px solid var(--border);font-family:var(--mono);
+    font-size:10px;color:var(--muted);line-height:1.7"></div>
+  <div id="vrpFreshnessNote" style="font-family:var(--mono);font-size:9px;color:var(--muted);margin:-4px 0 10px"></div>
+  <div class="kpi-row" id="vrpKpis"></div>
+  <div class="card" style="margin-bottom:12px">
+    <div class="card-title">VRP BY INDEX
+      <span class="badge" title="log_ratio = ln(implied total variance / realised total variance), the dimensionless premium. spread_vol_pts = the same premium in annualised vol points. pct_rank / z_score = the premium's percentile and z-score against its own trailing 252-day history (min 120 observations). regime = the same-index shock trigger (z_shock &gt;= 2.0 flips the warning on, per the Phase 3 backtest).">LOG RATIO · PCT RANK · REGIME</span>
+    </div>
+    <div id="vrpLatestTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+  </div>
+  <div class="g2" style="margin-bottom:12px">
+    <div class="card">
+      <div class="card-title">PREMIUM HISTORY <span id="vrpChartBadge" class="badge">—</span></div>
+      <div id="vrpChart" class="chart"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">REGIME SHOCK (SAME-INDEX)
+        <span class="badge" title="z_shock = (5-day realised variance - 20-day HV) / (std of the 20-day HV series over its own trailing year). Fires the warning at z &gt;= 2.0 -- see the Phase 3 backtest for why this threshold and why same-index alone (not market-wide, not either/both combined) is the live trigger.">z_shock · WARNING AT 2.0</span>
+      </div>
+      <div id="vrpRegimeChart" class="chart"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+  <div class="card">
+    <div class="card-title">SIGNAL HISTORY <span id="vrpSignalsAsof" class="badge">—</span>
+      <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+        <input type="text" id="vrpSignalsSearch" placeholder="filter symbol…"
+          oninput="_vrpFilterSignalsTable()"
+          style="width:110px;font-size:10px;padding:3px 7px">
+        <select id="vrpSignalFilter" onchange="_vrpFilterSignalsTable()" style="font-size:10px;padding:3px 5px">
+          <option value="">ALL SIGNALS</option>
+          <option value="harvest_candidate">harvest_candidate</option>
+          <option value="premium_cheap">premium_cheap</option>
+          <option value="premium_compressing">premium_compressing</option>
+          <option value="term_structure_inversion">term_structure_inversion</option>
+          <option value="relative_richness">relative_richness</option>
+        </select>
+        <select id="vrpStateFilter" onchange="_vrpFilterSignalsTable()" style="font-size:10px;padding:3px 5px"
+          title="Triggered = the 4 boolean signals showing True (relative_richness always shows -- it's a rank, not a trigger)">
+          <option value="triggered" selected>TRIGGERED ONLY</option>
+          <option value="">ALL STATES</option>
+          <option value="not_triggered">NOT TRIGGERED</option>
+        </select>
+        <button class="btn sec" style="font-size:9px"
+          onclick="csvBtn('vrpSignalsTable',()=>'vrp_signals_'+(document.getElementById('vrpHorizon')?.value||'')+'.csv')">⬇ CSV</button>
+      </span>
+    </div>
+    <div id="vrpSignalsTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+  </div>
+</div>
+
+<!-- ══ WHEEL (BACKTEST + PAPER) ═══════════════════════════════════════ -->
+<!-- EXPERIMENTAL -- reads wheel_bt.duckdb (oc/wheel_bt.py runs, oc/wheel_paper.py
+     17:45 job). See oc_dashboard/routes/wheel.py and areas/wheel-strategy.md. -->
+<div class="view" id="view-wheel">
+  <div class="pagetab-bar" id="wheelTabs">
+    <button class="pagetab active" data-wtab="wt-bt">BACKTEST</button>
+    <button class="pagetab" data-wtab="wt-paper">PAPER</button>
+  </div>
+
+  <!-- ── BACKTEST ── -->
+  <div class="pagetab-panel active" id="wt-bt">
+    <div class="filter-bar">
+      <span class="fl">RUN</span>
+      <select id="wheelRun" style="min-width:320px"></select>
+      <span class="fl">COMPARE</span>
+      <select id="wheelCompare" style="min-width:260px"><option value="">— none —</option></select>
+      <button class="btn" id="btnWheelRefresh">REFRESH</button>
+      <span id="wheelBadge" class="badge">—</span>
+    </div>
+    <div id="wheelParams" style="font-family:var(--mono);font-size:9px;color:var(--muted);margin:-4px 0 10px;line-height:1.6"></div>
+    <div class="kpi-row" id="wheelKpis"></div>
+    <div class="g2" style="margin-bottom:12px">
+      <div class="card">
+        <div class="card-title">CUMULATIVE P&amp;L · DRAWDOWN <span id="wheelEqBadge" class="badge">—</span></div>
+        <div id="wheelEqChart" class="chart"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">MONTHLY P&amp;L (₹)</div>
+        <div id="wheelMonthChart" class="chart"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+      </div>
+    </div>
+    <div class="g2" style="margin-bottom:12px">
+      <div class="card">
+        <div class="card-title">P&amp;L BY YEAR · PUTS vs CALLS</div>
+        <div id="wheelYearChart" class="chart"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">EXIT REASONS
+          <span class="badge" title="Share of trades by exit reason. final_exit = held to the last allowed day; stop_* = stopped out; results / corp_action = closed ahead of an event.">SHARE OF TRADES</span>
+        </div>
+        <div id="wheelExitChart" class="chart"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+      </div>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title">BY STOCK
+        <span class="badge" title="P&amp;L per lot, so percentage-sized runs compare fairly. yrs_positive = profitable years / years traded.">PER LOT</span>
+        <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+          <input type="text" id="wheelStockSearch" placeholder="filter symbol…" oninput="filterTableBySymbol('wheelStockTable', this.value)"
+            style="width:110px;font-size:10px;padding:3px 7px">
+          <button class="btn sec" style="font-size:9px" onclick="csvBtn('wheelStockTable',()=>'wheel_stocks_'+(document.getElementById('wheelRun')?.value||'')+'.csv')">⬇ CSV</button>
+        </span>
+      </div>
+      <div id="wheelPersist" style="font-family:var(--mono);font-size:10px;margin-bottom:8px;line-height:1.6"></div>
+      <div id="wheelStockTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+    <div class="card" id="wheelTradeCard" style="margin-bottom:12px;display:none">
+      <div class="card-title">TRADE DRILL-DOWN <span id="wheelTradeBadge" class="badge">—</span>
+        <span style="margin-left:auto"><button class="btn sec" style="font-size:9px" onclick="document.getElementById('wheelTradeCard').style.display='none'">✕ CLOSE</button></span>
+      </div>
+      <div id="wheelTradeInfo" style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:6px"></div>
+      <div id="wheelTradeChart" class="chart"></div>
+    </div>
+    <div class="card">
+      <div class="card-title">TRADES <span id="wheelTradesBadge" class="badge">—</span>
+        <span style="margin-left:auto;display:flex;gap:6px;align-items:center">
+          <input type="text" id="wheelTradeSym" placeholder="symbol…" style="width:90px;font-size:10px;padding:3px 7px"
+            oninput="_wheelRenderTrades()">
+          <select id="wheelTradeSide" onchange="_wheelRenderTrades()" style="font-size:10px;padding:3px 5px">
+            <option value="">BOTH SIDES</option><option value="PE">PUTS</option><option value="CE">CALLS</option>
+          </select>
+          <select id="wheelTradeReason" onchange="_wheelRenderTrades()" style="font-size:10px;padding:3px 5px">
+            <option value="">ALL EXITS</option>
+          </select>
+          <select id="wheelTradeOutcome" onchange="_wheelRenderTrades()" style="font-size:10px;padding:3px 5px">
+            <option value="">WIN + LOSS</option><option value="win">WINNERS</option><option value="loss">LOSERS</option>
+          </select>
+          <button class="btn sec" style="font-size:9px" onclick="csvBtn('wheelTradesTable',()=>'wheel_trades_'+(document.getElementById('wheelRun')?.value||'')+'.csv')">⬇ CSV</button>
+        </span>
+      </div>
+      <div id="wheelTradesTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- ── PAPER ── -->
+  <div class="pagetab-panel" id="wt-paper">
+    <div class="filter-bar">
+      <span class="fl">BOOK</span>
+      <select id="wheelBook" style="min-width:160px"></select>
+      <button class="btn" id="btnWheelPaperRefresh">REFRESH</button>
+      <span id="wheelPaperBadge" class="badge">—</span>
+    </div>
+    <div id="wheelPaperNote" style="font-family:var(--mono);font-size:9px;color:var(--muted);margin:-4px 0 10px;line-height:1.6"></div>
+    <div class="kpi-row" id="wheelPaperKpis"></div>
+    <div class="g2" style="margin-bottom:12px">
+      <div class="card">
+        <div class="card-title">PAPER EQUITY (P&amp;L ₹)</div>
+        <div id="wheelPaperChart" class="chart"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+      </div>
+      <div class="card">
+        <div class="card-title">OPEN POSITIONS <span id="wheelPosBadge" class="badge">—</span></div>
+        <div id="wheelPosTable"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+      </div>
+    </div>
+    <div class="card" id="wheelPaperTradeCard" style="margin-bottom:12px;display:none">
+      <div class="card-title">TRADE DRILL-DOWN <span id="wheelPaperTradeBadge" class="badge">—</span>
+        <span style="margin-left:auto"><button class="btn sec" style="font-size:9px" onclick="document.getElementById('wheelPaperTradeCard').style.display='none'">✕ CLOSE</button></span>
+      </div>
+      <div id="wheelPaperTradeInfo" style="font-family:var(--mono);font-size:10px;color:var(--muted);margin-bottom:6px"></div>
+      <div id="wheelPaperTradeChart" class="chart"></div>
+    </div>
+    <div class="card" style="margin-bottom:12px">
+      <div class="card-title">CLOSED TRADES
+        <span style="margin-left:auto"><button class="btn sec" style="font-size:9px" onclick="csvBtn('wheelPaperTrades',()=>'paper_trades_'+(document.getElementById('wheelBook')?.value||'')+'.csv')">⬇ CSV</button></span>
+      </div>
+      <div id="wheelPaperTrades"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">FILLS vs NSE SETTLE
+        <span class="badge" title="Each paper fill at the live quote (sell at bid, buy back at ask), matched next morning to that day's NSE settle -- the price the backtest uses. slip = how much worse than settle, as % of settle. The backtest assumes 10% each side.">SLIPPAGE CHECK</span>
+        <span style="margin-left:auto"><button class="btn sec" style="font-size:9px" onclick="csvBtn('wheelFills',()=>'paper_fills_'+(document.getElementById('wheelBook')?.value||'')+'.csv')">⬇ CSV</button></span>
+      </div>
+      <div id="wheelFills"><div class="loading"><div class="spinner"></div>Loading…</div></div>
     </div>
   </div>
 </div>

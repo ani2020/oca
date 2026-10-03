@@ -131,7 +131,7 @@ def iv_term_structure(
 
     # Compute mid-IV and skew per row
     df["mid_iv"]  = (df["ce_iv"] + df["pe_iv"]) / 2.0
-    df["skew"]    = df["pe_iv"] - df["ce_iv"]     # positive = put premium (normal)
+    df["skew"]    = df["ce_iv"] - df["pe_iv"]     # CE-PE, market standard: negative = puts bid
 
     return safe_response({
         "symbol":    symbol,
@@ -148,18 +148,25 @@ def iv_rank(
     lookback_days: int           = Query(90),
 ):
     """
-    IV Rank and IV Percentile for ATM options of a given symbol+expiry.
-    Lookback window is configurable (default 90 days from the selected timestamp).
+    IV Rank and IV Percentile for a symbol.
 
-    IV Rank     = (current_iv - min_iv) / (max_iv - min_iv)  × 100
-    IV Pctile   = fraction of historical ATM IVs below current IV × 100
-    RV-IV spread = m_volatility (realised annualised) - ATM IV
+    READS the values the nightly stored on exposure_eod. It does not compute
+    them. Both the constant-maturity construction and the ranking live in
+    oc_exposure_eod._update_iv_rank, with the parameters in exposure_core — so
+    this endpoint, any screener column, and any backtest all quote one number.
+
+    This previously derived the series per request from raw ocdata ticks, which
+    meant a single bad print could pin min/max for 90 days, and the "90 day"
+    lookback silently truncated to one contract's own life.
+
+    IV Rank   = (iv - min) / (max - min) x 100     where we sit in the range
+    IV Pctile = share of history strictly below    robust to a single spike
+    Prefer the percentile when the range is narrow or one outlier dominates it.
     """
     ts_filter = timestamp or latest_ts(symbol)
     ts_clause, ts_params = ts_filter_clause(ts_filter)
-    lo, hi    = _ts_lo_hi(ts_filter)
 
-    # Current ATM IV
+    # Live ATM IV / realised vol for display (intraday, from ocdata).
     cur = qdf(
         f"""
         SELECT COALESCE(ce_iv, 0) AS ce_iv,
@@ -181,30 +188,48 @@ def iv_rank(
     atm_iv    = (ce_iv_now + pe_iv_now) / 2.0
     rv        = float(cur["rv"].iloc[0])
 
-    # Historical ATM IVs within lookback window
-    cutoff = (datetime.strptime(ts_filter[:16], "%Y-%m-%d %H:%M")
-              - timedelta(days=lookback_days)).strftime("%Y-%m-%d %H:%M:%S")
-    hist = qdf(
-        f"""
-        SELECT (COALESCE(ce_iv,0) + COALESCE(pe_iv,0)) / 2.0 AS atm_iv
-        FROM {tbl()}
-        WHERE symbol = ? AND expiry = ?
-          AND timestamp >= ?
-          AND distance_from_atm = 0
-          AND (COALESCE(ce_iv,0) + COALESCE(pe_iv,0)) > 0
+    # Stored rank as of the requested date (or the latest on or before it).
+    as_of = ts_filter[:10]
+    stored = qdf(
+        """
+        SELECT date, iv_cm30, iv_rank, iv_pctile, iv_rank_method, iv_rank_n,
+               atm_iv, iv_change, hv20, em_1d
+        FROM exposure_eod
+        WHERE symbol = ? AND expiry_rank = 0 AND date <= CAST(? AS DATE)
+        ORDER BY date DESC LIMIT 1
         """,
-        [symbol, expiry[:10], cutoff],
+        [symbol, as_of],
     )
 
-    iv_rank = iv_pctile = None
-    hist_count = 0
-    if not hist.empty:
-        vals = hist["atm_iv"].dropna().values
-        hist_count = len(vals)
-        if len(vals) >= 2:
-            iv_min, iv_max = float(vals.min()), float(vals.max())
-            iv_rank   = round((atm_iv - iv_min) / (iv_max - iv_min) * 100, 1)                         if iv_max > iv_min else None
-            iv_pctile = round(float(np.mean(vals < atm_iv)) * 100, 1)
+    def _f(row, col):
+        if stored.empty or col not in stored.columns:
+            return None
+        v = row[col]
+        try:
+            f = float(v)
+            return f if f == f else None
+        except (TypeError, ValueError):
+            return None
+
+    if stored.empty:
+        iv_rank = iv_pctile = ranked_iv = None
+        method = None
+        hist_count = 0
+        iv_change = hv20 = em_1d = None
+        as_of_date = None
+    else:
+        r = stored.iloc[0]
+        iv_rank    = _f(r, "iv_rank")
+        iv_pctile  = _f(r, "iv_pctile")
+        ranked_iv  = _f(r, "iv_cm30")
+        iv_change  = _f(r, "iv_change")
+        hv20       = _f(r, "hv20")
+        em_1d      = _f(r, "em_1d")
+        n          = _f(r, "iv_rank_n")
+        hist_count = int(n) if n is not None else 0
+        m          = r["iv_rank_method"] if "iv_rank_method" in stored.columns else None
+        method     = str(m) if m is not None and m == m else None
+        as_of_date = str(r["date"])[:10]
 
     return safe_response({
         "symbol":       symbol,
@@ -214,10 +239,19 @@ def iv_rank(
         "atm_iv":       round(atm_iv, 2),
         "rv":           round(rv, 2),
         "rv_iv_spread": round(rv - atm_iv, 2),
-        "iv_rank":      iv_rank,
-        "iv_pctile":    iv_pctile,
-        "lookback_days":lookback_days,
+        "iv_rank":      round(iv_rank, 1) if iv_rank is not None else None,
+        "iv_pctile":    round(iv_pctile, 1) if iv_pctile is not None else None,
+        # The daily constant-maturity value that was ranked — shown next to the
+        # live intraday atm_iv rather than implying they are the same thing.
+        "ranked_iv":    round(ranked_iv, 2) if ranked_iv is not None else None,
+        "iv_change":    round(iv_change, 2) if iv_change is not None else None,
+        "hv20":         round(hv20, 2) if hv20 is not None else None,
+        "em_1d":        round(em_1d, 2) if em_1d is not None else None,
+        "method":       method,
+        "as_of":        as_of_date,
+        "lookback_days": config.IVRANK_LOOKBACK_DAYS,
         "hist_count":   hist_count,
+        "min_samples":  config.IVRANK_MIN_SAMPLES,
     })
 
 
@@ -229,7 +263,8 @@ def pc_skew(
 ):
     """
     Put-Call skew analysis:
-    - 25-delta risk reversal: IV of ~25-delta put minus ~25-delta call
+    - 25-delta risk reversal: CE IV minus PE IV at ~25 delta (market standard:
+      negative = puts bid). Matches exposure_eod.rr25, which is also CE-PE.
     - OTM skew: left-wing slope vs right-wing slope of IV smile
     - riskreversal, sentiment, regime columns from the ATM row
     - Time series of riskreversal across timestamps for this expiry
@@ -285,7 +320,7 @@ def pc_skew(
         pe_25d_iv     = float(pe_25["pe_iv"])
         ce_25d_strike = float(ce_25["strike_price"])
         pe_25d_strike = float(pe_25["strike_price"])
-        rr_25d        = round(pe_25d_iv - ce_25d_iv, 2)
+        rr_25d        = round(ce_25d_iv - pe_25d_iv, 2)
 
     # OTM wing slopes (from smile spline — simple linear fit each side)
     atm_strike = float(atm_row.get("strike_price", spot))
@@ -293,12 +328,18 @@ def pc_skew(
     right = df[(df["strike_price"] > atm_strike) & (df["ce_iv"] > 1)].copy()
 
     left_slope = right_slope = skew_asymmetry = None
+    # Slope units: np.polyfit on raw strikes gives IV points per 1 STRIKE POINT
+    # (per rupee). The old `* 100` claimed "per 1% of spot" but 1% of spot is
+    # spot/100 rupees, not 100 — those coincide only at spot = 10,000. At NIFTY
+    # 23,635 the reported slope was 2.36x too small; on a Rs 500 stock it was
+    # 20x too large, so the number was not comparable across symbols at all.
+    _slope_scale = (spot / 100.0) if spot > 0 else 100.0
     if len(left) >= 3:
         c = np.polyfit(left["strike_price"].values, left["pe_iv"].values, 1)
-        left_slope = round(float(c[0]) * 100, 4)   # IV change per 1% of spot
+        left_slope = round(float(c[0]) * _slope_scale, 4)   # IV pts per 1% of spot
     if len(right) >= 3:
         c = np.polyfit(right["strike_price"].values, right["ce_iv"].values, 1)
-        right_slope = round(float(c[0]) * 100, 4)
+        right_slope = round(float(c[0]) * _slope_scale, 4)
     if left_slope is not None and right_slope is not None:
         skew_asymmetry = round(abs(left_slope) - abs(right_slope), 4)
 
@@ -414,14 +455,23 @@ def iv_intraday_trend(filter_type: str = Query("all")):
     )
     df = qdf(
         f"""
-        WITH day_bounds AS (
+        WITH latest_date AS (
+            -- CAST(MAX(timestamp) AS DATE) instead of MAX(CAST(timestamp AS DATE)): the two are
+            -- mathematically identical (date-truncation is monotonic in timestamp), but the first
+            -- lets DuckDB answer from the timestamp column's min/max metadata directly, while the
+            -- second forces a per-row CAST across the whole table (27M+ rows and growing) just to
+            -- find today's date.
+            SELECT CAST(MAX(timestamp) AS DATE) AS d FROM {tbl()}
+        ),
+        day_bounds AS (
+            -- timestamp >= d AND < d+1day is the same set of rows as CAST(timestamp AS DATE) = d,
+            -- but as a range on the raw column DuckDB can prune with zonemap metadata instead of
+            -- casting every row to compare.
             SELECT symbol,
                    MIN(timestamp) AS ts_open,
                    MAX(timestamp) AS ts_now
-            FROM {tbl()}
-            WHERE CAST(timestamp AS DATE) = (
-                      SELECT MAX(CAST(timestamp AS DATE)) FROM {tbl()}
-                  )
+            FROM {tbl()}, latest_date
+            WHERE timestamp >= latest_date.d AND timestamp < latest_date.d + INTERVAL '1 day'
             {sym_filter}
             GROUP BY symbol
         ),

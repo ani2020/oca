@@ -1,0 +1,843 @@
+C:\Users\aniru\od\oc (bugfixs2)
+λ py backtest_straddle.py --model auto --out bt_auto_20260917.csv
+completed expiries: ['2026-02-24', '2026-03-30', '2026-04-28', '2026-05-26', '2026-06-30', '2026-07-28', '2026-08-25']
+stop rule: hold to expiry
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-02-24  entry=2026-01-30  dte=25  h=17td  n=99  hist=400d  model=garch11_t
+C:\Users\aniru\od\oc\straddle_core.py:1017: RuntimeWarning: All-NaN slice encountered
+  med = np.nanmedian(z)
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-03-30  entry=2026-03-05  dte=25  h=17td  n=116  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-04-28  entry=2026-04-02  dte=26  h=17td  n=122  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-05-26  entry=2026-04-30  dte=26  h=17td  n=122  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-06-30  entry=2026-06-05  dte=25  h=17td  n=125  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-07-28  entry=2026-07-03  dte=25  h=17td  n=128  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-08-25  entry=2026-07-31  dte=25  h=17td  n=159  hist=400d  model=garch11_t
+
+gate pass: 804 / 841
+rejection reasons:
+       9  only 6 strikes
+       7  only 7 strikes
+       6  only 4 strikes
+       4  confidence=low
+       4  only 5 strikes
+       3  only 2 strikes
+       2  spread/credit 0.274 > 0.15
+       1  spread/credit 0.156 > 0.15
+
+==============================================================================
+  ALL ROWS   n=841   expiries=7
+==============================================================================
+
+--- per-expiry rank IC (score vs realised P&L / margin) ---
+  2026-02-24  n= 95  IC=-0.185  win%= 62.1  meanRoM= -3.06%  model=garch11_t
+  2026-03-30  n=113  IC=-0.004  win%= 27.4  meanRoM=-25.59%  model=garch11_t
+  2026-04-28  n=119  IC=+0.195  win%= 33.6  meanRoM=-18.03%  model=garch11_t
+  2026-05-26  n=118  IC=-0.047  win%= 75.4  meanRoM= +9.49%  model=garch11_t
+  2026-06-30  n=122  IC=-0.008  win%= 51.6  meanRoM= -0.14%  model=garch11_t
+  2026-07-28  n=119  IC=+0.065  win%= 70.6  meanRoM= +6.44%  model=garch11_t
+  2026-08-25  n=155  IC=-0.075  win%= 74.2  meanRoM= +8.84%  model=garch11_t
+
+  mean IC = -0.009   sd = 0.118   t = -0.19   (n_periods = 7)
+  NOTE: |t| < 2 means this sample cannot distinguish the IC from zero.
+
+--- component standalone IC (per-expiry, then averaged) ---
+  ev_per_margin          IC=+0.032  t=+0.89
+  cvar05_per_margin      IC=+0.014  t=+0.42
+  vrp_z                  IC=+0.037  t=+0.78
+  ts_slope               IC=+0.008  t=+0.11
+  cushion_net            IC=+0.045  t=+1.20
+  gamma_score            IC=-0.036  t=-0.79
+  trend_eff              IC=+0.102  t=+1.58
+  tfr                    IC=-0.010  t=-0.27
+  score                  IC=-0.009  t=-0.19  <-- composite
+  pop                    IC=+0.045  t=+1.25  (diagnostic, not ranked)
+  vrp_ratio              IC=+0.042  t=+0.94  (diagnostic, not ranked)
+  iv_rank                IC=-0.047  t=-1.49  (diagnostic, not ranked)
+  If the composite does not beat its best single component, the
+  extra complexity is not earning anything.
+
+--- quintiles of score (look for MONOTONICITY, not top-quintile) ---
+        n  meanRoM%  medRoM%   win%  worstRoM%
+qt
+1   171.0     -2.15     6.05  57.31    -115.71
+2   166.0     -1.91     6.89  57.23    -132.83
+3   167.0     -3.66     6.94  58.08    -157.00
+4   167.0     -1.06     6.49  61.08    -136.07
+5   170.0     -3.63     1.92  52.35    -113.71
+
+--- calibration: simulated vs realised ---
+  predicted mean EV/margin   -3.178%
+  realised  mean P&L/margin  -2.484%
+  predicted POP  58.8%   realised win rate  57.2%
+  predicted stop rate   0.0%   realised   0.0%
+                  n  pred%  actual win%  meanRoM%
+pop
+(0.0, 0.55]   248.0   47.7         58.5      -2.5
+(0.55, 0.65]  377.0   59.9         57.3      -2.4
+(0.65, 0.75]  193.0   69.1         56.0      -3.0
+(0.75, 1.0]    22.0   77.3         54.5       1.5
+  A well-calibrated simulator makes this monotone and close to
+  the diagonal. Non-monotone here = the P&L distribution is wrong.
+
+--- forecast quality (the fast feedback loop) ---
+  mean IV 31.31%   mean RV forecast 31.72%   mean IV/RVf 1.020
+  mean realised |move|  6.81%   mean EM  7.13%
+  realised |move| / EM ratio: median 0.763  (1.0 = EM was exactly right)
+
+--- realised P&L shape (the asymmetry POP cannot see) ---
+  mean   -6.6%   median  +16.6%   p05  -179.8%   worst   -383.1%   skew -1.27
+  trades losing > 100% of credit: 117 of 841
+
+==============================================================================
+  GATED ROWS   n=804   expiries=7
+==============================================================================
+
+--- per-expiry rank IC (score vs realised P&L / margin) ---
+  2026-02-24  n= 88  IC=-0.189  win%= 61.4  meanRoM= -3.45%  model=garch11_t
+  2026-03-30  n= 99  IC=-0.070  win%= 29.3  meanRoM=-23.76%  model=garch11_t
+  2026-04-28  n=114  IC=+0.207  win%= 33.3  meanRoM=-18.63%  model=garch11_t
+  2026-05-26  n=113  IC=-0.039  win%= 76.1  meanRoM=+10.03%  model=garch11_t
+  2026-06-30  n=121  IC=-0.009  win%= 51.2  meanRoM= -0.20%  model=garch11_t
+  2026-07-28  n=117  IC=+0.064  win%= 70.1  meanRoM= +6.23%  model=garch11_t
+  2026-08-25  n=152  IC=-0.089  win%= 74.3  meanRoM= +8.98%  model=garch11_t
+
+  mean IC = -0.018   sd = 0.126   t = -0.38   (n_periods = 7)
+  NOTE: |t| < 2 means this sample cannot distinguish the IC from zero.
+
+--- component standalone IC (per-expiry, then averaged) ---
+  ev_per_margin          IC=+0.025  t=+0.59
+  cvar05_per_margin      IC=+0.009  t=+0.23
+  vrp_z                  IC=+0.028  t=+0.59
+  ts_slope               IC=+0.001  t=+0.02
+  cushion_net            IC=+0.035  t=+0.79
+  gamma_score            IC=-0.025  t=-0.59
+  trend_eff              IC=+0.106  t=+1.70
+  tfr                    IC=-0.010  t=-0.25
+  score                  IC=-0.018  t=-0.38  <-- composite
+  pop                    IC=+0.034  t=+0.80  (diagnostic, not ranked)
+  vrp_ratio              IC=+0.037  t=+0.75  (diagnostic, not ranked)
+  iv_rank                IC=-0.046  t=-1.29  (diagnostic, not ranked)
+  If the composite does not beat its best single component, the
+  extra complexity is not earning anything.
+
+--- quintiles of score (look for MONOTONICITY, not top-quintile) ---
+        n  meanRoM%  medRoM%   win%  worstRoM%
+qt
+1   164.0     -0.56     6.97  59.15    -100.22
+2   159.0     -1.92     6.72  55.97    -132.83
+3   159.0     -2.63     8.46  59.12    -157.00
+4   159.0     -0.90     6.56  62.26    -136.07
+5   163.0     -3.80     1.71  52.15    -113.71
+
+--- calibration: simulated vs realised ---
+  predicted mean EV/margin   -3.096%
+  realised  mean P&L/margin  -1.961%
+  predicted POP  58.9%   realised win rate  57.7%
+  predicted stop rate   0.0%   realised   0.0%
+                  n  pred%  actual win%  meanRoM%
+pop
+(0.0, 0.55]   229.0   47.6         60.3      -0.9
+(0.55, 0.65]  364.0   59.9         57.4      -2.1
+(0.65, 0.75]  188.0   69.1         55.9      -3.3
+(0.75, 1.0]    22.0   77.3         54.5       1.5
+  A well-calibrated simulator makes this monotone and close to
+  the diagonal. Non-monotone here = the P&L distribution is wrong.
+
+--- forecast quality (the fast feedback loop) ---
+  mean IV 31.36%   mean RV forecast 31.89%   mean IV/RVf 1.017
+  mean realised |move|  6.79%   mean EM  7.16%
+  realised |move| / EM ratio: median 0.761  (1.0 = EM was exactly right)
+
+--- realised P&L shape (the asymmetry POP cannot see) ---
+  mean   -5.0%   median  +17.2%   p05  -174.1%   worst   -383.1%   skew -1.29
+  trades losing > 100% of credit: 107 of 804
+
+wrote bt_auto_20260917.csv  (841 rows)
+
+C:\Users\aniru\od\oc (bugfixs2)
+λ py backtest_straddle.py --help
+usage: backtest_straddle.py [-h] [--db DB] [--bhav BHAV] [--dte DTE] [--stop-k STOP_K] [--model {auto,garch11_t,ewma}]
+                            [--paths PATHS] [--seed SEED] [--min-obs MIN_OBS] [--min-dte MIN_DTE] [--max-dte MAX_DTE]
+                            [--max-spread MAX_SPREAD] [--require-events] [--out OUT]
+
+backtest_straddle.py
+====================
+Point-in-time backtest of the straddle screener over completed monthly expiries.
+
+    python backtest_straddle.py --dte 25 --paths 8000
+    python backtest_straddle.py --dte 25 --stop-k 1.5 --out bt_stop15.csv
+    python backtest_straddle.py --dte 25 --model ewma --out bt_ewma.csv
+
+What it does, and the guardrail on each step
+--------------------------------------------
+
+UNIVERSE is reconstructed from exposure_eod AS OF the entry date, never from
+today's watchlist. Using the current F&O list would be survivorship bias: names
+enter and leave F&O eligibility and the ban list constantly.
+
+EVERY FEATURE is bounded by the entry date. No expanding windows computed over
+the full table, which is the classic silent look-ahead in this kind of script.
+
+THE REALISED PATH IS WALKED DAILY from cash_eod closes, so the same exit rule
+the simulator applies to synthetic paths is applied to the actual one. Comparing
+a stop-rule prediction against a hold-to-expiry outcome makes the calibration
+meaningless.
+
+SETTLEMENT uses the cash_eod close on expiry day. NSE equity bhavcopy CLOSE is
+the volume-weighted average of the last 30 minutes, which is the settlement
+basis -- not the last trade.
+
+VRP_Z is built on ln(ATM_IV / HV20) rather than ln(ATM_IV / RV_forecast). Two
+reasons: it is the published Goyal-Saretto form and therefore the benchmark the
+forecast-based version has to beat, and it avoids refitting GARCH ~150 times per
+symbol to construct the history. The forecast-based ratio is recorded alongside
+as vrp_ratio so the two can be compared directly.
+
+MODEL AVAILABILITY. bhav.cash_eod begins 2025-12-01, so only expiries from
+June 2026 have the >=120 observations a GARCH(1,1)-t fit needs; earlier ones
+fall back to EWMA. The model used is recorded per row -- do NOT pool GARCH and
+EWMA rows when judging forecast quality. Backfilling older bhavcopy archives is
+the single highest-value fix available to this backtest.
+
+WHAT THE OUTPUT CAN AND CANNOT SETTLE. Seven cross-sections, all loading on the
+same index vol factor, cannot fit weights or confirm a small IC. Per-expiry IC
+standard error is ~0.09 at n=120 before any allowance for cross-sectional
+dependence. Read this as a smoke test for gross failure and for miscalibration,
+not as validation.
+
+options:
+  -h, --help            show this help message and exit
+  --db DB
+  --bhav BHAV
+  --dte DTE             target entry DTE
+  --stop-k STOP_K       exit at k * expected move; omit for hold-to-expiry
+  --model {auto,garch11_t,ewma}
+  --paths PATHS
+  --seed SEED
+  --min-obs MIN_OBS
+  --min-dte MIN_DTE
+  --max-dte MAX_DTE
+  --max-spread MAX_SPREAD
+  --require-events      reject symbols with no event-feed row (set once tvnews fills)
+  --out OUT             write per-candidate CSV
+
+C:\Users\aniru\od\oc (bugfixs2)
+λ py backtest_straddle.py --model auto --dte 20 --out bt_auto_20260917_20dte.csv
+completed expiries: ['2026-02-24', '2026-03-30', '2026-04-28', '2026-05-26', '2026-06-30', '2026-07-28', '2026-08-25']
+stop rule: hold to expiry
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-02-24  entry=2026-02-04  dte=20  h=13td  n=103  hist=400d  model=garch11_t
+C:\Users\aniru\od\oc\straddle_core.py:1017: RuntimeWarning: All-NaN slice encountered
+  med = np.nanmedian(z)
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-03-30  entry=2026-03-10  dte=20  h=13td  n=119  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-04-28  entry=2026-04-08  dte=20  h=13td  n=122  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-05-26  entry=2026-05-06  dte=20  h=13td  n=123  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-06-30  entry=2026-06-10  dte=20  h=13td  n=128  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-07-28  entry=2026-07-08  dte=20  h=13td  n=127  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-08-25  entry=2026-08-05  dte=20  h=13td  n=160  hist=400d  model=garch11_t
+
+gate pass: 829 / 848
+rejection reasons:
+       5  only 5 strikes
+       4  only 6 strikes
+       4  only 7 strikes
+       3  confidence=low
+       2  spread/credit 0.190 > 0.15
+       2  only 4 strikes
+       2  only 3 strikes
+       1  spread/credit 0.349 > 0.15
+
+==============================================================================
+  ALL ROWS   n=848   expiries=7
+==============================================================================
+
+--- per-expiry rank IC (score vs realised P&L / margin) ---
+  2026-02-24  n= 98  IC=-0.133  win%= 70.4  meanRoM= +1.18%  model=garch11_t
+  2026-03-30  n=115  IC=+0.124  win%= 26.1  meanRoM=-19.31%  model=garch11_t
+  2026-04-28  n=116  IC=-0.251  win%= 55.2  meanRoM= -3.58%  model=garch11_t
+  2026-05-26  n=120  IC=+0.020  win%= 73.3  meanRoM= +7.84%  model=garch11_t
+  2026-06-30  n=125  IC=-0.066  win%= 56.0  meanRoM= -2.26%  model=garch11_t
+  2026-07-28  n=118  IC=+0.034  win%= 72.0  meanRoM= +8.24%  model=garch11_t
+  2026-08-25  n=156  IC=-0.044  win%= 75.6  meanRoM=+10.85%  model=garch11_t
+
+  mean IC = -0.045   sd = 0.122   t = -0.98   (n_periods = 7)
+  NOTE: |t| < 2 means this sample cannot distinguish the IC from zero.
+
+--- component standalone IC (per-expiry, then averaged) ---
+  ev_per_margin          IC=-0.003  t=-0.06
+  cvar05_per_margin      IC=-0.017  t=-0.41
+  vrp_z                  IC=-0.099  t=-2.04
+  ts_slope               IC=-0.005  t=-0.15
+  cushion_net            IC=-0.007  t=-0.15
+  gamma_score            IC=+0.008  t=+0.20
+  trend_eff              IC=+0.053  t=+0.85
+  tfr                    IC=+0.004  t=+0.13
+  score                  IC=-0.045  t=-0.98  <-- composite
+  pop                    IC=-0.011  t=-0.22  (diagnostic, not ranked)
+  vrp_ratio              IC=-0.037  t=-0.80  (diagnostic, not ranked)
+  iv_rank                IC=-0.023  t=-0.76  (diagnostic, not ranked)
+  If the composite does not beat its best single component, the
+  extra complexity is not earning anything.
+
+--- quintiles of score (look for MONOTONICITY, not top-quintile) ---
+        n  meanRoM%  medRoM%   win%  worstRoM%
+qt
+1   172.0      2.92     9.69  64.53    -104.39
+2   168.0      1.63     8.83  64.29    -100.18
+3   171.0      2.18     9.25  67.84    -138.20
+4   167.0     -0.48     4.99  56.29    -133.81
+5   170.0     -1.56     5.38  55.88     -79.69
+
+--- calibration: simulated vs realised ---
+  predicted mean EV/margin   -1.762%
+  realised  mean P&L/margin  +0.947%
+  predicted POP  59.8%   realised win rate  61.8%
+  predicted stop rate   0.0%   realised   0.0%
+                  n  pred%  actual win%  meanRoM%
+pop
+(0.0, 0.55]   195.0   48.5         66.2       2.2
+(0.55, 0.65]  450.0   60.2         60.4       0.4
+(0.65, 0.75]  182.0   69.0         59.9       0.4
+(0.75, 1.0]    20.0   77.1         70.0       7.1
+  A well-calibrated simulator makes this monotone and close to
+  the diagonal. Non-monotone here = the P&L distribution is wrong.
+
+--- forecast quality (the fast feedback loop) ---
+  mean IV 31.09%   mean RV forecast 32.14%   mean IV/RVf 0.999
+  mean realised |move|  5.50%   mean EM  6.13%
+  realised |move| / EM ratio: median 0.735  (1.0 = EM was exactly right)
+
+--- realised P&L shape (the asymmetry POP cannot see) ---
+  mean   +2.8%   median  +23.0%   p05  -148.8%   worst   -392.0%   skew -1.32
+  trades losing > 100% of credit: 96 of 848
+
+==============================================================================
+  GATED ROWS   n=829   expiries=7
+==============================================================================
+
+--- per-expiry rank IC (score vs realised P&L / margin) ---
+  2026-02-24  n= 97  IC=-0.136  win%= 70.1  meanRoM= +1.17%  model=garch11_t
+  2026-03-30  n=113  IC=+0.112  win%= 26.5  meanRoM=-18.91%  model=garch11_t
+  2026-04-28  n=113  IC=-0.253  win%= 54.9  meanRoM= -3.81%  model=garch11_t
+  2026-05-26  n=116  IC=+0.041  win%= 73.3  meanRoM= +7.73%  model=garch11_t
+  2026-06-30  n=121  IC=-0.048  win%= 56.2  meanRoM= -2.23%  model=garch11_t
+  2026-07-28  n=116  IC=+0.018  win%= 71.6  meanRoM= +7.95%  model=garch11_t
+  2026-08-25  n=153  IC=-0.047  win%= 76.5  meanRoM=+11.23%  model=garch11_t
+
+  mean IC = -0.045   sd = 0.121   t = -0.98   (n_periods = 7)
+  NOTE: |t| < 2 means this sample cannot distinguish the IC from zero.
+
+--- component standalone IC (per-expiry, then averaged) ---
+  ev_per_margin          IC=-0.003  t=-0.07
+  cvar05_per_margin      IC=-0.015  t=-0.36
+  vrp_z                  IC=-0.095  t=-1.88
+  ts_slope               IC=-0.015  t=-0.43
+  cushion_net            IC=-0.008  t=-0.16
+  gamma_score            IC=+0.012  t=+0.30
+  trend_eff              IC=+0.057  t=+0.95
+  tfr                    IC=-0.000  t=-0.01
+  score                  IC=-0.045  t=-0.98  <-- composite
+  pop                    IC=-0.013  t=-0.27  (diagnostic, not ranked)
+  vrp_ratio              IC=-0.039  t=-0.87  (diagnostic, not ranked)
+  iv_rank                IC=-0.022  t=-0.66  (diagnostic, not ranked)
+  If the composite does not beat its best single component, the
+  extra complexity is not earning anything.
+
+--- quintiles of score (look for MONOTONICITY, not top-quintile) ---
+        n  meanRoM%  medRoM%   win%  worstRoM%
+qt
+1   170.0      2.44     9.28  64.12    -104.39
+2   163.0      2.32     8.99  65.03    -100.18
+3   167.0      2.38     8.85  67.07    -138.20
+4   162.0     -0.44     5.16  57.41    -133.81
+5   167.0     -1.83     5.65  55.69     -79.69
+
+--- calibration: simulated vs realised ---
+  predicted mean EV/margin   -1.763%
+  realised  mean P&L/margin  +0.981%
+  predicted POP  59.8%   realised win rate  61.9%
+  predicted stop rate   0.0%   realised   0.0%
+                  n  pred%  actual win%  meanRoM%
+pop
+(0.0, 0.55]   191.0   48.6         66.5       2.3
+(0.55, 0.65]  438.0   60.2         60.5       0.5
+(0.65, 0.75]  179.0   69.1         59.8       0.2
+(0.75, 1.0]    20.0   77.1         70.0       7.1
+  A well-calibrated simulator makes this monotone and close to
+  the diagonal. Non-monotone here = the P&L distribution is wrong.
+
+--- forecast quality (the fast feedback loop) ---
+  mean IV 31.06%   mean RV forecast 32.14%   mean IV/RVf 0.998
+  mean realised |move|  5.51%   mean EM  6.14%
+  realised |move| / EM ratio: median 0.728  (1.0 = EM was exactly right)
+
+--- realised P&L shape (the asymmetry POP cannot see) ---
+  mean   +2.9%   median  +23.2%   p05  -148.8%   worst   -392.0%   skew -1.33
+  trades losing > 100% of credit: 95 of 829
+
+wrote bt_auto_20260917_20dte.csv  (848 rows)
+
+C:\Users\aniru\od\oc (bugfixs2)
+λ py backtest_straddle.py --model auto --dte 15 --out bt_auto_20260917_15dte.csv
+completed expiries: ['2026-02-24', '2026-03-30', '2026-04-28', '2026-05-26', '2026-06-30', '2026-07-28', '2026-08-25']
+stop rule: hold to expiry
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-02-24  entry=2026-02-09  dte=15  h=10td  n=138  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-03-30  entry=2026-03-13  dte=17  h=11td  n=120  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-04-28  entry=2026-04-13  dte=15  h=10td  n=121  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-05-26  entry=2026-05-11  dte=15  h=10td  n=124  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-06-30  entry=2026-06-15  dte=15  h=10td  n=127  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-07-28  entry=2026-07-13  dte=15  h=10td  n=159  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-08-25  entry=2026-08-10  dte=15  h=10td  n=156  hist=400d  model=garch11_t
+
+gate pass: 874 / 913
+rejection reasons:
+      11  only 7 strikes
+       9  only 6 strikes
+       8  only 5 strikes
+       4  confidence=low
+       4  only 4 strikes
+       3  only 3 strikes
+       1  spread/credit 0.212 > 0.15
+       1  spread/credit 0.164 > 0.15
+
+==============================================================================
+  ALL ROWS   n=913   expiries=7
+==============================================================================
+
+--- per-expiry rank IC (score vs realised P&L / margin) ---
+  2026-02-24  n=132  IC=+0.110  win%= 60.6  meanRoM= -2.28%  model=garch11_t
+  2026-03-30  n=116  IC=+0.022  win%= 62.1  meanRoM= +3.46%  model=garch11_t
+  2026-04-28  n=115  IC=-0.211  win%= 56.5  meanRoM= -3.23%  model=garch11_t
+  2026-05-26  n=121  IC=+0.031  win%= 76.9  meanRoM= +9.22%  model=garch11_t
+  2026-06-30  n=124  IC=-0.005  win%= 66.9  meanRoM= +3.63%  model=garch11_t
+  2026-07-28  n=153  IC=-0.046  win%= 71.2  meanRoM= +7.57%  model=garch11_t
+  2026-08-25  n=152  IC=+0.017  win%= 79.6  meanRoM= +9.85%  model=garch11_t
+
+  mean IC = -0.011   sd = 0.100   t = -0.30   (n_periods = 7)
+  NOTE: |t| < 2 means this sample cannot distinguish the IC from zero.
+
+--- component standalone IC (per-expiry, then averaged) ---
+  ev_per_margin          IC=-0.015  t=-0.40
+  cvar05_per_margin      IC=-0.012  t=-0.33
+  vrp_z                  IC=-0.002  t=-0.04
+  ts_slope               IC=+0.010  t=+0.20
+  cushion_net            IC=-0.017  t=-0.42
+  gamma_score            IC=+0.027  t=+0.97
+  trend_eff              IC=-0.019  t=-0.37
+  tfr                    IC=-0.003  t=-0.07
+  score                  IC=-0.011  t=-0.30  <-- composite
+  pop                    IC=-0.010  t=-0.26  (diagnostic, not ranked)
+  vrp_ratio              IC=-0.032  t=-0.80  (diagnostic, not ranked)
+  iv_rank                IC=-0.011  t=-0.31  (diagnostic, not ranked)
+  If the composite does not beat its best single component, the
+  extra complexity is not earning anything.
+
+--- quintiles of score (look for MONOTONICITY, not top-quintile) ---
+        n  meanRoM%  medRoM%   win%  worstRoM%
+qt
+1   186.0      4.81    12.25  68.82    -195.72
+2   181.0      5.16     8.58  69.61     -87.81
+3   181.0      3.63     8.45  66.30     -86.86
+4   181.0      3.57    11.34  69.06    -150.27
+5   184.0      4.43     9.64  67.39     -85.99
+
+--- calibration: simulated vs realised ---
+  predicted mean EV/margin   -0.867%
+  realised  mean P&L/margin  +4.325%
+  predicted POP  60.8%   realised win rate  68.2%
+  predicted stop rate   0.0%   realised   0.0%
+                  n  pred%  actual win%  meanRoM%
+pop
+(0.0, 0.55]   200.0   49.0         67.0       5.1
+(0.55, 0.65]  418.0   60.1         70.6       4.8
+(0.65, 0.75]  251.0   69.0         66.1       3.5
+(0.75, 1.0]    42.0   77.5         66.7       5.6
+  A well-calibrated simulator makes this monotone and close to
+  the diagonal. Non-monotone here = the P&L distribution is wrong.
+
+--- forecast quality (the fast feedback loop) ---
+  mean IV 31.89%   mean RV forecast 31.81%   mean IV/RVf 1.032
+  mean realised |move|  4.33%   mean EM  5.29%
+  realised |move| / EM ratio: median 0.682  (1.0 = EM was exactly right)
+
+--- realised P&L shape (the asymmetry POP cannot see) ---
+  mean  +14.2%   median  +33.0%   p05  -125.1%   worst   -638.0%   skew -2.35
+  trades losing > 100% of credit: 67 of 913
+
+==============================================================================
+  GATED ROWS   n=874   expiries=7
+==============================================================================
+
+--- per-expiry rank IC (score vs realised P&L / margin) ---
+  2026-02-24  n=131  IC=+0.109  win%= 60.3  meanRoM= -2.40%  model=garch11_t
+  2026-03-30  n=111  IC=+0.027  win%= 64.0  meanRoM= +3.83%  model=garch11_t
+  2026-04-28  n=110  IC=-0.225  win%= 56.4  meanRoM= -1.66%  model=garch11_t
+  2026-05-26  n=118  IC=+0.033  win%= 78.0  meanRoM= +9.67%  model=garch11_t
+  2026-06-30  n=122  IC=-0.019  win%= 66.4  meanRoM= +3.48%  model=garch11_t
+  2026-07-28  n=151  IC=-0.040  win%= 70.9  meanRoM= +7.48%  model=garch11_t
+  2026-08-25  n=131  IC=+0.045  win%= 80.9  meanRoM=+10.44%  model=garch11_t
+
+  mean IC = -0.010   sd = 0.106   t = -0.25   (n_periods = 7)
+  NOTE: |t| < 2 means this sample cannot distinguish the IC from zero.
+
+--- component standalone IC (per-expiry, then averaged) ---
+  ev_per_margin          IC=-0.023  t=-0.55
+  cvar05_per_margin      IC=-0.012  t=-0.30
+  vrp_z                  IC=+0.000  t=+0.00
+  ts_slope               IC=+0.011  t=+0.23
+  cushion_net            IC=-0.027  t=-0.62
+  gamma_score            IC=+0.031  t=+1.11
+  trend_eff              IC=-0.019  t=-0.35
+  tfr                    IC=-0.014  t=-0.33
+  score                  IC=-0.010  t=-0.25  <-- composite
+  pop                    IC=-0.020  t=-0.45  (diagnostic, not ranked)
+  vrp_ratio              IC=-0.030  t=-0.75  (diagnostic, not ranked)
+  iv_rank                IC=-0.012  t=-0.27  (diagnostic, not ranked)
+  If the composite does not beat its best single component, the
+  extra complexity is not earning anything.
+
+--- quintiles of score (look for MONOTONICITY, not top-quintile) ---
+        n  meanRoM%  medRoM%   win%  worstRoM%
+qt
+1   179.0      5.52    12.09  68.72     -80.30
+2   173.0      5.75     8.70  70.52     -87.81
+3   174.0      3.54     8.42  66.67     -86.86
+4   173.0      3.34    11.44  69.36    -150.27
+5   175.0      4.65    10.15  66.86     -60.47
+
+--- calibration: simulated vs realised ---
+  predicted mean EV/margin   -0.686%
+  realised  mean P&L/margin  +4.567%
+  predicted POP  60.9%   realised win rate  68.4%
+  predicted stop rate   0.0%   realised   0.0%
+                  n  pred%  actual win%  meanRoM%
+pop
+(0.0, 0.55]   193.0   48.9         67.4       5.4
+(0.55, 0.65]  398.0   60.2         70.6       4.7
+(0.65, 0.75]  241.0   69.0         66.4       3.6
+(0.75, 1.0]    41.0   77.5         65.9       5.6
+  A well-calibrated simulator makes this monotone and close to
+  the diagonal. Non-monotone here = the P&L distribution is wrong.
+
+--- forecast quality (the fast feedback loop) ---
+  mean IV 31.93%   mean RV forecast 31.89%   mean IV/RVf 1.031
+  mean realised |move|  4.34%   mean EM  5.32%
+  realised |move| / EM ratio: median 0.675  (1.0 = EM was exactly right)
+
+--- realised P&L shape (the asymmetry POP cannot see) ---
+  mean  +15.0%   median  +33.7%   p05  -124.9%   worst   -473.9%   skew -1.87
+  trades losing > 100% of credit: 64 of 874
+
+wrote bt_auto_20260917_15dte.csv  (913 rows)
+
+C:\Users\aniru\od\oc (bugfixs2)
+λ py backtest_straddle.py --model auto --dte 10 --out bt_auto_20260917_10dte.csv
+completed expiries: ['2026-02-24', '2026-03-30', '2026-04-28', '2026-05-26', '2026-06-30', '2026-07-28', '2026-08-25']
+stop rule: hold to expiry
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-02-24  entry=2026-02-13  dte=11  h=7td  n=117  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-03-30  entry=2026-03-20  dte=10  h=7td  n=118  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-04-28  entry=2026-04-17  dte=11  h=7td  n=120  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-05-26  entry=2026-05-15  dte=11  h=7td  n=125  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-06-30  entry=2026-06-19  dte=11  h=7td  n=127  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-07-28  entry=2026-07-17  dte=11  h=7td  n=159  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-08-25  entry=2026-08-14  dte=11  h=7td  n=157  hist=400d  model=garch11_t
+
+gate pass: 804 / 880
+rejection reasons:
+      22  only 7 strikes
+      16  only 6 strikes
+      14  confidence=low
+      12  only 5 strikes
+      10  only 4 strikes
+      10  only 3 strikes
+       4  credit below floor
+       4  only 2 strikes
+
+==============================================================================
+  ALL ROWS   n=880   expiries=7
+==============================================================================
+
+--- per-expiry rank IC (score vs realised P&L / margin) ---
+  2026-02-24  n=113  IC=+0.038  win%= 66.4  meanRoM= +3.70%  model=garch11_t
+  2026-03-30  n=114  IC=+0.026  win%= 45.6  meanRoM= -1.76%  model=garch11_t
+  2026-04-28  n=111  IC=-0.168  win%= 70.3  meanRoM= +2.47%  model=garch11_t
+  2026-05-26  n=122  IC=+0.064  win%= 73.8  meanRoM= +7.12%  model=garch11_t
+  2026-06-30  n=124  IC=-0.133  win%= 63.7  meanRoM= +1.74%  model=garch11_t
+  2026-07-28  n=146  IC=+0.009  win%= 67.8  meanRoM= +5.31%  model=garch11_t
+  2026-08-25  n=150  IC=+0.262  win%= 79.3  meanRoM= +7.79%  model=garch11_t
+
+  mean IC = +0.014   sd = 0.141   t = +0.26   (n_periods = 7)
+  NOTE: |t| < 2 means this sample cannot distinguish the IC from zero.
+
+--- component standalone IC (per-expiry, then averaged) ---
+  ev_per_margin          IC=-0.026  t=-0.52
+  cvar05_per_margin      IC=-0.017  t=-0.38
+  vrp_z                  IC=+0.019  t=+0.39
+  ts_slope               IC=+0.039  t=+0.77
+  cushion_net            IC=-0.023  t=-0.43
+  gamma_score            IC=+0.033  t=+0.88
+  trend_eff              IC=-0.053  t=-3.00
+  tfr                    IC=-0.021  t=-0.51
+  score                  IC=+0.014  t=+0.26  <-- composite
+  pop                    IC=-0.017  t=-0.33  (diagnostic, not ranked)
+  vrp_ratio              IC=-0.016  t=-0.29  (diagnostic, not ranked)
+  iv_rank                IC=+0.081  t=+2.24  (diagnostic, not ranked)
+  If the composite does not beat its best single component, the
+  extra complexity is not earning anything.
+
+--- quintiles of score (look for MONOTONICITY, not top-quintile) ---
+        n  meanRoM%  medRoM%   win%  worstRoM%
+qt
+1   179.0      2.67     7.22  63.13    -204.37
+2   175.0      3.20     6.02  66.86     -58.51
+3   174.0      6.16     7.63  72.99     -53.09
+4   175.0      4.40     6.93  65.14     -78.43
+5   177.0      3.61     8.03  68.36     -68.33
+
+--- calibration: simulated vs realised ---
+  predicted mean EV/margin   -1.983%
+  realised  mean P&L/margin  +4.000%
+  predicted POP  58.7%   realised win rate  67.3%
+  predicted stop rate   0.0%   realised   0.0%
+                  n  pred%  actual win%  meanRoM%
+pop
+(0.0, 0.55]   273.0   49.3         69.2       4.3
+(0.55, 0.65]  405.0   59.7         67.7       4.8
+(0.65, 0.75]  168.0   68.8         64.9       4.0
+(0.75, 1.0]    32.0   78.1         62.5       0.3
+  A well-calibrated simulator makes this monotone and close to
+  the diagonal. Non-monotone here = the P&L distribution is wrong.
+
+--- forecast quality (the fast feedback loop) ---
+  mean IV 29.33%   mean RV forecast 31.35%   mean IV/RVf 0.963
+  mean realised |move|  3.28%   mean EM  4.27%
+  realised |move| / EM ratio: median 0.668  (1.0 = EM was exactly right)
+
+--- realised P&L shape (the asymmetry POP cannot see) ---
+  mean  +15.1%   median  +27.4%   p05  -112.9%   worst   -720.0%   skew -2.36
+  trades losing > 100% of credit: 49 of 880
+
+==============================================================================
+  GATED ROWS   n=804   expiries=7
+==============================================================================
+
+--- per-expiry rank IC (score vs realised P&L / margin) ---
+  2026-02-24  n=109  IC=+0.039  win%= 66.1  meanRoM= +3.35%  model=garch11_t
+  2026-03-30  n=107  IC=+0.054  win%= 44.9  meanRoM= -1.82%  model=garch11_t
+  2026-04-28  n=103  IC=-0.191  win%= 69.9  meanRoM= +3.92%  model=garch11_t
+  2026-05-26  n=119  IC=+0.102  win%= 73.9  meanRoM= +7.07%  model=garch11_t
+  2026-06-30  n=114  IC=-0.137  win%= 62.3  meanRoM= +1.34%  model=garch11_t
+  2026-07-28  n=142  IC=+0.012  win%= 66.9  meanRoM= +5.10%  model=garch11_t
+  2026-08-25  n=110  IC=+0.219  win%= 81.8  meanRoM= +8.16%  model=garch11_t
+
+  mean IC = +0.014   sd = 0.140   t = +0.26   (n_periods = 7)
+  NOTE: |t| < 2 means this sample cannot distinguish the IC from zero.
+
+--- component standalone IC (per-expiry, then averaged) ---
+  ev_per_margin          IC=-0.026  t=-0.51
+  cvar05_per_margin      IC=-0.026  t=-0.54
+  vrp_z                  IC=+0.008  t=+0.14
+  ts_slope               IC=+0.053  t=+0.98
+  cushion_net            IC=-0.017  t=-0.30
+  gamma_score            IC=+0.039  t=+1.04
+  trend_eff              IC=-0.063  t=-2.34
+  tfr                    IC=-0.004  t=-0.09
+  score                  IC=+0.014  t=+0.26  <-- composite
+  pop                    IC=-0.013  t=-0.24  (diagnostic, not ranked)
+  vrp_ratio              IC=-0.014  t=-0.25  (diagnostic, not ranked)
+  iv_rank                IC=+0.079  t=+2.16  (diagnostic, not ranked)
+  If the composite does not beat its best single component, the
+  extra complexity is not earning anything.
+
+--- quintiles of score (look for MONOTONICITY, not top-quintile) ---
+        n  meanRoM%  medRoM%   win%  worstRoM%
+qt
+1   163.0      3.36     6.77  62.58     -59.67
+2   160.0      3.72     7.73  68.12     -58.51
+3   158.0      5.25     6.53  69.62     -53.09
+4   160.0      4.47     7.22  67.50     -78.43
+5   163.0      3.08     6.89  65.64     -68.33
+
+--- calibration: simulated vs realised ---
+  predicted mean EV/margin   -1.629%
+  realised  mean P&L/margin  +3.967%
+  predicted POP  59.1%   realised win rate  66.7%
+  predicted stop rate   0.0%   realised   0.0%
+                  n  pred%  actual win%  meanRoM%
+pop
+(0.0, 0.55]   241.0   49.4         68.5       3.9
+(0.55, 0.65]  370.0   59.8         67.6       4.6
+(0.65, 0.75]  160.0   68.8         63.1       3.7
+(0.75, 1.0]    32.0   78.1         62.5       0.3
+  A well-calibrated simulator makes this monotone and close to
+  the diagonal. Non-monotone here = the P&L distribution is wrong.
+
+--- forecast quality (the fast feedback loop) ---
+  mean IV 29.57%   mean RV forecast 31.50%   mean IV/RVf 0.966
+  mean realised |move|  3.36%   mean EM  4.30%
+  realised |move| / EM ratio: median 0.677  (1.0 = EM was exactly right)
+
+--- realised P&L shape (the asymmetry POP cannot see) ---
+  mean  +14.8%   median  +26.9%   p05  -113.7%   worst   -276.2%   skew -1.24
+  trades losing > 100% of credit: 46 of 804
+
+wrote bt_auto_20260917_10dte.csv  (880 rows)
+
+C:\Users\aniru\od\oc (bugfixs2)
+λ py backtest_straddle.py --model auto --dte 5 --out bt_auto_20260917_5dte.csv
+completed expiries: ['2026-02-24', '2026-03-30', '2026-04-28', '2026-05-26', '2026-06-30', '2026-07-28', '2026-08-25']
+stop rule: hold to expiry
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-02-24  entry=2026-02-19  dte=5  h=3td  n=118  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-03-30  entry=2026-03-25  dte=5  h=3td  n=120  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-04-28  entry=2026-04-23  dte=5  h=3td  n=122  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-05-26  entry=2026-05-21  dte=5  h=3td  n=125  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-06-30  entry=2026-06-25  dte=5  h=3td  n=121  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-07-28  entry=2026-07-23  dte=5  h=3td  n=157  hist=400d  model=garch11_t
+  [event feed empty for this date -- event gate INACTIVE]
+
+2026-08-25  entry=2026-08-20  dte=5  h=3td  n=145  hist=400d  model=garch11_t
+
+gate pass: 0 / 632
+rejection reasons:
+     632  dte 5 outside [10,45]
+      79  only 7 strikes
+      63  only 6 strikes
+      58  only 5 strikes
+      28  confidence=low
+      21  only 3 strikes
+      14  only 4 strikes
+       7  only 2 strikes
+
+==============================================================================
+  ALL ROWS   n=632   expiries=5
+==============================================================================
+
+--- per-expiry rank IC (score vs realised P&L / margin) ---
+  2026-02-24  n=114  IC=-0.095  win%= 62.3  meanRoM= -0.74%  model=garch11_t
+  2026-04-28  n=117  IC=-0.039  win%= 71.8  meanRoM= +3.43%  model=garch11_t
+  2026-05-26  n=122  IC=+0.024  win%= 63.9  meanRoM= +2.41%  model=garch11_t
+  2026-07-28  n=141  IC=-0.095  win%= 59.6  meanRoM= -1.77%  model=garch11_t
+  2026-08-25  n=138  IC=-0.022  win%= 73.9  meanRoM= +3.51%  model=garch11_t
+
+  mean IC = -0.045   sd = 0.051   t = -2.01   (n_periods = 5)
+  NOTE: |t| < 2 means this sample cannot distinguish the IC from zero.
+
+--- component standalone IC (per-expiry, then averaged) ---
+  ev_per_margin          IC=-0.080  t=-2.12
+  cvar05_per_margin      IC=-0.068  t=-3.28
+  vrp_z                  IC=-0.077  t=-2.12
+  ts_slope               IC=-0.004  t=-0.12
+  cushion_net            IC=-0.086  t=-2.13
+  gamma_score            IC=+0.017  t=+0.43
+  trend_eff              IC=-0.116  t=-1.74
+  tfr                    IC=-0.021  t=-0.72
+  score                  IC=-0.045  t=-2.01  <-- composite
+  pop                    IC=-0.075  t=-1.73  (diagnostic, not ranked)
+  vrp_ratio              IC=-0.077  t=-3.13  (diagnostic, not ranked)
+  iv_rank                IC=-0.021  t=-0.41  (diagnostic, not ranked)
+  If the composite does not beat its best single component, the
+  extra complexity is not earning anything.
+
+--- quintiles of score (look for MONOTONICITY, not top-quintile) ---
+        n  meanRoM%  medRoM%   win%  worstRoM%
+qt
+1   129.0      1.76     4.71  68.99    -108.27
+2   125.0      1.18     5.07  67.20     -49.77
+3   125.0      2.34     4.85  68.00     -53.29
+4   125.0      0.59     5.39  65.60    -100.91
+5   128.0      0.81     2.97  61.72     -59.52
+
+--- calibration: simulated vs realised ---
+  predicted mean EV/margin   -1.764%
+  realised  mean P&L/margin  +1.338%
+  predicted POP  58.1%   realised win rate  66.3%
+  predicted stop rate   0.0%   realised   0.0%
+                  n  pred%  actual win%  meanRoM%
+pop
+(0.0, 0.55]   239.0   48.5         70.3       3.2
+(0.55, 0.65]  251.0   59.4         70.1       2.7
+(0.65, 0.75]   89.0   69.1         56.2      -2.2
+(0.75, 1.0]    50.0   81.3         50.0      -3.1
+  A well-calibrated simulator makes this monotone and close to
+  the diagonal. Non-monotone here = the P&L distribution is wrong.
+
+--- forecast quality (the fast feedback loop) ---
+  mean IV 26.42%   mean RV forecast 29.92%   mean IV/RVf 0.906
+  mean realised |move|  2.20%   mean EM  2.56%
+  realised |move| / EM ratio: median 0.670  (1.0 = EM was exactly right)
+
+--- realised P&L shape (the asymmetry POP cannot see) ---
+  mean   +8.1%   median  +24.4%   p05  -148.3%   worst   -565.7%   skew -2.31
+  trades losing > 100% of credit: 58 of 632
+no rows to report
+
+wrote bt_auto_20260917_5dte.csv  (632 rows)
+
+C:\Users\aniru\od\oc (bugfixs2)
+λ

@@ -18,16 +18,22 @@ rejected-metrics list. Short version:
             +27.2 with the trailing 5d — it leads. NIFTY's own ATM IV is
             61.8 forward / 64.3 trailing, i.e. essentially coincident.
 
-  vol_pay   realised forward 5d vol / implied daily vol (atm_iv / sqrt(243)).
-            Below 1 means the premium seller kept the difference. This is the
-            actionable column: by state it runs 0.762 / 0.775 / 0.920 / 1.069,
-            monotone in ngf and flat across the IV axis.
+  vol_pay   *** RETRACTED 2026-08-25 — NOT RETURNED BY THIS ENDPOINT. ***
+            realised forward 5d vol / implied daily vol (atm_iv / sqrt(243)).
+            This docstring previously called it "the actionable column" and
+            quoted by-state values of 0.762 / 0.775 / 0.920 / 1.069. Those four
+            numbers are the ones market_state.py retracts: the spread is a
+            calendar/DTE-cycle confound, not a positioning edge, and the claim
+            that a FRAGILE_RICH day implies negative expectancy for a premium
+            seller is NOT SUPPORTED. The producer stopped publishing it and the
+            frontend stopped drawing it; this module was the last place still
+            computing and shipping it, so it is gone from state_stats and
+            current_stats too. Do not reinstate without a fresh within-DTE-band
+            control. See the retraction note in market_state.py.
 
-This endpoint returns TODAY's reading plus the HISTORICAL by-state averages.
-It deliberately does not return today's own vol_pay: fwd_vol5 needs five more
-sessions to exist, so the live cell is always NULL by construction. What the
-UI should show is "days in this state have historically paid X over n
-occurrences", which is what state_stats carries.
+This endpoint returns TODAY's reading plus the HISTORICAL by-state averages of
+the surviving columns (ngf, IV, realised vol). It does not attempt to tell you
+what a state "pays".
 """
 from __future__ import annotations
 
@@ -61,7 +67,7 @@ def market_state(history: int = Query(60, ge=0, le=250,
             SELECT date, n_symbols, ngf_avg, ngf_hi_frac, neg_regime_frac,
                    pos_regime_frac, nifty_spot, nifty_iv, trail_vol5, fwd_vol5,
                    ngf_pctile, iv_pctile, fragility_gap, near_dte, ngf_adj,
-                   vol_pay, coverage_ok, state
+                   coverage_ok, state
             FROM {TABLE}
             ORDER BY date DESC LIMIT 2
         """)
@@ -92,7 +98,7 @@ def market_state(history: int = Query(60, ge=0, le=250,
                 SELECT date, n_symbols, ngf_avg, ngf_hi_frac, neg_regime_frac,
                        pos_regime_frac, nifty_spot, nifty_iv, trail_vol5, fwd_vol5,
                        ngf_pctile, iv_pctile, fragility_gap, near_dte, ngf_adj,
-                       vol_pay, coverage_ok, state
+                       coverage_ok, state
                 FROM {TABLE}
                 WHERE state IS NOT NULL
                 ORDER BY date DESC LIMIT 1
@@ -109,8 +115,8 @@ def market_state(history: int = Query(60, ge=0, le=250,
                        "ngf_pctile": _n(p["ngf_pctile"]),
                        "iv_pctile": _n(p["iv_pctile"])}
 
-    # Historical behaviour of each state. Ratio-of-averages (not the mean of
-    # per-row vol_pay) so a day with a tiny IV denominator cannot dominate.
+    # Historical behaviour of each state. vol_pay is deliberately absent — see
+    # the retraction note at the top of this module.
     try:
         st = qdf(f"""
             SELECT state,
@@ -118,11 +124,10 @@ def market_state(history: int = Query(60, ge=0, le=250,
                    AVG(ngf_avg)                               AS ngf_avg,
                    AVG(nifty_iv)                              AS nifty_iv,
                    AVG(trail_vol5)                            AS trail_vol5,
-                   AVG(fwd_vol5)                              AS fwd_vol5,
-                   AVG(fwd_vol5) / NULLIF(AVG(nifty_iv / SQRT(243.0)), 0) AS vol_pay
+                   AVG(fwd_vol5)                              AS fwd_vol5
             FROM {TABLE}
             WHERE state IS NOT NULL AND fwd_vol5 IS NOT NULL
-            GROUP BY state ORDER BY vol_pay
+            GROUP BY state ORDER BY ngf_avg
         """)
         out["state_stats"] = [{k: _n(v) for k, v in r.items()}
                               for r in st.to_dict("records")]

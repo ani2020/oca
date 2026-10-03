@@ -46,6 +46,11 @@ def _safe(v: Any) -> Any:
     """Make a value JSON-safe (NaN/Inf → None)."""
     if v is None:
         return None
+    # pd.NaT subclasses datetime, so without this it would reach the
+    # isinstance(datetime) branch below and serialise as the string "NaT"
+    # (seen on the RV forecast screen for pending next_day target_d).
+    if v is pd.NaT:
+        return None
     if isinstance(v, float):
         if math.isnan(v) or math.isinf(v):
             return None
@@ -95,6 +100,8 @@ class _SafeJSONEncoder(json.JSONEncoder):
             return bool(o)
         if isinstance(o, np.ndarray):
             return o.tolist()
+        if o is pd.NaT:                      # NaT subclasses datetime; see _safe
+            return None
         if isinstance(o, (datetime, date)):
             return o.isoformat()
         if isinstance(o, pd.Timestamp):
@@ -106,6 +113,8 @@ class _SafeJSONEncoder(json.JSONEncoder):
 
     @staticmethod
     def _sanitise(obj):
+        if obj is pd.NaT:
+            return None
         if isinstance(obj, float) and (math.isnan(obj) or math.isinf(obj)):
             return None
         if isinstance(obj, dict):

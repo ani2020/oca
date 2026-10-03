@@ -1,0 +1,924 @@
+λ python backtest_straddle.py --dte 35 --timing-gate --out bt35.csv                                                                   
+75 completed expiries: 2020-06-25 .. 2026-08-25                                                                                       
+stop: hold to expiry   model: ewma                                                                                                    
+                                                                                                                                      
+2020-06-25  entry=2020-06-15  dte=10  h=7td  n=135  ca_excluded=0                                                                     
+                                                                                                                                      
+2020-07-30  entry=2020-06-25  dte=35  h=23td  n=139  ca_excluded=1                                                                    
+                                                                                                                                      
+2020-08-27  entry=2020-07-23  dte=35  h=23td  n=115  ca_excluded=1                                                                    
+                                                                                                                                      
+2020-09-24  entry=2020-08-20  dte=35  h=23td  n=110  ca_excluded=1                                                                    
+                                                                                                                                      
+2020-10-29  entry=2020-09-24  dte=35  h=23td  n=131  ca_excluded=0                                                                    
+                                                                                                                                      
+2020-11-26  entry=2020-10-22  dte=35  h=23td  n=111  ca_excluded=0                                                                    
+                                                                                                                                      
+2020-12-31  entry=2020-11-26  dte=35  h=23td  n=136  ca_excluded=0                                                                    
+                                                                                                                                      
+2021-01-28  entry=2020-12-24  dte=35  h=23td  n=130  ca_excluded=0                                                                    
+                                                                                                                                      
+2021-02-25  entry=2021-01-21  dte=35  h=23td  n=135  ca_excluded=0                                                                    
+                                                                                                                                      
+2021-03-25  entry=2021-02-18  dte=35  h=23td  n=130  ca_excluded=0                                                                    
+                                                                                                                                      
+2021-04-29  entry=2021-03-25  dte=35  h=23td  n=154  ca_excluded=0                                                                    
+                                                                                                                                      
+2021-05-27  entry=2021-04-22  dte=35  h=23td  n=127  ca_excluded=1                                                                    
+                                                                                                                                      
+2021-06-24  entry=2021-05-20  dte=35  h=23td  n=140  ca_excluded=2                                                                    
+                                                                                                                                      
+2021-07-29  entry=2021-06-24  dte=35  h=23td  n=157  ca_excluded=1                                                                    
+                                                                                                                                      
+2021-08-26  entry=2021-07-22  dte=35  h=23td  n=139  ca_excluded=1                                                                    
+                                                                                                                                      
+2021-09-30  entry=2021-08-26  dte=35  h=23td  n=163  ca_excluded=1                                                                    
+                                                                                                                                      
+2021-10-28  entry=2021-09-23  dte=35  h=23td  n=171  ca_excluded=3                                                                    
+                                                                                                                                      
+2021-11-25  entry=2021-10-21  dte=35  h=23td  n=175  ca_excluded=2                                                                    
+                                                                                                                                      
+2021-12-30  entry=2021-11-25  dte=35  h=23td  n=187  ca_excluded=1                                                                    
+                                                                                                                                      
+2022-01-27  entry=2021-12-23  dte=35  h=23td  n=175  ca_excluded=1                                                                    
+                                                                                                                                      
+2022-02-24  entry=2022-01-20  dte=35  h=23td  n=184  ca_excluded=0                                                                    
+                                                                                                                                      
+2022-03-31  entry=2022-02-24  dte=35  h=23td  n=198  ca_excluded=0                                                                    
+                                                                                                                                      
+2022-04-28  entry=2022-03-24  dte=35  h=23td  n=186  ca_excluded=1                                                                    
+                                                                                                                                      
+2022-05-26  entry=2022-04-21  dte=35  h=23td  n=189  ca_excluded=0                                                                    
+                                                                                                                                      
+2022-06-30  entry=2022-05-26  dte=35  h=23td  n=198  ca_excluded=2                                                                    
+                                                                                                                                      
+2022-07-28  entry=2022-06-23  dte=35  h=23td  n=180  ca_excluded=2                                                                    
+                                                                                                                                      
+2022-08-25  entry=2022-07-21  dte=35  h=23td  n=183  ca_excluded=2                                                                    
+                                                                                                                                      
+2022-09-29  entry=2022-08-25  dte=35  h=23td  n=195  ca_excluded=4                                                                    
+                                                                                                                                      
+2022-10-27  entry=2022-09-22  dte=35  h=23td  n=186  ca_excluded=3                                                                    
+                                                                                                                                      
+2022-11-24  entry=2022-10-20  dte=35  h=23td  n=181  ca_excluded=1                                                                    
+                                                                                                                                      
+2022-12-29  entry=2022-11-24  dte=35  h=23td  n=193  ca_excluded=0                                                                    
+                                                                                                                                      
+2023-01-25  entry=2022-12-21  dte=35  h=23td  n=183  ca_excluded=0                                                                    
+                                                                                                                                      
+2023-02-23  entry=2023-01-19  dte=35  h=23td  n=182  ca_excluded=0                                                                    
+                                                                                                                                      
+2023-03-29  entry=2023-02-22  dte=35  h=23td  n=191  ca_excluded=1                                                                    
+                                                                                                                                      
+2023-04-27  entry=2023-03-23  dte=35  h=23td  n=179  ca_excluded=0                                                                    
+                                                                                                                                      
+2023-05-25  entry=2023-04-20  dte=35  h=23td  n=174  ca_excluded=0                                                                    
+                                                                                                                                      
+2023-06-29  entry=2023-05-25  dte=35  h=23td  n=188  ca_excluded=1                                                                    
+                                                                                                                                      
+2023-07-27  entry=2023-06-22  dte=35  h=23td  n=186  ca_excluded=1                                                                    
+                                                                                                                                      
+2023-08-31  entry=2023-07-27  dte=35  h=23td  n=185  ca_excluded=0                                                                    
+                                                                                                                                      
+2023-09-28  entry=2023-08-24  dte=35  h=23td  n=183  ca_excluded=4                                                                    
+                                                                                                                                      
+2023-10-26  entry=2023-09-21  dte=35  h=23td  n=176  ca_excluded=2                                                                    
+                                                                                                                                      
+2023-11-30  entry=2023-10-26  dte=35  h=23td  n=185  ca_excluded=0                                                                    
+                                                                                                                                      
+2023-12-28  entry=2023-11-23  dte=35  h=23td  n=179  ca_excluded=0                                                                    
+                                                                                                                                      
+2024-01-25  entry=2023-12-21  dte=35  h=23td  n=183  ca_excluded=2                                                                    
+                                                                                                                                      
+2024-02-29  entry=2024-01-25  dte=35  h=23td  n=184  ca_excluded=0                                                                    
+                                                                                                                                      
+2024-03-28  entry=2024-02-22  dte=35  h=23td  n=179  ca_excluded=1                                                                    
+                                                                                                                                      
+2024-04-25  entry=2024-03-21  dte=35  h=23td  n=178  ca_excluded=1                                                                    
+                                                                                                                                      
+2024-05-30  entry=2024-04-25  dte=35  h=23td  n=182  ca_excluded=1                                                                    
+                                                                                                                                      
+2024-06-27  entry=2024-05-23  dte=35  h=23td  n=182  ca_excluded=2                                                                    
+                                                                                                                                      
+2024-07-25  entry=2024-06-20  dte=35  h=23td  n=179  ca_excluded=2                                                                    
+                                                                                                                                      
+2024-08-29  entry=2024-07-25  dte=35  h=23td  n=181  ca_excluded=1                                                                    
+                                                                                                                                      
+2024-09-26  entry=2024-08-22  dte=35  h=23td  n=179  ca_excluded=0                                                                    
+                                                                                                                                      
+2024-10-31  entry=2024-09-26  dte=35  h=23td  n=180  ca_excluded=2                                                                    
+                                                                                                                                      
+2024-11-28  entry=2024-10-24  dte=35  h=23td  n=176  ca_excluded=3                                                                    
+                                                                                                                                      
+2024-12-26  entry=2024-11-21  dte=35  h=23td  n=172  ca_excluded=2                                                                    
+                                                                                                                                      
+2025-01-30  entry=2024-12-26  dte=35  h=23td  n=222  ca_excluded=3                                                                    
+                                                                                                                                      
+2025-02-27  entry=2025-01-23  dte=35  h=23td  n=221  ca_excluded=1                                                                    
+                                                                                                                                      
+2025-03-27  entry=2025-02-20  dte=35  h=23td  n=208  ca_excluded=0                                                                    
+                                                                                                                                      
+2025-04-24  entry=2025-03-20  dte=35  h=23td  n=214  ca_excluded=1                                                                    
+                                                                                                                                      
+2025-05-29  entry=2025-04-24  dte=35  h=23td  n=219  ca_excluded=4                                                                    
+                                                                                                                                      
+2025-06-26  entry=2025-05-22  dte=35  h=23td  n=210  ca_excluded=3                                                                    
+                                                                                                                                      
+2025-07-31  entry=2025-06-26  dte=35  h=23td  n=222  ca_excluded=4                                                                    
+                                                                                                                                      
+2025-08-28  entry=2025-07-24  dte=35  h=23td  n=216  ca_excluded=4                                                                    
+                                                                                                                                      
+2025-09-30  entry=2025-08-26  dte=35  h=23td  n=210  ca_excluded=2                                                                    
+                                                                                                                                      
+2025-10-28  entry=2025-09-23  dte=35  h=23td  n=210  ca_excluded=0                                                                    
+                                                                                                                                      
+2025-11-25  entry=2025-10-21  dte=35  h=23td  n=210  ca_excluded=1                                                                    
+                                                                                                                                      
+2025-12-30  entry=2025-11-25  dte=35  h=23td  n=211  ca_excluded=4                                                                    
+                                                                                                                                      
+2026-01-27  entry=2025-12-23  dte=35  h=23td  n=206  ca_excluded=3                                                                    
+                                                                                                                                      
+2026-02-24  entry=2026-01-20  dte=35  h=23td  n=209  ca_excluded=0                                                                    
+                                                                                                                                      
+2026-03-30  entry=2026-02-23  dte=35  h=23td  n=207  ca_excluded=1                                                                    
+                                                                                                                                      
+2026-04-28  entry=2026-03-24  dte=35  h=23td  n=205  ca_excluded=0                                                                    
+                                                                                                                                      
+2026-05-26  entry=2026-04-21  dte=35  h=23td  n=210  ca_excluded=1                                                                    
+                                                                                                                                      
+2026-06-30  entry=2026-05-26  dte=35  h=23td  n=211  ca_excluded=2                                                                    
+                                                                                                                                      
+2026-07-28  entry=2026-06-23  dte=35  h=23td  n=212  ca_excluded=0                                                                    
+                                                                                                                                      
+2026-08-25  entry=2026-07-21  dte=35  h=23td  n=209  ca_excluded=0                                                                    
+                                                                                                                                      
+gate pass: 6,663 / 12,714                                                                                                             
+     4857  event in window                                                                                                            
+     1993  confidence=low                                                                                                             
+      268  only 7 strikes                                                                                                             
+      223  only 6 strikes                                                                                                             
+      179  only 5 strikes                                                                                                             
+       80  traded_frac 0.00 < 0.3                                                                                                     
+       77  only 4 strikes                                                                                                             
+       31  traded_frac 0.20 < 0.3                                                                                                     
+                                                                                                                                      
+================================================================================                                                      
+  ALL  n=12,714  expiries=71  symbols=295                                                                                             
+================================================================================                                                      
+                                                                                                                                      
+--- per-expiry rank IC ---                                                                                                            
+  2020-10-29  n=128  IC=+0.095  win%= 75.0  meanRoM=+13.42%                                                                           
+  2020-11-26  n=108  IC=+0.176  win%= 54.6  meanRoM= -0.62%                                                                           
+  2020-12-31  n=134  IC=-0.011  win%= 67.2  meanRoM= +8.50%                                                                           
+  2021-01-28  n=127  IC=+0.203  win%= 87.4  meanRoM=+23.25%                                                                           
+  2021-02-25  n=132  IC=+0.142  win%= 67.4  meanRoM= +8.01%                                                                           
+  2021-03-25  n=127  IC=+0.201  win%= 79.5  meanRoM=+20.05%                                                                           
+  2021-04-29  n=152  IC=+0.192  win%= 78.3  meanRoM= +9.44%                                                                           
+  2021-05-27  n=124  IC=+0.050  win%= 60.5  meanRoM= +6.07%                                                                           
+  2021-06-24  n=136  IC=+0.095  win%= 83.1  meanRoM=+22.56%                                                                           
+  2021-07-29  n=154  IC=+0.177  win%= 66.9  meanRoM= +5.26%                                                                           
+  2021-08-26  n=136  IC=+0.326  win%= 64.7  meanRoM= +5.06%                                                                           
+  2021-09-30  n=160  IC=+0.086  win%= 55.6  meanRoM= -7.34%                                                                           
+  2021-10-28  n=166  IC=+0.167  win%= 80.7  meanRoM=+18.22%                                                                           
+  2021-11-25  n=171  IC=+0.220  win%= 87.1  meanRoM=+25.28%                                                                           
+  2021-12-30  n=184  IC=+0.049  win%= 57.1  meanRoM= +2.89%                                                                           
+  2022-01-27  n=172  IC=-0.004  win%= 70.3  meanRoM= +8.58%                                                                           
+  2022-02-24  n=182  IC=+0.131  win%= 38.5  meanRoM=-12.17%                                                                           
+  2022-03-31  n=196  IC=+0.346  win%= 68.4  meanRoM= +8.82%                                                                           
+  2022-04-28  n=182  IC=+0.055  win%= 80.8  meanRoM=+18.61%                                                                           
+  2022-05-26  n=186  IC=+0.192  win%= 43.5  meanRoM= -8.02%                                                                           
+  2022-06-30  n=193  IC=+0.119  win%= 81.3  meanRoM=+17.44%                                                                           
+  2022-07-28  n=175  IC=+0.065  win%= 50.9  meanRoM= -5.95%                                                                           
+  2022-08-25  n=178  IC=+0.331  win%= 69.1  meanRoM=+12.08%                                                                           
+  2022-09-29  n=188  IC=+0.076  win%= 76.6  meanRoM=+14.42%                                                                           
+  2022-10-27  n=181  IC=+0.215  win%= 89.0  meanRoM=+25.02%                                                                           
+  2022-11-24  n=178  IC=+0.109  win%= 73.0  meanRoM=+13.67%                                                                           
+  2022-12-29  n=191  IC=+0.009  win%= 82.2  meanRoM=+16.04%                                                                           
+  2023-01-25  n=179  IC=+0.225  win%= 77.1  meanRoM=+14.17%                                                                           
+  2023-02-23  n=178  IC=-0.003  win%= 59.0  meanRoM= +2.19%                                                                           
+  2023-03-29  n=186  IC=+0.004  win%= 71.0  meanRoM=+12.58%                                                                           
+  2023-04-27  n=177  IC=+0.085  win%= 72.3  meanRoM=+12.40%                                                                           
+  2023-05-25  n=172  IC=+0.036  win%= 61.6  meanRoM= +4.07%                                                                           
+  2023-06-29  n=184  IC=+0.177  win%= 58.7  meanRoM= -3.06%                                                                           
+  2023-07-27  n=182  IC=-0.004  win%= 68.7  meanRoM= +9.57%                                                                           
+  2023-08-31  n=182  IC=-0.037  win%= 73.1  meanRoM= +9.63%                                                                           
+  2023-09-28  n=177  IC=+0.330  win%= 79.1  meanRoM=+17.56%                                                                           
+  2023-10-26  n=172  IC=+0.131  win%= 64.0  meanRoM= +8.61%                                                                           
+  2023-11-30  n=183  IC=+0.070  win%= 37.7  meanRoM=-22.99%                                                                           
+  2023-12-28  n=177  IC=+0.073  win%= 44.6  meanRoM=-16.46%                                                                           
+  2024-01-25  n=179  IC=-0.001  win%= 69.3  meanRoM= +9.14%                                                                           
+  2024-02-29  n=182  IC=+0.088  win%= 63.7  meanRoM= +4.22%                                                                           
+  2024-03-28  n=176  IC=+0.238  win%= 77.3  meanRoM=+17.50%                                                                           
+  2024-04-25  n=176  IC=-0.015  win%= 54.0  meanRoM= -3.47%                                                                           
+  2024-05-30  n=179  IC=+0.157  win%= 68.7  meanRoM= +5.72%                                                                           
+  2024-06-27  n=178  IC=+0.191  win%= 75.3  meanRoM=+13.56%                                                                           
+  2024-07-25  n=173  IC=+0.200  win%= 65.9  meanRoM= +9.33%                                                                           
+  2024-08-29  n=176  IC=+0.283  win%= 65.3  meanRoM= +7.11%                                                                           
+  2024-09-26  n=177  IC=+0.051  win%= 65.0  meanRoM= +7.20%                                                                           
+  2024-10-31  n=177  IC=-0.169  win%= 41.2  meanRoM=-14.33%                                                                           
+  2024-11-28  n=172  IC=-0.049  win%= 74.4  meanRoM=+12.75%                                                                           
+  2024-12-26  n=169  IC=+0.013  win%= 78.7  meanRoM=+14.32%                                                                           
+  2025-01-30  n=217  IC=+0.131  win%= 43.8  meanRoM=-13.30%                                                                           
+  2025-02-27  n=214  IC=+0.100  win%= 46.7  meanRoM= -6.09%                                                                           
+  2025-03-27  n=202  IC=+0.080  win%= 70.3  meanRoM= +9.26%                                                                           
+  2025-04-24  n=209  IC=+0.041  win%= 52.6  meanRoM= -2.00%                                                                           
+  2025-05-29  n=209  IC=+0.086  win%= 73.7  meanRoM=+11.32%                                                                           
+  2025-06-26  n=202  IC=+0.133  win%= 81.7  meanRoM=+17.80%                                                                           
+  2025-07-31  n=213  IC=-0.040  win%= 56.8  meanRoM= +2.09%                                                                           
+  2025-08-28  n=206  IC=+0.243  win%= 60.2  meanRoM= +4.73%                                                                           
+  2025-09-30  n=204  IC=+0.018  win%= 63.7  meanRoM= +7.25%                                                                           
+  2025-10-28  n=206  IC=+0.001  win%= 76.2  meanRoM=+11.51%                                                                           
+  2025-11-25  n=204  IC=-0.008  win%= 68.6  meanRoM= +8.78%                                                                           
+  2025-12-30  n=201  IC=+0.014  win%= 69.2  meanRoM= +6.22%                                                                           
+  2026-01-27  n=197  IC=+0.002  win%= 44.7  meanRoM=-10.44%                                                                           
+  2026-02-24  n=203  IC=+0.200  win%= 61.6  meanRoM= -1.40%                                                                           
+  2026-03-30  n=202  IC=+0.072  win%= 24.3  meanRoM=-36.52%                                                                           
+  2026-04-28  n=198  IC=+0.252  win%= 46.0  meanRoM=-11.44%                                                                           
+  2026-05-26  n=204  IC=+0.181  win%= 71.6  meanRoM=+12.49%                                                                           
+  2026-06-30  n=204  IC=-0.097  win%= 66.2  meanRoM= +7.96%                                                                           
+  2026-07-28  n=209  IC=+0.003  win%= 63.2  meanRoM= +5.81%                                                                           
+  2026-08-25  n=206  IC=+0.175  win%= 70.4  meanRoM=+10.19%                                                                           
+                                                                                                                                      
+  mean IC +0.1052  sd 0.107  t +8.26  periods 71                                                                                      
+  |t|>2 needed to distinguish from zero; with 71 periods                                                                              
+  the detectable IC at t=2 is about +0.025                                                                                            
+                                                                                                                                      
+--- component standalone IC ---                                                                                                       
+  ev_per_margin          IC=+0.2948  t=+17.99  pos=69/71                                                                              
+  vrp_z                  IC=+0.0105  t=+1.10  pos=41/71                                                                               
+  ts_slope               IC=+0.0227  t=+0.89  pos=39/69                                                                               
+  gamma_score            IC=-0.0277  t=-3.19  pos=27/71                                                                               
+  trend_eff              IC=+0.0486  t=+4.31  pos=51/71                                                                               
+  liquidity              IC=-0.0862  t=-6.22  pos=17/71                                                                               
+  score                  IC=+0.1052  t=+8.26  pos=59/71  <-- composite                                                                
+  pop                    IC=+0.2958  t=+18.32  pos=70/71  (not ranked)                                                                
+  iv_rank                IC=+0.0597  t=+4.95  pos=50/71  (not ranked)                                                                 
+  tfr                    IC=+0.0107  t=+1.07  pos=41/71  (not ranked)                                                                 
+  cushion_net            IC=+0.2952  t=+18.22  pos=69/71  (not ranked)                                                                
+  cvar05_per_margin      IC=+0.2707  t=+16.30  pos=69/71  (not ranked)                                                                
+  If the composite does not beat its best single component, the                                                                       
+  extra terms are not earning their place.                                                                                            
+                                                                                                                                      
+--- quintiles (look for MONOTONICITY) ---                                                                                             
+         n  meanRoM%  medRoM%   win%  worst%                                                                                          
+qt                                                                                                                                    
+1   2586.0      2.09     9.66  61.06 -255.26                                                                                          
+2   2530.0      3.53    11.70  62.81 -252.54                                                                                          
+3   2519.0      6.04    14.44  66.34 -218.48                                                                                          
+4   2526.0      7.20    14.27  67.14 -261.93                                                                                          
+5   2553.0      9.92    17.70  69.21 -317.57                                                                                          
+                                                                                                                                      
+--- TIMING vs SELECTION ---                                                                                                           
+  between-expiry sd of mean RoM :  11.41%                                                                                             
+  average within-expiry sd      :  32.54%                                                                                             
+  best expiry +25.3%   worst -36.5%   spread 61.8%                                                                                    
+  corr(universe_vrp, expiry mean RoM) = -0.022   n=71                                                                                 
+  A strong positive here means WHEN to be short vol matters more                                                                      
+  than WHICH name -- and the timing gate is worth more than any                                                                       
+  amount of cross-sectional refinement.                                                                                               
+                                                                                                                                      
+--- realised P&L shape ---                                                                                                            
+  mean   +9.8%  median  +30.5%  p05  -140.2%  worst   -712.1%  skew -1.84                                                             
+  losing > 100% of credit: 1170 of 12714                                                                                              
+                                                                                                                                      
+================================================================================                                                      
+  GATED  n=6,663  expiries=71  symbols=293                                                                                            
+================================================================================                                                      
+                                                                                                                                      
+--- per-expiry rank IC ---                                                                                                            
+  2020-10-29  n= 76  IC=+0.124  win%= 78.9  meanRoM=+17.16%                                                                           
+  2020-11-26  n= 13  IC=+0.753  win%= 61.5  meanRoM= +1.95%                                                                           
+  2020-12-31  n=123  IC=+0.003  win%= 65.0  meanRoM= +6.38%                                                                           
+  2021-01-28  n= 59  IC=+0.123  win%= 86.4  meanRoM=+20.68%                                                                           
+  2021-02-25  n= 12  IC=-0.014  win%= 75.0  meanRoM=+15.08%                                                                           
+  2021-03-25  n= 89  IC=+0.210  win%= 78.7  meanRoM=+19.43%                                                                           
+  2021-04-29  n=106  IC=+0.181  win%= 78.3  meanRoM= +8.79%                                                                           
+  2021-05-27  n= 22  IC=-0.125  win%= 63.6  meanRoM= +1.12%                                                                           
+  2021-06-24  n= 55  IC=+0.063  win%= 70.9  meanRoM=+11.83%                                                                           
+  2021-07-29  n= 81  IC=+0.205  win%= 76.5  meanRoM= +9.18%                                                                           
+  2021-08-26  n= 16  IC=+0.476  win%= 56.2  meanRoM= +1.86%                                                                           
+  2021-09-30  n=153  IC=+0.124  win%= 54.2  meanRoM= -9.36%                                                                           
+  2021-10-28  n= 67  IC=+0.143  win%= 77.6  meanRoM=+16.68%                                                                           
+  2021-11-25  n= 20  IC=+0.179  win%= 90.0  meanRoM=+27.79%                                                                           
+  2021-12-30  n=172  IC=+0.083  win%= 56.4  meanRoM= +2.66%                                                                           
+  2022-01-27  n= 83  IC=-0.060  win%= 72.3  meanRoM= +8.54%                                                                           
+  2022-02-24  n= 23  IC=+0.125  win%= 17.4  meanRoM=-24.12%                                                                           
+  2022-03-31  n=181  IC=+0.366  win%= 67.4  meanRoM= +7.32%                                                                           
+  2022-04-28  n=118  IC=+0.123  win%= 80.5  meanRoM=+18.03%                                                                           
+  2022-05-26  n= 98  IC=+0.281  win%= 36.7  meanRoM=-13.20%                                                                           
+  2022-06-30  n=168  IC=+0.133  win%= 82.1  meanRoM=+16.56%                                                                           
+  2022-07-28  n= 73  IC=+0.033  win%= 46.6  meanRoM= -3.81%                                                                           
+  2022-08-25  n= 34  IC=+0.198  win%= 67.6  meanRoM=+13.88%                                                                           
+  2022-09-29  n=176  IC=+0.111  win%= 75.6  meanRoM=+13.07%                                                                           
+  2022-10-27  n= 84  IC=+0.255  win%= 85.7  meanRoM=+24.35%                                                                           
+  2022-11-24  n= 47  IC=+0.125  win%= 70.2  meanRoM=+13.21%                                                                           
+  2022-12-29  n=183  IC=+0.011  win%= 82.5  meanRoM=+15.71%                                                                           
+  2023-01-25  n= 96  IC=+0.200  win%= 74.0  meanRoM=+13.42%                                                                           
+  2023-02-23  n= 17  IC=+0.029  win%= 64.7  meanRoM= +6.10%                                                                           
+  2023-03-29  n=170  IC=+0.017  win%= 69.4  meanRoM=+11.16%                                                                           
+  2023-04-27  n= 85  IC=+0.088  win%= 70.6  meanRoM=+12.89%                                                                           
+  2023-05-25  n= 26  IC=-0.143  win%= 76.9  meanRoM=+12.29%                                                                           
+  2023-06-29  n=152  IC=+0.204  win%= 60.5  meanRoM= -3.60%                                                                           
+  2023-07-27  n= 99  IC=-0.140  win%= 66.7  meanRoM= +9.75%                                                                           
+  2023-08-31  n= 58  IC=+0.147  win%= 72.4  meanRoM= +6.86%                                                                           
+  2023-09-28  n=136  IC=+0.306  win%= 77.2  meanRoM=+17.75%                                                                           
+  2023-10-26  n= 93  IC=+0.145  win%= 65.6  meanRoM=+11.17%                                                                           
+  2023-11-30  n= 53  IC=-0.075  win%= 49.1  meanRoM= -8.77%                                                                           
+  2023-12-28  n=136  IC=+0.138  win%= 39.0  meanRoM=-21.62%                                                                           
+  2024-01-25  n= 93  IC=+0.044  win%= 71.0  meanRoM= +9.41%                                                                           
+  2024-02-29  n= 49  IC=+0.091  win%= 71.4  meanRoM= +7.83%                                                                           
+  2024-03-28  n=125  IC=+0.275  win%= 76.8  meanRoM=+17.69%                                                                           
+  2024-04-25  n=112  IC=-0.059  win%= 49.1  meanRoM= -7.57%                                                                           
+  2024-05-30  n= 22  IC=-0.084  win%= 77.3  meanRoM=+16.85%                                                                           
+  2024-06-27  n=121  IC=+0.237  win%= 76.0  meanRoM=+14.82%                                                                           
+  2024-07-25  n= 95  IC=+0.172  win%= 69.5  meanRoM=+12.15%                                                                           
+  2024-08-29  n= 43  IC=+0.245  win%= 67.4  meanRoM= +6.35%                                                                           
+  2024-09-26  n=152  IC=+0.058  win%= 61.2  meanRoM= +5.11%                                                                           
+  2024-10-31  n= 74  IC=-0.170  win%= 43.2  meanRoM= -8.38%                                                                           
+  2024-11-28  n= 40  IC=-0.114  win%= 72.5  meanRoM=+13.57%                                                                           
+  2024-12-26  n=132  IC=-0.003  win%= 78.0  meanRoM=+12.46%                                                                           
+  2025-01-30  n= 91  IC=+0.198  win%= 41.8  meanRoM= -7.48%                                                                           
+  2025-02-27  n= 32  IC=+0.097  win%= 59.4  meanRoM= -5.86%                                                                           
+  2025-03-27  n=171  IC=+0.140  win%= 69.0  meanRoM= +8.38%                                                                           
+  2025-04-24  n=152  IC=+0.056  win%= 53.3  meanRoM= -2.02%                                                                           
+  2025-05-29  n= 24  IC=+0.154  win%= 70.8  meanRoM= +7.68%                                                                           
+  2025-06-26  n=139  IC=+0.070  win%= 83.5  meanRoM=+17.24%                                                                           
+  2025-07-31  n= 90  IC=+0.017  win%= 55.6  meanRoM= +4.47%                                                                           
+  2025-08-28  n= 38  IC=+0.486  win%= 68.4  meanRoM=+10.11%                                                                           
+  2025-09-30  n=200  IC=+0.023  win%= 63.0  meanRoM= +7.00%                                                                           
+  2025-10-28  n=133  IC=+0.005  win%= 81.2  meanRoM=+15.08%                                                                           
+  2025-11-25  n= 45  IC=-0.020  win%= 66.7  meanRoM= +4.16%                                                                           
+  2025-12-30  n=199  IC=+0.009  win%= 69.3  meanRoM= +6.24%                                                                           
+  2026-01-27  n=121  IC=-0.104  win%= 43.0  meanRoM=-11.34%                                                                           
+  2026-02-24  n= 26  IC=+0.067  win%= 57.7  meanRoM=-15.36%                                                                           
+  2026-03-30  n=200  IC=+0.084  win%= 24.0  meanRoM=-36.81%                                                                           
+  2026-04-28  n=147  IC=+0.231  win%= 42.2  meanRoM=-11.63%                                                                           
+  2026-05-26  n= 23  IC=-0.029  win%= 82.6  meanRoM=+20.23%                                                                           
+  2026-06-30  n=182  IC=-0.097  win%= 65.4  meanRoM= +7.98%                                                                           
+  2026-07-28  n=108  IC=+0.059  win%= 72.2  meanRoM=+12.20%                                                                           
+  2026-08-25  n= 31  IC=-0.036  win%= 90.3  meanRoM=+18.94%                                                                           
+                                                                                                                                      
+  mean IC +0.1021  sd 0.156  t +5.52  periods 71                                                                                      
+  |t|>2 needed to distinguish from zero; with 71 periods                                                                              
+  the detectable IC at t=2 is about +0.037                                                                                            
+                                                                                                                                      
+--- component standalone IC ---                                                                                                       
+  ev_per_margin          IC=+0.2713  t=+13.33  pos=68/71                                                                              
+  vrp_z                  IC=+0.0167  t=+0.98  pos=37/71                                                                               
+  ts_slope               IC=+0.0244  t=+0.64  pos=29/56                                                                               
+  gamma_score            IC=-0.0392  t=-2.45  pos=29/71                                                                               
+  trend_eff              IC=+0.0378  t=+2.30  pos=44/71                                                                               
+  liquidity              IC=-0.0641  t=-3.74  pos=25/71                                                                               
+  score                  IC=+0.1021  t=+5.52  pos=55/71  <-- composite                                                                
+  pop                    IC=+0.2716  t=+13.46  pos=68/71  (not ranked)                                                                
+  iv_rank                IC=+0.0912  t=+4.88  pos=54/71  (not ranked)                                                                 
+  tfr                    IC=+0.0070  t=+0.49  pos=38/71  (not ranked)                                                                 
+  cushion_net            IC=+0.2723  t=+13.31  pos=67/71  (not ranked)                                                                
+  cvar05_per_margin      IC=+0.2441  t=+12.89  pos=68/71  (not ranked)                                                                
+  If the composite does not beat its best single component, the                                                                       
+  extra terms are not earning their place.                                                                                            
+                                                                                                                                      
+--- quintiles (look for MONOTONICITY) ---                                                                                             
+         n  meanRoM%  medRoM%   win%  worst%                                                                                          
+qt                                                                                                                                    
+1   1372.0      1.60     9.96  61.15 -255.26                                                                                          
+2   1311.0      4.65    12.41  64.45 -226.12                                                                                          
+3   1321.0      4.50    13.94  64.65 -256.27                                                                                          
+4   1313.0      7.77    14.65  68.24 -235.86                                                                                          
+5   1346.0      9.35    17.38  68.95 -317.57                                                                                          
+                                                                                                                                      
+--- TIMING vs SELECTION ---                                                                                                           
+  between-expiry sd of mean RoM :  11.95%                                                                                             
+  average within-expiry sd      :  31.25%                                                                                             
+  best expiry +27.8%   worst -36.8%   spread 64.6%                                                                                    
+  corr(universe_vrp, expiry mean RoM) = -0.005   n=71                                                                                 
+  A strong positive here means WHEN to be short vol matters more                                                                      
+  than WHICH name -- and the timing gate is worth more than any                                                                       
+  amount of cross-sectional refinement.                                                                                               
+                                                                                                                                      
+--- realised P&L shape ---                                                                                                            
+  mean  +10.0%  median  +31.1%  p05  -139.1%  worst   -712.1%  skew -1.97                                                             
+  losing > 100% of credit: 626 of 6663                                                                                                
+                                                                                                                                      
+################################################################################                                                      
+#  TIMING GATE: 9 of 71 expiries with universe_vrp above median                                                                       
+################################################################################                                                      
+                                                                                                                                      
+================================================================================                                                      
+  ALL  n=1,073  expiries=9  symbols=269                                                                                               
+================================================================================                                                      
+                                                                                                                                      
+--- per-expiry rank IC ---                                                                                                            
+  2022-03-31  n=181  IC=+0.366  win%= 67.4  meanRoM= +7.32%                                                                           
+  2023-03-29  n=170  IC=+0.017  win%= 69.4  meanRoM=+11.16%                                                                           
+  2023-07-27  n= 99  IC=-0.140  win%= 66.7  meanRoM= +9.75%                                                                           
+  2023-10-26  n= 93  IC=+0.145  win%= 65.6  meanRoM=+11.17%                                                                           
+  2024-02-29  n= 49  IC=+0.091  win%= 71.4  meanRoM= +7.83%                                                                           
+  2024-08-29  n= 43  IC=+0.245  win%= 67.4  meanRoM= +6.35%                                                                           
+  2025-08-28  n= 38  IC=+0.486  win%= 68.4  meanRoM=+10.11%                                                                           
+  2025-09-30  n=200  IC=+0.023  win%= 63.0  meanRoM= +7.00%                                                                           
+  2026-03-30  n=200  IC=+0.084  win%= 24.0  meanRoM=-36.81%                                                                           
+                                                                                                                                      
+  mean IC +0.1462  sd 0.192  t +2.29  periods 9                                                                                       
+  |t|>2 needed to distinguish from zero; with 9 periods                                                                               
+  the detectable IC at t=2 is about +0.128                                                                                            
+                                                                                                                                      
+--- component standalone IC ---                                                                                                       
+  ev_per_margin          IC=+0.2337  t=+3.96  pos=9/9                                                                                 
+  vrp_z                  IC=+0.0748  t=+1.19  pos=4/9                                                                                 
+  ts_slope               IC=-0.0197  t=-0.21  pos=3/7                                                                                 
+  gamma_score            IC=+0.0180  t=+0.72  pos=5/9                                                                                 
+  trend_eff              IC=+0.0614  t=+1.44  pos=7/9                                                                                 
+  liquidity              IC=-0.0918  t=-1.97  pos=2/9                                                                                 
+  score                  IC=+0.1462  t=+2.29  pos=8/9  <-- composite                                                                  
+  pop                    IC=+0.2408  t=+4.06  pos=9/9  (not ranked)                                                                   
+  iv_rank                IC=+0.0854  t=+1.86  pos=6/9  (not ranked)                                                                   
+  tfr                    IC=-0.0055  t=-0.16  pos=5/9  (not ranked)                                                                   
+  cushion_net            IC=+0.2382  t=+3.97  pos=9/9  (not ranked)                                                                   
+  cvar05_per_margin      IC=+0.2027  t=+3.41  pos=8/9  (not ranked)                                                                   
+  If the composite does not beat its best single component, the                                                                       
+  extra terms are not earning their place.                                                                                            
+                                                                                                                                      
+--- quintiles (look for MONOTONICITY) ---                                                                                             
+        n  meanRoM%  medRoM%   win%  worst%                                                                                           
+qt                                                                                                                                    
+1   219.0     -5.26     1.98  53.42 -125.70                                                                                           
+2   211.0     -0.28     8.86  60.66 -226.12                                                                                           
+3   214.0     -1.66     7.41  55.61 -134.36                                                                                           
+4   214.0      4.48    12.62  63.08 -150.26                                                                                           
+5   215.0      4.24    11.53  61.40 -130.27                                                                                           
+                                                                                                                                      
+--- TIMING vs SELECTION ---                                                                                                           
+  between-expiry sd of mean RoM :  15.32%                                                                                             
+  average within-expiry sd      :  31.23%                                                                                             
+  best expiry +11.2%   worst -36.8%   spread 48.0%                                                                                    
+  corr(universe_vrp, expiry mean RoM) = -0.037   n=9                                                                                  
+  A strong positive here means WHEN to be short vol matters more                                                                      
+  than WHICH name -- and the timing gate is worth more than any                                                                       
+  amount of cross-sectional refinement.                                                                                               
+                                                                                                                                      
+--- realised P&L shape ---                                                                                                            
+  mean   -2.5%  median  +18.3%  p05  -173.9%  worst   -490.5%  skew -1.48                                                             
+  losing > 100% of credit: 136 of 1073                                                                                                75 completed expiries: 2020-06-25 .. 2026-08-25
+stop: hold to expiry   model: ewma
+
+2020-06-25  entry=2020-06-15  dte=10  h=7td  n=135  ca_excluded=0
+
+2020-07-30  entry=2020-06-25  dte=35  h=23td  n=139  ca_excluded=1
+
+2020-08-27  entry=2020-07-23  dte=35  h=23td  n=115  ca_excluded=1
+
+2020-09-24  entry=2020-08-20  dte=35  h=23td  n=110  ca_excluded=1
+
+2020-10-29  entry=2020-09-24  dte=35  h=23td  n=131  ca_excluded=0
+
+2020-11-26  entry=2020-10-22  dte=35  h=23td  n=111  ca_excluded=0
+
+2020-12-31  entry=2020-11-26  dte=35  h=23td  n=136  ca_excluded=0
+
+2021-01-28  entry=2020-12-24  dte=35  h=23td  n=130  ca_excluded=0
+
+2021-02-25  entry=2021-01-21  dte=35  h=23td  n=135  ca_excluded=0
+
+2021-03-25  entry=2021-02-18  dte=35  h=23td  n=130  ca_excluded=0
+
+2021-04-29  entry=2021-03-25  dte=35  h=23td  n=154  ca_excluded=0
+
+2021-05-27  entry=2021-04-22  dte=35  h=23td  n=127  ca_excluded=1
+
+2021-06-24  entry=2021-05-20  dte=35  h=23td  n=140  ca_excluded=2
+
+2021-07-29  entry=2021-06-24  dte=35  h=23td  n=157  ca_excluded=1
+
+2021-08-26  entry=2021-07-22  dte=35  h=23td  n=139  ca_excluded=1
+
+2021-09-30  entry=2021-08-26  dte=35  h=23td  n=163  ca_excluded=1
+
+2021-10-28  entry=2021-09-23  dte=35  h=23td  n=171  ca_excluded=3
+
+2021-11-25  entry=2021-10-21  dte=35  h=23td  n=175  ca_excluded=2
+
+2021-12-30  entry=2021-11-25  dte=35  h=23td  n=187  ca_excluded=1
+
+2022-01-27  entry=2021-12-23  dte=35  h=23td  n=175  ca_excluded=1
+
+2022-02-24  entry=2022-01-20  dte=35  h=23td  n=184  ca_excluded=0
+
+2022-03-31  entry=2022-02-24  dte=35  h=23td  n=198  ca_excluded=0
+
+2022-04-28  entry=2022-03-24  dte=35  h=23td  n=186  ca_excluded=1
+
+2022-05-26  entry=2022-04-21  dte=35  h=23td  n=189  ca_excluded=0
+
+2022-06-30  entry=2022-05-26  dte=35  h=23td  n=198  ca_excluded=2
+
+2022-07-28  entry=2022-06-23  dte=35  h=23td  n=180  ca_excluded=2
+
+2022-08-25  entry=2022-07-21  dte=35  h=23td  n=183  ca_excluded=2
+
+2022-09-29  entry=2022-08-25  dte=35  h=23td  n=195  ca_excluded=4
+
+2022-10-27  entry=2022-09-22  dte=35  h=23td  n=186  ca_excluded=3
+
+2022-11-24  entry=2022-10-20  dte=35  h=23td  n=181  ca_excluded=1
+
+2022-12-29  entry=2022-11-24  dte=35  h=23td  n=193  ca_excluded=0
+
+2023-01-25  entry=2022-12-21  dte=35  h=23td  n=183  ca_excluded=0
+
+2023-02-23  entry=2023-01-19  dte=35  h=23td  n=182  ca_excluded=0
+
+2023-03-29  entry=2023-02-22  dte=35  h=23td  n=191  ca_excluded=1
+
+2023-04-27  entry=2023-03-23  dte=35  h=23td  n=179  ca_excluded=0
+
+2023-05-25  entry=2023-04-20  dte=35  h=23td  n=174  ca_excluded=0
+
+2023-06-29  entry=2023-05-25  dte=35  h=23td  n=188  ca_excluded=1
+
+2023-07-27  entry=2023-06-22  dte=35  h=23td  n=186  ca_excluded=1
+
+2023-08-31  entry=2023-07-27  dte=35  h=23td  n=185  ca_excluded=0
+
+2023-09-28  entry=2023-08-24  dte=35  h=23td  n=183  ca_excluded=4
+
+2023-10-26  entry=2023-09-21  dte=35  h=23td  n=176  ca_excluded=2
+
+2023-11-30  entry=2023-10-26  dte=35  h=23td  n=185  ca_excluded=0
+
+2023-12-28  entry=2023-11-23  dte=35  h=23td  n=179  ca_excluded=0
+
+2024-01-25  entry=2023-12-21  dte=35  h=23td  n=183  ca_excluded=2
+
+2024-02-29  entry=2024-01-25  dte=35  h=23td  n=184  ca_excluded=0
+
+2024-03-28  entry=2024-02-22  dte=35  h=23td  n=179  ca_excluded=1
+
+2024-04-25  entry=2024-03-21  dte=35  h=23td  n=178  ca_excluded=1
+
+2024-05-30  entry=2024-04-25  dte=35  h=23td  n=182  ca_excluded=1
+
+2024-06-27  entry=2024-05-23  dte=35  h=23td  n=182  ca_excluded=2
+
+2024-07-25  entry=2024-06-20  dte=35  h=23td  n=179  ca_excluded=2
+
+2024-08-29  entry=2024-07-25  dte=35  h=23td  n=181  ca_excluded=1
+
+2024-09-26  entry=2024-08-22  dte=35  h=23td  n=179  ca_excluded=0
+
+2024-10-31  entry=2024-09-26  dte=35  h=23td  n=180  ca_excluded=2
+
+2024-11-28  entry=2024-10-24  dte=35  h=23td  n=176  ca_excluded=3
+
+2024-12-26  entry=2024-11-21  dte=35  h=23td  n=172  ca_excluded=2
+
+2025-01-30  entry=2024-12-26  dte=35  h=23td  n=222  ca_excluded=3
+
+2025-02-27  entry=2025-01-23  dte=35  h=23td  n=221  ca_excluded=1
+
+2025-03-27  entry=2025-02-20  dte=35  h=23td  n=208  ca_excluded=0
+
+2025-04-24  entry=2025-03-20  dte=35  h=23td  n=214  ca_excluded=1
+
+2025-05-29  entry=2025-04-24  dte=35  h=23td  n=219  ca_excluded=4
+
+2025-06-26  entry=2025-05-22  dte=35  h=23td  n=210  ca_excluded=3
+
+2025-07-31  entry=2025-06-26  dte=35  h=23td  n=222  ca_excluded=4
+
+2025-08-28  entry=2025-07-24  dte=35  h=23td  n=216  ca_excluded=4
+
+2025-09-30  entry=2025-08-26  dte=35  h=23td  n=210  ca_excluded=2
+
+2025-10-28  entry=2025-09-23  dte=35  h=23td  n=210  ca_excluded=0
+
+2025-11-25  entry=2025-10-21  dte=35  h=23td  n=210  ca_excluded=1
+
+2025-12-30  entry=2025-11-25  dte=35  h=23td  n=211  ca_excluded=4
+
+2026-01-27  entry=2025-12-23  dte=35  h=23td  n=206  ca_excluded=3
+
+2026-02-24  entry=2026-01-20  dte=35  h=23td  n=209  ca_excluded=0
+
+2026-03-30  entry=2026-02-23  dte=35  h=23td  n=207  ca_excluded=1
+
+2026-04-28  entry=2026-03-24  dte=35  h=23td  n=205  ca_excluded=0
+
+2026-05-26  entry=2026-04-21  dte=35  h=23td  n=210  ca_excluded=1
+
+2026-06-30  entry=2026-05-26  dte=35  h=23td  n=211  ca_excluded=2
+
+2026-07-28  entry=2026-06-23  dte=35  h=23td  n=212  ca_excluded=0
+
+2026-08-25  entry=2026-07-21  dte=35  h=23td  n=209  ca_excluded=0
+
+gate pass: 6,663 / 12,714
+     4857  event in window
+     1993  confidence=low
+      268  only 7 strikes
+      223  only 6 strikes
+      179  only 5 strikes
+       80  traded_frac 0.00 < 0.3
+       77  only 4 strikes
+       31  traded_frac 0.20 < 0.3
+
+================================================================================
+  ALL  n=12,714  expiries=71  symbols=295
+================================================================================
+
+--- per-expiry rank IC ---
+  2020-10-29  n=128  IC=+0.095  win%= 75.0  meanRoM=+13.42%
+  2020-11-26  n=108  IC=+0.176  win%= 54.6  meanRoM= -0.62%
+  2020-12-31  n=134  IC=-0.011  win%= 67.2  meanRoM= +8.50%
+  2021-01-28  n=127  IC=+0.203  win%= 87.4  meanRoM=+23.25%
+  2021-02-25  n=132  IC=+0.142  win%= 67.4  meanRoM= +8.01%
+  2021-03-25  n=127  IC=+0.201  win%= 79.5  meanRoM=+20.05%
+  2021-04-29  n=152  IC=+0.192  win%= 78.3  meanRoM= +9.44%
+  2021-05-27  n=124  IC=+0.050  win%= 60.5  meanRoM= +6.07%
+  2021-06-24  n=136  IC=+0.095  win%= 83.1  meanRoM=+22.56%
+  2021-07-29  n=154  IC=+0.177  win%= 66.9  meanRoM= +5.26%
+  2021-08-26  n=136  IC=+0.326  win%= 64.7  meanRoM= +5.06%
+  2021-09-30  n=160  IC=+0.086  win%= 55.6  meanRoM= -7.34%
+  2021-10-28  n=166  IC=+0.167  win%= 80.7  meanRoM=+18.22%
+  2021-11-25  n=171  IC=+0.220  win%= 87.1  meanRoM=+25.28%
+  2021-12-30  n=184  IC=+0.049  win%= 57.1  meanRoM= +2.89%
+  2022-01-27  n=172  IC=-0.004  win%= 70.3  meanRoM= +8.58%
+  2022-02-24  n=182  IC=+0.131  win%= 38.5  meanRoM=-12.17%
+  2022-03-31  n=196  IC=+0.346  win%= 68.4  meanRoM= +8.82%
+  2022-04-28  n=182  IC=+0.055  win%= 80.8  meanRoM=+18.61%
+  2022-05-26  n=186  IC=+0.192  win%= 43.5  meanRoM= -8.02%
+  2022-06-30  n=193  IC=+0.119  win%= 81.3  meanRoM=+17.44%
+  2022-07-28  n=175  IC=+0.065  win%= 50.9  meanRoM= -5.95%
+  2022-08-25  n=178  IC=+0.331  win%= 69.1  meanRoM=+12.08%
+  2022-09-29  n=188  IC=+0.076  win%= 76.6  meanRoM=+14.42%
+  2022-10-27  n=181  IC=+0.215  win%= 89.0  meanRoM=+25.02%
+  2022-11-24  n=178  IC=+0.109  win%= 73.0  meanRoM=+13.67%
+  2022-12-29  n=191  IC=+0.009  win%= 82.2  meanRoM=+16.04%
+  2023-01-25  n=179  IC=+0.225  win%= 77.1  meanRoM=+14.17%
+  2023-02-23  n=178  IC=-0.003  win%= 59.0  meanRoM= +2.19%
+  2023-03-29  n=186  IC=+0.004  win%= 71.0  meanRoM=+12.58%
+  2023-04-27  n=177  IC=+0.085  win%= 72.3  meanRoM=+12.40%
+  2023-05-25  n=172  IC=+0.036  win%= 61.6  meanRoM= +4.07%
+  2023-06-29  n=184  IC=+0.177  win%= 58.7  meanRoM= -3.06%
+  2023-07-27  n=182  IC=-0.004  win%= 68.7  meanRoM= +9.57%
+  2023-08-31  n=182  IC=-0.037  win%= 73.1  meanRoM= +9.63%
+  2023-09-28  n=177  IC=+0.330  win%= 79.1  meanRoM=+17.56%
+  2023-10-26  n=172  IC=+0.131  win%= 64.0  meanRoM= +8.61%
+  2023-11-30  n=183  IC=+0.070  win%= 37.7  meanRoM=-22.99%
+  2023-12-28  n=177  IC=+0.073  win%= 44.6  meanRoM=-16.46%
+  2024-01-25  n=179  IC=-0.001  win%= 69.3  meanRoM= +9.14%
+  2024-02-29  n=182  IC=+0.088  win%= 63.7  meanRoM= +4.22%
+  2024-03-28  n=176  IC=+0.238  win%= 77.3  meanRoM=+17.50%
+  2024-04-25  n=176  IC=-0.015  win%= 54.0  meanRoM= -3.47%
+  2024-05-30  n=179  IC=+0.157  win%= 68.7  meanRoM= +5.72%
+  2024-06-27  n=178  IC=+0.191  win%= 75.3  meanRoM=+13.56%
+  2024-07-25  n=173  IC=+0.200  win%= 65.9  meanRoM= +9.33%
+  2024-08-29  n=176  IC=+0.283  win%= 65.3  meanRoM= +7.11%
+  2024-09-26  n=177  IC=+0.051  win%= 65.0  meanRoM= +7.20%
+  2024-10-31  n=177  IC=-0.169  win%= 41.2  meanRoM=-14.33%
+  2024-11-28  n=172  IC=-0.049  win%= 74.4  meanRoM=+12.75%
+  2024-12-26  n=169  IC=+0.013  win%= 78.7  meanRoM=+14.32%
+  2025-01-30  n=217  IC=+0.131  win%= 43.8  meanRoM=-13.30%
+  2025-02-27  n=214  IC=+0.100  win%= 46.7  meanRoM= -6.09%
+  2025-03-27  n=202  IC=+0.080  win%= 70.3  meanRoM= +9.26%
+  2025-04-24  n=209  IC=+0.041  win%= 52.6  meanRoM= -2.00%
+  2025-05-29  n=209  IC=+0.086  win%= 73.7  meanRoM=+11.32%
+  2025-06-26  n=202  IC=+0.133  win%= 81.7  meanRoM=+17.80%
+  2025-07-31  n=213  IC=-0.040  win%= 56.8  meanRoM= +2.09%
+  2025-08-28  n=206  IC=+0.243  win%= 60.2  meanRoM= +4.73%
+  2025-09-30  n=204  IC=+0.018  win%= 63.7  meanRoM= +7.25%
+  2025-10-28  n=206  IC=+0.001  win%= 76.2  meanRoM=+11.51%
+  2025-11-25  n=204  IC=-0.008  win%= 68.6  meanRoM= +8.78%
+  2025-12-30  n=201  IC=+0.014  win%= 69.2  meanRoM= +6.22%
+  2026-01-27  n=197  IC=+0.002  win%= 44.7  meanRoM=-10.44%
+  2026-02-24  n=203  IC=+0.200  win%= 61.6  meanRoM= -1.40%
+  2026-03-30  n=202  IC=+0.072  win%= 24.3  meanRoM=-36.52%
+  2026-04-28  n=198  IC=+0.252  win%= 46.0  meanRoM=-11.44%
+  2026-05-26  n=204  IC=+0.181  win%= 71.6  meanRoM=+12.49%
+  2026-06-30  n=204  IC=-0.097  win%= 66.2  meanRoM= +7.96%
+  2026-07-28  n=209  IC=+0.003  win%= 63.2  meanRoM= +5.81%
+  2026-08-25  n=206  IC=+0.175  win%= 70.4  meanRoM=+10.19%
+
+  mean IC +0.1052  sd 0.107  t +8.26  periods 71
+  |t|>2 needed to distinguish from zero; with 71 periods
+  the detectable IC at t=2 is about +0.025
+
+--- component standalone IC ---
+  ev_per_margin          IC=+0.2948  t=+17.99  pos=69/71
+  vrp_z                  IC=+0.0105  t=+1.10  pos=41/71
+  ts_slope               IC=+0.0227  t=+0.89  pos=39/69
+  gamma_score            IC=-0.0277  t=-3.19  pos=27/71
+  trend_eff              IC=+0.0486  t=+4.31  pos=51/71
+  liquidity              IC=-0.0862  t=-6.22  pos=17/71
+  score                  IC=+0.1052  t=+8.26  pos=59/71  <-- composite
+  pop                    IC=+0.2958  t=+18.32  pos=70/71  (not ranked)
+  iv_rank                IC=+0.0597  t=+4.95  pos=50/71  (not ranked)
+  tfr                    IC=+0.0107  t=+1.07  pos=41/71  (not ranked)
+  cushion_net            IC=+0.2952  t=+18.22  pos=69/71  (not ranked)
+  cvar05_per_margin      IC=+0.2707  t=+16.30  pos=69/71  (not ranked)
+  If the composite does not beat its best single component, the
+  extra terms are not earning their place.
+
+--- quintiles (look for MONOTONICITY) ---
+         n  meanRoM%  medRoM%   win%  worst%
+qt                                          
+1   2586.0      2.09     9.66  61.06 -255.26
+2   2530.0      3.53    11.70  62.81 -252.54
+3   2519.0      6.04    14.44  66.34 -218.48
+4   2526.0      7.20    14.27  67.14 -261.93
+5   2553.0      9.92    17.70  69.21 -317.57
+
+--- TIMING vs SELECTION ---
+  between-expiry sd of mean RoM :  11.41%
+  average within-expiry sd      :  32.54%
+  best expiry +25.3%   worst -36.5%   spread 61.8%
+  corr(universe_vrp, expiry mean RoM) = -0.022   n=71
+  A strong positive here means WHEN to be short vol matters more
+  than WHICH name -- and the timing gate is worth more than any
+  amount of cross-sectional refinement.
+
+--- realised P&L shape ---
+  mean   +9.8%  median  +30.5%  p05  -140.2%  worst   -712.1%  skew -1.84
+  losing > 100% of credit: 1170 of 12714
+
+================================================================================
+  GATED  n=6,663  expiries=71  symbols=293
+================================================================================
+
+--- per-expiry rank IC ---
+  2020-10-29  n= 76  IC=+0.124  win%= 78.9  meanRoM=+17.16%
+  2020-11-26  n= 13  IC=+0.753  win%= 61.5  meanRoM= +1.95%
+  2020-12-31  n=123  IC=+0.003  win%= 65.0  meanRoM= +6.38%
+  2021-01-28  n= 59  IC=+0.123  win%= 86.4  meanRoM=+20.68%
+  2021-02-25  n= 12  IC=-0.014  win%= 75.0  meanRoM=+15.08%
+  2021-03-25  n= 89  IC=+0.210  win%= 78.7  meanRoM=+19.43%
+  2021-04-29  n=106  IC=+0.181  win%= 78.3  meanRoM= +8.79%
+  2021-05-27  n= 22  IC=-0.125  win%= 63.6  meanRoM= +1.12%
+  2021-06-24  n= 55  IC=+0.063  win%= 70.9  meanRoM=+11.83%
+  2021-07-29  n= 81  IC=+0.205  win%= 76.5  meanRoM= +9.18%
+  2021-08-26  n= 16  IC=+0.476  win%= 56.2  meanRoM= +1.86%
+  2021-09-30  n=153  IC=+0.124  win%= 54.2  meanRoM= -9.36%
+  2021-10-28  n= 67  IC=+0.143  win%= 77.6  meanRoM=+16.68%
+  2021-11-25  n= 20  IC=+0.179  win%= 90.0  meanRoM=+27.79%
+  2021-12-30  n=172  IC=+0.083  win%= 56.4  meanRoM= +2.66%
+  2022-01-27  n= 83  IC=-0.060  win%= 72.3  meanRoM= +8.54%
+  2022-02-24  n= 23  IC=+0.125  win%= 17.4  meanRoM=-24.12%
+  2022-03-31  n=181  IC=+0.366  win%= 67.4  meanRoM= +7.32%
+  2022-04-28  n=118  IC=+0.123  win%= 80.5  meanRoM=+18.03%
+  2022-05-26  n= 98  IC=+0.281  win%= 36.7  meanRoM=-13.20%
+  2022-06-30  n=168  IC=+0.133  win%= 82.1  meanRoM=+16.56%
+  2022-07-28  n= 73  IC=+0.033  win%= 46.6  meanRoM= -3.81%
+  2022-08-25  n= 34  IC=+0.198  win%= 67.6  meanRoM=+13.88%
+  2022-09-29  n=176  IC=+0.111  win%= 75.6  meanRoM=+13.07%
+  2022-10-27  n= 84  IC=+0.255  win%= 85.7  meanRoM=+24.35%
+  2022-11-24  n= 47  IC=+0.125  win%= 70.2  meanRoM=+13.21%
+  2022-12-29  n=183  IC=+0.011  win%= 82.5  meanRoM=+15.71%
+  2023-01-25  n= 96  IC=+0.200  win%= 74.0  meanRoM=+13.42%
+  2023-02-23  n= 17  IC=+0.029  win%= 64.7  meanRoM= +6.10%
+  2023-03-29  n=170  IC=+0.017  win%= 69.4  meanRoM=+11.16%
+  2023-04-27  n= 85  IC=+0.088  win%= 70.6  meanRoM=+12.89%
+  2023-05-25  n= 26  IC=-0.143  win%= 76.9  meanRoM=+12.29%
+  2023-06-29  n=152  IC=+0.204  win%= 60.5  meanRoM= -3.60%
+  2023-07-27  n= 99  IC=-0.140  win%= 66.7  meanRoM= +9.75%
+  2023-08-31  n= 58  IC=+0.147  win%= 72.4  meanRoM= +6.86%
+  2023-09-28  n=136  IC=+0.306  win%= 77.2  meanRoM=+17.75%
+  2023-10-26  n= 93  IC=+0.145  win%= 65.6  meanRoM=+11.17%
+  2023-11-30  n= 53  IC=-0.075  win%= 49.1  meanRoM= -8.77%
+  2023-12-28  n=136  IC=+0.138  win%= 39.0  meanRoM=-21.62%
+  2024-01-25  n= 93  IC=+0.044  win%= 71.0  meanRoM= +9.41%
+  2024-02-29  n= 49  IC=+0.091  win%= 71.4  meanRoM= +7.83%
+  2024-03-28  n=125  IC=+0.275  win%= 76.8  meanRoM=+17.69%
+  2024-04-25  n=112  IC=-0.059  win%= 49.1  meanRoM= -7.57%
+  2024-05-30  n= 22  IC=-0.084  win%= 77.3  meanRoM=+16.85%
+  2024-06-27  n=121  IC=+0.237  win%= 76.0  meanRoM=+14.82%
+  2024-07-25  n= 95  IC=+0.172  win%= 69.5  meanRoM=+12.15%
+  2024-08-29  n= 43  IC=+0.245  win%= 67.4  meanRoM= +6.35%
+  2024-09-26  n=152  IC=+0.058  win%= 61.2  meanRoM= +5.11%
+  2024-10-31  n= 74  IC=-0.170  win%= 43.2  meanRoM= -8.38%
+  2024-11-28  n= 40  IC=-0.114  win%= 72.5  meanRoM=+13.57%
+  2024-12-26  n=132  IC=-0.003  win%= 78.0  meanRoM=+12.46%
+  2025-01-30  n= 91  IC=+0.198  win%= 41.8  meanRoM= -7.48%
+  2025-02-27  n= 32  IC=+0.097  win%= 59.4  meanRoM= -5.86%
+  2025-03-27  n=171  IC=+0.140  win%= 69.0  meanRoM= +8.38%
+  2025-04-24  n=152  IC=+0.056  win%= 53.3  meanRoM= -2.02%
+  2025-05-29  n= 24  IC=+0.154  win%= 70.8  meanRoM= +7.68%
+  2025-06-26  n=139  IC=+0.070  win%= 83.5  meanRoM=+17.24%
+  2025-07-31  n= 90  IC=+0.017  win%= 55.6  meanRoM= +4.47%
+  2025-08-28  n= 38  IC=+0.486  win%= 68.4  meanRoM=+10.11%
+  2025-09-30  n=200  IC=+0.023  win%= 63.0  meanRoM= +7.00%
+  2025-10-28  n=133  IC=+0.005  win%= 81.2  meanRoM=+15.08%
+  2025-11-25  n= 45  IC=-0.020  win%= 66.7  meanRoM= +4.16%
+  2025-12-30  n=199  IC=+0.009  win%= 69.3  meanRoM= +6.24%
+  2026-01-27  n=121  IC=-0.104  win%= 43.0  meanRoM=-11.34%
+  2026-02-24  n= 26  IC=+0.067  win%= 57.7  meanRoM=-15.36%
+  2026-03-30  n=200  IC=+0.084  win%= 24.0  meanRoM=-36.81%
+  2026-04-28  n=147  IC=+0.231  win%= 42.2  meanRoM=-11.63%
+  2026-05-26  n= 23  IC=-0.029  win%= 82.6  meanRoM=+20.23%
+  2026-06-30  n=182  IC=-0.097  win%= 65.4  meanRoM= +7.98%
+  2026-07-28  n=108  IC=+0.059  win%= 72.2  meanRoM=+12.20%
+  2026-08-25  n= 31  IC=-0.036  win%= 90.3  meanRoM=+18.94%
+
+  mean IC +0.1021  sd 0.156  t +5.52  periods 71
+  |t|>2 needed to distinguish from zero; with 71 periods
+  the detectable IC at t=2 is about +0.037
+
+--- component standalone IC ---
+  ev_per_margin          IC=+0.2713  t=+13.33  pos=68/71
+  vrp_z                  IC=+0.0167  t=+0.98  pos=37/71
+  ts_slope               IC=+0.0244  t=+0.64  pos=29/56
+  gamma_score            IC=-0.0392  t=-2.45  pos=29/71
+  trend_eff              IC=+0.0378  t=+2.30  pos=44/71
+  liquidity              IC=-0.0641  t=-3.74  pos=25/71
+  score                  IC=+0.1021  t=+5.52  pos=55/71  <-- composite
+  pop                    IC=+0.2716  t=+13.46  pos=68/71  (not ranked)
+  iv_rank                IC=+0.0912  t=+4.88  pos=54/71  (not ranked)
+  tfr                    IC=+0.0070  t=+0.49  pos=38/71  (not ranked)
+  cushion_net            IC=+0.2723  t=+13.31  pos=67/71  (not ranked)
+  cvar05_per_margin      IC=+0.2441  t=+12.89  pos=68/71  (not ranked)
+  If the composite does not beat its best single component, the
+  extra terms are not earning their place.
+
+--- quintiles (look for MONOTONICITY) ---
+         n  meanRoM%  medRoM%   win%  worst%
+qt                                          
+1   1372.0      1.60     9.96  61.15 -255.26
+2   1311.0      4.65    12.41  64.45 -226.12
+3   1321.0      4.50    13.94  64.65 -256.27
+4   1313.0      7.77    14.65  68.24 -235.86
+5   1346.0      9.35    17.38  68.95 -317.57
+
+--- TIMING vs SELECTION ---
+  between-expiry sd of mean RoM :  11.95%
+  average within-expiry sd      :  31.25%
+  best expiry +27.8%   worst -36.8%   spread 64.6%
+  corr(universe_vrp, expiry mean RoM) = -0.005   n=71
+  A strong positive here means WHEN to be short vol matters more
+  than WHICH name -- and the timing gate is worth more than any
+  amount of cross-sectional refinement.
+
+--- realised P&L shape ---
+  mean  +10.0%  median  +31.1%  p05  -139.1%  worst   -712.1%  skew -1.97
+  losing > 100% of credit: 626 of 6663
+
+################################################################################
+#  TIMING GATE: 9 of 71 expiries with universe_vrp above median
+################################################################################
+
+================================================================================
+  ALL  n=1,073  expiries=9  symbols=269
+================================================================================
+
+--- per-expiry rank IC ---
+  2022-03-31  n=181  IC=+0.366  win%= 67.4  meanRoM= +7.32%
+  2023-03-29  n=170  IC=+0.017  win%= 69.4  meanRoM=+11.16%
+  2023-07-27  n= 99  IC=-0.140  win%= 66.7  meanRoM= +9.75%
+  2023-10-26  n= 93  IC=+0.145  win%= 65.6  meanRoM=+11.17%
+  2024-02-29  n= 49  IC=+0.091  win%= 71.4  meanRoM= +7.83%
+  2024-08-29  n= 43  IC=+0.245  win%= 67.4  meanRoM= +6.35%
+  2025-08-28  n= 38  IC=+0.486  win%= 68.4  meanRoM=+10.11%
+  2025-09-30  n=200  IC=+0.023  win%= 63.0  meanRoM= +7.00%
+  2026-03-30  n=200  IC=+0.084  win%= 24.0  meanRoM=-36.81%
+
+  mean IC +0.1462  sd 0.192  t +2.29  periods 9
+  |t|>2 needed to distinguish from zero; with 9 periods
+  the detectable IC at t=2 is about +0.128
+
+--- component standalone IC ---
+  ev_per_margin          IC=+0.2337  t=+3.96  pos=9/9
+  vrp_z                  IC=+0.0748  t=+1.19  pos=4/9
+  ts_slope               IC=-0.0197  t=-0.21  pos=3/7
+  gamma_score            IC=+0.0180  t=+0.72  pos=5/9
+  trend_eff              IC=+0.0614  t=+1.44  pos=7/9
+  liquidity              IC=-0.0918  t=-1.97  pos=2/9
+  score                  IC=+0.1462  t=+2.29  pos=8/9  <-- composite
+  pop                    IC=+0.2408  t=+4.06  pos=9/9  (not ranked)
+  iv_rank                IC=+0.0854  t=+1.86  pos=6/9  (not ranked)
+  tfr                    IC=-0.0055  t=-0.16  pos=5/9  (not ranked)
+  cushion_net            IC=+0.2382  t=+3.97  pos=9/9  (not ranked)
+  cvar05_per_margin      IC=+0.2027  t=+3.41  pos=8/9  (not ranked)
+  If the composite does not beat its best single component, the
+  extra terms are not earning their place.
+
+--- quintiles (look for MONOTONICITY) ---
+        n  meanRoM%  medRoM%   win%  worst%
+qt                                         
+1   219.0     -5.26     1.98  53.42 -125.70
+2   211.0     -0.28     8.86  60.66 -226.12
+3   214.0     -1.66     7.41  55.61 -134.36
+4   214.0      4.48    12.62  63.08 -150.26
+5   215.0      4.24    11.53  61.40 -130.27
+
+--- TIMING vs SELECTION ---
+  between-expiry sd of mean RoM :  15.32%
+  average within-expiry sd      :  31.23%
+  best expiry +11.2%   worst -36.8%   spread 48.0%
+  corr(universe_vrp, expiry mean RoM) = -0.037   n=9
+  A strong positive here means WHEN to be short vol matters more
+  than WHICH name -- and the timing gate is worth more than any
+  amount of cross-sectional refinement.
+
+--- realised P&L shape ---
+  mean   -2.5%  median  +18.3%  p05  -173.9%  worst   -490.5%  skew -1.48
+  losing > 100% of credit: 136 of 1073
+
+wrote bt35.csv (12,714 rows)

@@ -166,18 +166,33 @@ function sortTbl(th){
   const idx=Array.from(th.parentNode.children).indexOf(th);
   const asc=th.dataset.asc!=='1';th.dataset.asc=asc?'1':'0';
   const rows=Array.from(tbl.querySelectorAll('tbody tr'));
+  // Numeric value for a cell, most reliable source first:
+  //   1. data-sort     explicit override (e.g. signal severity)
+  //   2. data-export   the RAW value makeTbl already stashes for CSV
+  //   3. visible text  scaled for Indian magnitude suffixes
+  // (3) alone used to be the fallback and it silently dropped the suffix:
+  // fmtL renders 181325 as "1.81L", the old strip produced 1.81, and every
+  // value above a lakh therefore sorted BELOW every value under one. SPAN
+  // MARGIN, LOT PREM and RISK all use fmtL, so all three were wrong.
+  const numOf=(td)=>{
+    const ds=td.getAttribute('data-sort');
+    if(ds!=null){ const n=parseFloat(ds); if(!isNaN(n)) return n; }
+    const de=td.getAttribute('data-export');
+    if(de!=null && de!==''){ const n=parseFloat(de); if(!isNaN(n)) return n; }
+    const t=td.textContent.trim();
+    const m=t.replace(/[,\u20b9%+\s]/g,'').match(/^(-?\d*\.?\d+)(Cr|L|K)?$/i);
+    if(!m) return NaN;
+    const mult={cr:1e7,l:1e5,k:1e3}[(m[2]||'').toLowerCase()]||1;
+    return parseFloat(m[1])*mult;
+  };
   rows.sort((a,b)=>{
     const ac=a.children[idx], bc=b.children[idx];
-    // prefer explicit data-sort (e.g. signal severity) over visible text
-    const ads=ac.getAttribute('data-sort'), bds=bc.getAttribute('data-sort');
-    if(ads!=null && bds!=null){
-      const an2=parseFloat(ads),bn2=parseFloat(bds);
-      if(!isNaN(an2)&&!isNaN(bn2))return asc?an2-bn2:bn2-an2;
-    }
-    const av=ac.textContent.trim().replace(/[,₹%+CrL]/g,'');
-    const bv=bc.textContent.trim().replace(/[,₹%+CrL]/g,'');
-    const an=parseFloat(av),bn=parseFloat(bv);
-    if(!isNaN(an)&&!isNaN(bn))return asc?an-bn:bn-an;
+    const an=numOf(ac), bn=numOf(bc);
+    if(!isNaN(an)&&!isNaN(bn)) return asc?an-bn:bn-an;
+    // Non-numeric: fall back to text. Blanks always sort last either way.
+    const av=ac.textContent.trim(), bv=bc.textContent.trim();
+    if(av==='—'||av==='') return 1;
+    if(bv==='—'||bv==='') return -1;
     return asc?av.localeCompare(bv):bv.localeCompare(av);
   });
   rows.forEach(r=>tbl.querySelector('tbody').appendChild(r));
@@ -194,7 +209,7 @@ function wireToggleGroup(id){
 }
 ['ovFilterGroup','gexFilterGroup','oiFilterGroup','ivFilterGroup',
  'moverFilterGroup','volShockFilterGroup','ivShockFilterGroup','dsFilterGroup',
- 'esViewGroup']
+ 'esViewGroup','volFilterGroup','volGateGroup']
   .forEach(wireToggleGroup);
 function getFilter(id){
   return document.querySelector('#'+id+' .active')?.dataset.ft||'all';
@@ -444,6 +459,13 @@ document.getElementById('btnMovers').addEventListener('click',loadMovers);
 document.getElementById('btnTrend').addEventListener('click',loadTrend);
 document.getElementById('btnDs').addEventListener('click',loadDeltaScreener);
 document.getElementById('btnFetchMargin').addEventListener('click',fetchDsMargin);
+document.getElementById('btnStr')?.addEventListener('click',loadStraddleScreener);
+wireToggleGroup('strFilterGroup');
+document.getElementById('btnSg')?.addEventListener('click',loadStrangleScreener);
+wireToggleGroup('sgFilterGroup');
+document.getElementById('sgDelta')?.addEventListener('input',e=>_sgSyncDelta(parseInt(e.target.value,10)));
+document.querySelectorAll('#sgDeltaGroup button').forEach(b=>
+  b.addEventListener('click',()=>_sgSyncDelta(parseInt(b.dataset.dt,10))));
 
 // ── ATM strikes ───────────────────────────────────────────────────
 async function loadAtmStrikes(){
@@ -850,10 +872,22 @@ async function loadIvSmile(sym,exp,ts){
     ]);
     // IV Rank KPIs
     if(ivr){
+      // iv_rank is built on a constant-maturity series from exposure_eod.
+      // `method` is 'cm30' (rank0/rank1 interpolated to 30d) or 'band' (rank0
+      // restricted to a DTE window when rank-1 is unavailable). When the series
+      // is too thin to rank honestly the backend sends null — say why rather
+      // than showing a blank bar.
+      const thin = ivr.iv_rank==null && ivr.hist_count<(ivr.min_samples||20);
+      const rankSub = thin
+        ? `only ${ivr.hist_count} samples (need ${ivr.min_samples||20})`
+        : `${ivr.hist_count} samples / ${lookback}d · ${ivr.method||'—'}`;
       document.getElementById('ivRankKpis').innerHTML=[
-        {label:'ATM IV',value:fmt(ivr.atm_iv,2)+'%',sub:''},
-        {label:'IV RANK',value:ivRankBar(ivr.iv_rank),sub:`${ivr.hist_count} samples / ${lookback}d`},
-        {label:'IV PCTILE',value:ivr.iv_pctile!=null?fmt(ivr.iv_pctile,1)+'%':'—',sub:''},
+        {label:'ATM IV',value:fmt(ivr.atm_iv,2)+'%',sub:'live intraday'},
+        {label:'IV RANK',value:thin?'—':ivRankBar(ivr.iv_rank),sub:rankSub},
+        {label:'IV PCTILE',value:ivr.iv_pctile!=null?fmt(ivr.iv_pctile,1)+'%':'—',
+         sub:'% of days cheaper'},
+        {label:'RANKED IV',value:ivr.ranked_iv!=null?fmt(ivr.ranked_iv,2)+'%':'—',
+         sub:ivr.iv_min!=null?`range ${fmt(ivr.iv_min,1)}–${fmt(ivr.iv_max,1)}`:''},
         {label:'REALISED VOL',value:fmt(ivr.rv,2)+'%',sub:'m_volatility (annualised)'},
         {label:'RV–IV SPREAD',value:sspan(ivr.rv_iv_spread,2),sub:ivr.rv_iv_spread>0?'options cheap':'options expensive'},
       ].map(k=>`<div class="kpi"><div class="kpi-label">${k.label}</div><div class="kpi-val acc">${k.value}</div><div class="kpi-sub">${k.sub}</div></div>`).join('');
@@ -928,11 +962,11 @@ async function loadPcSkew(sym,exp,ts){
   try{
     const d=await api(`/api/pc_skew?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}&timestamp=${encodeURIComponent(ts)}`);
     document.getElementById('skewKpis').innerHTML=[
-      {label:'25Δ RISK REVERSAL',value:d.rr_25d!=null?sspan(d.rr_25d):'-',sub:'PE IV – CE IV at 25Δ'},
+      {label:'25Δ RISK REVERSAL',value:d.rr_25d!=null?sspan(d.rr_25d):'-',sub:'CE IV – PE IV at 25Δ · neg = puts bid'},
       {label:'25Δ PUT IV',value:d.pe_25d_iv!=null?fmt(d.pe_25d_iv,2)+'%':'—',sub:d.pe_25d_strike?'@ '+d.pe_25d_strike:''},
       {label:'25Δ CALL IV',value:d.ce_25d_iv!=null?fmt(d.ce_25d_iv,2)+'%':'—',sub:d.ce_25d_strike?'@ '+d.ce_25d_strike:''},
-      {label:'LEFT WING SLOPE',value:d.left_wing_slope!=null?fmt(d.left_wing_slope,4):'—',sub:'put wing slope'},
-      {label:'RIGHT WING SLOPE',value:d.right_wing_slope!=null?fmt(d.right_wing_slope,4):'—',sub:'call wing slope'},
+      {label:'LEFT WING SLOPE',value:d.left_wing_slope!=null?fmt(d.left_wing_slope,4):'—',sub:'put wing · IV pts per 1% spot'},
+      {label:'RIGHT WING SLOPE',value:d.right_wing_slope!=null?fmt(d.right_wing_slope,4):'—',sub:'call wing · IV pts per 1% spot'},
       {label:'SKEW ASYMMETRY',value:d.skew_asymmetry!=null?sspan(d.skew_asymmetry,4):'—',sub:d.skew_asymmetry>0?'put skew dominant':'call skew dominant'},
     ].map(k=>`<div class="kpi"><div class="kpi-label">${k.label}</div><div class="kpi-val acc">${k.value}</div><div class="kpi-sub">${k.sub||''}</div></div>`).join('');
     // Signal card
@@ -1008,16 +1042,24 @@ async function loadDeltaScreener(){
   const tgtDlt=document.getElementById('deltaSlider').value;
   const minDlt=document.getElementById('deltaMinSlider').value;
   const ft=getFilter('dsFilterGroup');
+  // Liquidity floors and expiry are now applied SERVER-side, per leg. They used
+  // to be a client-side re-filter of already-fetched rows using the settings
+  // values, which meant illiquid legs were transferred and then hidden — and
+  // the SQL gate was a row-level OR, so a dead call rode along with a liquid put.
+  const expiry=document.getElementById('dsExpiry')?.value||'all';
+  const minOi=Math.max(0,parseFloat(document.getElementById('dsMinOi')?.value)||0);
+  const minVol=Math.max(0,parseFloat(document.getElementById('dsMinVol')?.value)||0);
   updateDsRangeLabel();
   document.getElementById('dsTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
   document.getElementById('dsKpis').innerHTML='';
   try{
     const tsParam=ts?`&timestamp=${encodeURIComponent(ts)}`:'';
-    const res=await api(`/api/delta_screener?target_delta=${tgtDlt}&min_delta=${minDlt}&filter_type=${ft}${tsParam}`);
+    const expParam=(expiry&&expiry!=='all')?`&expiry=${encodeURIComponent(expiry)}`:'';
+    const res=await api(`/api/delta_screener?target_delta=${tgtDlt}&min_delta=${minDlt}&filter_type=${ft}`
+      +`&min_oi=${minOi}&min_volume=${minVol}${expParam}${tsParam}`);
     _dsCurrentRows=res.rows||[];
     _dsSessionLoaded=true;
-    const minOi=getSetting('stgDsMinOi'),minVol=getSetting('stgDsMinVol');
-    const visible=_dsCurrentRows.filter(r=>r.oi>=minOi&&r.volume>=minVol);
+    const visible=_dsCurrentRows;
     const tgtN=parseFloat(tgtDlt)/100;
     const ceRows=visible.filter(r=>r.option_type==='CE');
     const peRows=visible.filter(r=>r.option_type==='PE');
@@ -1051,6 +1093,7 @@ function renderDsTable(rows){
     {key:'volume',label:'VOL',fmt:v=>fmtL(v)},
     {key:'lot_size',label:'LOT'},
     {key:'premium_per_lot',label:'LOT PREM ₹',fmt:v=>fmtL(v)},
+    {key:'prem_strike_pct',label:'PREM/K %',fmt:v=>v!=null?fmt(v,3)+'%':'—'},
     {key:'margin',label:'SPAN MARGIN ₹',fmt:v=>v!=null&&v>0?fmtL(v):'—'},
     {key:'return_on_margin',label:'RoM%',fmt:v=>v!=null?sspan(v,2):'—'},
     {key:'risk_indicator',label:'RISK NOTL',fmt:v=>fmtL(v)},
@@ -1166,6 +1209,9 @@ const VIEW_INIT={
   vix:()=>loadVix(),
   walls:()=>loadOiWalls(),
   market:()=>loadMarketInfo(),
+  rvfcst:()=>loadRvForecast(),
+  vrp:()=>loadVrp(),
+  wheel:()=>loadWheel(),
 };
 
 // ── #10: Screener mid-level page-tabs (Delta/Premium | Divergence | Shockers | Movers) ──
@@ -1175,6 +1221,7 @@ const PTAB_INIT = {
   'sp-divergence': ()=>{ if(typeof loadDivergence==='function') loadDivergence(); },
   'sp-shockers':   ()=>{ loadVolShock(); loadIvShock(); },
   'sp-movers':     ()=>loadMovers(),
+  'sp-vol':        ()=>loadVolScreener(),
 };
 document.querySelectorAll('#screenerPageTabs .pagetab').forEach(tab=>{
   tab.addEventListener('click',()=>{
@@ -1352,13 +1399,554 @@ wireToggleGroup('oiHistViewGroup');
 // VIEW_INIT additions
 // ══════════════════════════════════════════════════════════════════
 VIEW_INIT['divergence'] = ()=>{};
+// ── ATM short straddle ────────────────────────────────────────────
+// One row per SYMBOL (a straddle is a position, not a leg), so this is its own
+// page tab rather than more columns on the delta grid.
+let _strRows=[];
+async function loadStraddleScreener(){
+  const ft=getFilter('strFilterGroup');
+  const rank=document.getElementById('strRank')?.value||'0';
+  const minOi=Math.max(0,parseFloat(document.getElementById('strMinOi')?.value)||0);
+  document.getElementById('strTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
+  document.getElementById('strKpis').innerHTML='';
+  try{
+    const res=await api(`/api/straddle_screener?filter_type=${ft}&expiry_rank=${rank}&min_oi=${minOi}`);
+    _strRows=res.rows||[];
+    if(!_strRows.length){
+      document.getElementById('strTable').innerHTML='<div class="empty">No straddles match</div>';
+      return;
+    }
+    const rich=_strRows.filter(r=>r.be_vs_hv!=null);
+    const med=arr=>{if(!arr.length)return null;const s=[...arr].sort((a,b)=>a-b);return s[Math.floor(s.length/2)];};
+    document.getElementById('strKpis').innerHTML=[
+      {label:'SYMBOLS',value:_strRows.length,sub:rank==='0'?'nearest expiry':'next expiry'},
+      {label:'MEDIAN BE/HV',value:rich.length?fmt(med(rich.map(r=>r.be_vs_hv)),3):'—',
+       sub:'>1 = paid above realised'},
+      {label:'RICH (BE/HV>1.1)',value:rich.filter(r=>r.be_vs_hv>1.1).length,sub:`of ${rich.length} with hv20`},
+      {label:'MEDIAN BE WIDTH',value:fmt(med(_strRows.map(r=>r.be_width_pct).filter(v=>v!=null)),2)+'%',sub:'± of futures price'},
+      {label:'MEDIAN RoM',value:fmt(med(_strRows.map(r=>r.return_on_margin).filter(v=>v!=null)),2)+'%',sub:'SPAN-netted margin'},
+    ].map(k=>`<div class="kpi"><div class="kpi-label">${k.label}</div><div class="kpi-val acc">${k.value}</div><div class="kpi-sub">${k.sub}</div></div>`).join('');
+    renderStrTable();
+  }catch(e){
+    document.getElementById('strTable').innerHTML=`<div class="empty">Error: ${e.message}</div>`;
+  }
+}
+
+// Straddle detail popover — mirrors the exposure screener's ⊕ mechanism
+// (shared .wall-tip-pop element, same show/hide lifecycle).
+// The grid stays at 13 columns; everything that is context rather than a
+// ranking key lives in here.
+function _strDetailTip(r){
+  const row=(lbl,val)=>`<div style="display:flex;gap:10px;margin:2px 0">
+    <span style="color:var(--muted);min-width:94px;font-size:10px">${lbl}</span>
+    <span style="font-size:11px">${val}</span></div>`;
+  const m=r.iv_rank_method;
+  const rankTxt = r.iv_rank!=null
+    ? `${fmt(r.iv_rank,1)}<span style="color:var(--muted);font-size:9px"> · ${m||'?'} · n=${r.iv_rank_n||0}</span>`
+      + (m==='band'?' <span style="color:var(--amber);font-size:9px">(band: DTE-sensitive)</span>':'')
+    : '<span style="color:var(--muted)">— too few samples</span>';
+  return `<div style="font-family:var(--mono);min-width:250px;max-width:310px">
+    <div style="font-weight:600;margin-bottom:5px;color:var(--acc)">${r.symbol}
+      <span style="color:var(--muted);font-weight:400">· ATM straddle</span></div>
+    ${row('Breakeven', `${fmt(r.be_lo,0)} – ${fmt(r.be_hi,0)}`
+        +` <span style="color:var(--muted)">±${fmt(r.straddle_prem,1)}</span>`)}
+    ${row('Legs', `CE ${fmt(r.ce_ltp,2)} + PE ${fmt(r.pe_ltp,2)}`)}
+    ${row('Prem/lot', `₹${fmtL(r.straddle_prem_lot)} · lot ${r.lot_size}`)}
+    ${row('Margin', r.margin!=null?`₹${fmtL(r.margin)} <span style="color:var(--muted);font-size:9px">SPAN-netted</span>`:'—')}
+    <div style="border-top:1px solid var(--bd);margin:5px 0"></div>
+    ${row('IV rank', rankTxt)}
+    ${row('VRP', r.vrp!=null?`${r.vrp>0?'+':''}${fmt(r.vrp,2)} <span style="color:var(--muted);font-size:9px">IV − HV20</span>`:'—')}
+    ${row('EM (1 day)', r.em_1d!=null?`±${fmt(r.em_1d,1)}`:'—')}
+    ${row('OI', `CE ${fmtL(r.ce_oi)} · PE ${fmtL(r.pe_oi)}`)}
+    <div style="color:var(--muted);font-size:9px;margin-top:5px;line-height:1.35">
+      BE/HV compares premium to the move 20d realised vol implies over the same
+      DTE. Caveat: realised vol mean-reverts hard — the quietest quintile of
+      trailing HV was followed by 1.47× that level. A high BE/HV driven by a
+      depressed HV20 is partly that effect, not mispricing.</div>
+  </div>`;
+}
+function _showStrTip(trigger){
+  const idx=parseInt(trigger.dataset.stridx,10);
+  const r=_strRows[idx]; if(!r) return;
+  const el=_ensureWallTipEl();
+  el.innerHTML=_strDetailTip(r);
+  el.style.display='block';
+  const tr=trigger.getBoundingClientRect();
+  const pw=el.offsetWidth, ph=el.offsetHeight, vw=window.innerWidth, vh=window.innerHeight;
+  let left=tr.right-pw; if(left<8) left=8; if(left+pw>vw-8) left=vw-8-pw;
+  let top=tr.bottom+6; if(top+ph>vh-8) top=tr.top-ph-6; if(top<8) top=8;
+  el.style.left=left+'px'; el.style.top=top+'px';
+}
+function _wireStrTips(){
+  const tbl=document.querySelector('#strTable table');
+  if(!tbl) return;
+  tbl.querySelectorAll('.wall-tip-trigger[data-stridx]').forEach(t=>{
+    t.addEventListener('mouseenter',()=>{ t._over=true;
+      const el=_ensureWallTipEl(); el._triggerOver=true; _showStrTip(t); });
+    t.addEventListener('mouseleave',()=>{ t._over=false;
+      const el=document.getElementById('wallTipPop'); if(el) el._triggerOver=false;
+      _hideWallTip(); });
+    t.addEventListener('focus',()=>_showStrTip(t));
+    t.addEventListener('blur',()=>_hideWallTip());
+  });
+}
+
+function renderStrTable(){
+  const cols=[
+    {key:'symbol',label:'SYMBOL'},
+    {key:'expiry',label:'EXPIRY'},
+    {key:'dte',label:'DTE',fmt:v=>fmt(v,0)},
+    {key:'fut_price',label:'FUT',fmt:v=>fmt(v,1)},
+    {key:'atm_strike',label:'ATM K',fmt:v=>fmt(v,0)},
+    {key:'straddle_prem',label:'STRADDLE',fmt:v=>fmt(v,2)},
+    {key:'be_width_pct',label:'BE ±%',fmt:v=>v!=null?fmt(v,2)+'%':'—'},
+    {key:'atm_iv',label:'IV',fmt:v=>fmt(v,1)},
+    {key:'iv_change',label:'IV CHG',fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'iv_pctile',label:'IV %ILE',fmt:v=>v!=null?fmt(v,0):'—',
+     help:'Share of the last 90 days with a lower constant-maturity IV. Shown instead of IV Rank: with a 90d window the min/max range can be set by one spike, so the percentile is the more robust read.'},
+    {key:'hv20',label:'HV20',fmt:v=>v!=null?fmt(v,1):'—'},
+    {key:'be_vs_hv',label:'BE/HV',
+     fmt:v=>v==null?'—':`<span class="${v>=1.1?'up':v<0.9?'down':'neu'}">${fmt(v,3)}</span>`,
+     help:'Straddle premium / move implied by 20d realised vol over the same DTE. >1 = paid above realised movement.'},
+    {key:'return_on_margin',label:'RoM%',fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'_detail',label:'',sortable:false,
+     fmt:(v,r)=>`<span class="wall-tip-trigger" tabindex="0" data-stridx="${r._idx}">⊕</span>`},
+  ];
+  // makeTbl passes (value, row) only — no index — so stamp a stable one.
+  // It must survive the DOM re-sort, hence stored on the row object rather
+  // than derived from position at render time.
+  _strRows.forEach((r,i)=>{ r._idx=i; });
+  document.getElementById('strTable').innerHTML=makeTbl(_strRows,cols);
+  _wireStrTips();
+}
+
+// ── Model-ranked straddle (EV) ────────────────────────────────────
+// Reads the NIGHTLY PREDICTION LOG, never a live recompute. If this page
+// recomputed on load it would show one ranking while vol_prediction stored
+// another, and every later comparison would grade the model against numbers it
+// never emitted. Intraday refresh, when it comes, must write to the log too.
+let _volRows=[];
+
+// Index symbols have no single-stock analogue for several fields and are a
+// different animal for a short straddle; the filter mirrors the other tabs.
+const _VOL_INDEX = new Set(['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50']);
+
+async function loadVolScreener(){
+  const rank = document.getElementById('volRank')?.value || '0';
+  const gated = getFilter('volGateGroup') !== 'all';
+  document.getElementById('volTable').innerHTML =
+    '<div class="loading"><div class="spinner"></div>Loading…</div>';
+  document.getElementById('volKpis').innerHTML='';
+  try{
+    const res = await api(`/api/vol_screener/straddle?expiry_rank=${rank}`
+                          +`&gated_only=${gated}&limit=400`);
+    const asofEl=document.getElementById('volAsof');
+    if(asofEl) asofEl.textContent = res.asof ? `as of ${res.asof}` : '';
+    _volRows = res.rows || [];
+    if(!_volRows.length){
+      const ok = res.n_total ?? null;
+      document.getElementById('volTable').innerHTML = ok
+        ? `<div class="empty">${ok} candidate(s) logged for ${res.asof}, but 0 `
+          +`passed gates (see the reasons below). Flip SHOW to `
+          +`"ALL + REJECTS" to see why.</div>`
+        : '<div class="empty">No predictions logged for this day. '
+          +'Run build_vol_predictions.py predict.</div>';
+      loadVolGateSummary(rank);
+      return;
+    }
+    _renderVolKpis(res);
+    renderVolTable();
+    loadVolCompare();
+  }catch(e){
+    document.getElementById('volTable').innerHTML =
+      `<div class="empty">Error: ${e.message}</div>`;
+  }
+}
+
+async function loadVolGateSummary(rank){
+  // Called when the gated view comes back empty, so the person sees WHY
+  // rather than a bare "no data" that looks identical to the log not having
+  // run at all. Measured on 2026-09-22: 158/160 rejected for dte=7, once the
+  // nearest expiry rolled below --min-dte 10 -- correct gate behaviour, but
+  // "no predictions logged" would have read as a broken pipeline instead.
+  try{
+    const g = await api(`/api/vol_screener/gate_summary?expiry_rank=${rank}`);
+    const el = document.getElementById('volTable');
+    if(!el || !g.reasons?.length) return;
+    const rows = g.reasons.map(r=>
+      `<div>${r.n}× &nbsp;<span style="color:var(--muted)">${r.gate_reasons}</span></div>`
+    ).join('');
+    el.innerHTML += `<div style="padding:8px 10px;font-family:var(--mono);`
+      +`font-size:10px;color:var(--text)">${g.passed}/${g.total} passed. `
+      +`Rejection reasons:</div>`
+      +`<div style="padding:0 10px 10px;font-family:var(--mono);font-size:10px">${rows}</div>`;
+  }catch(e){ /* best-effort */ }
+}
+
+function _volFiltered(){
+  const ft = getFilter('volFilterGroup');
+  if(ft==='index') return _volRows.filter(r=>_VOL_INDEX.has(r.symbol));
+  if(ft==='stock') return _volRows.filter(r=>!_VOL_INDEX.has(r.symbol));
+  return _volRows;
+}
+
+function _renderVolKpis(res){
+  const rows=_volFiltered();
+  const med=a=>{const s=a.filter(v=>v!=null).sort((x,y)=>x-y);
+                return s.length?s[Math.floor(s.length/2)]:null;};
+  const m=res.model||{};
+  const kpis=[
+    {label:'CANDIDATES', value:rows.length,
+     sub:(res.gated_only?'passed gates':'incl. rejects')},
+    {label:'MEDIAN EV/MARGIN',
+     value:fmt(100*med(rows.map(r=>r.ev_per_margin)),2)+'%',
+     sub:'simulated, net of spread'},
+    {label:'MEDIAN SPREAD',
+     value:fmt(100*med(rows.map(r=>r.spread_frac)),2)+'%',
+     sub:'of credit, modelled'},
+    {label:'MEDIAN CVaR5',
+     value:fmt(100*med(rows.map(r=>r.sim_cvar05_per_margin)),1)+'%',
+     sub:'of margin, worst 5%'},
+    {label:'BACKTEST IC', value:m.backtest_ic!=null?fmt(m.backtest_ic,3):'—',
+     sub:`t ${m.backtest_t??'—'} · ${m.backtest_expiries??'—'} expiries`},
+  ];
+  document.getElementById('volKpis').innerHTML = kpis.map(k=>
+    `<div class="kpi"><div class="kpi-label">${k.label}</div>`
+    +`<div class="kpi-val acc">${k.value}</div>`
+    +`<div class="kpi-sub">${k.sub}</div></div>`).join('');
+}
+
+function renderVolTable(){
+  const rows=_volFiltered();
+  const cols=[
+    {key:'score_rank',label:'#',fmt:v=>v==null?'—':fmt(v,0)},
+    {key:'symbol',label:'SYMBOL'},
+    {key:'expiry',label:'EXPIRY'},
+    {key:'dte',label:'DTE',fmt:v=>fmt(v,0)},
+    {key:'fut_price',label:'FUT',fmt:v=>fmt(v,1)},
+    {key:'atm_strike',label:'ATM K',fmt:v=>fmt(v,0)},
+    {key:'gross_credit',label:'STRADDLE',fmt:v=>fmt(v,2)},
+    {key:'spread_frac',label:'SPRD%',fmt:v=>v==null?'—':fmt(100*v,2)+'%',
+     sortValue:v=>v==null?-1:v,
+     help:'Modelled entry half-spread as a share of gross credit. Calibrated on 37,868 real ATM quotes by volume quintile x DTE band; options_eod carries no bid/ask, so every backtest before this filled at mid and overstated returns by 35-84%.'},
+    {key:'score',label:'SCORE',fmt:v=>v==null?'—':`<b>${fmt(v,1)}</b>`,
+     help:'Equal-weighted percentile rank of EV/margin and prior path efficiency. Backtest IC 0.131 (t 8.2) over 71 expiries.'},
+    {key:'ev_per_margin',label:'EV/MGN',
+     fmt:v=>v==null?'—':sspan(100*v,2),
+     help:'Simulated expected P&L per rupee of margin, from filtered historical simulation on CA-corrected returns, net of modelled spread. IC 0.125 standalone — carries most of the signal.'},
+    {key:'trend_eff',label:'TREND',fmt:v=>v==null?'—':fmt(v,3),
+     help:'Prior 20-day path efficiency: |sum of returns| / sum of |returns|. HIGHER is better — efficiency mean-reverts, so a name that just trended hard tends to consolidate. Shipping this inverted cost the first seven expiries.'},
+    {key:'sim_cvar05_per_margin',label:'CVaR5',
+     fmt:v=>v==null?'—':`<span class="down">${fmt(100*v,0)}%</span>`,
+     help:'Mean of the worst 5% of simulated outcomes, per rupee of margin. Used as a gate, not a ranking term — it correlates 0.96 with EV.'},
+    {key:'sim_pop',label:'POP',fmt:v=>v==null?'—':fmt(100*v,0)+'%',
+     help:'Simulated probability of profit. DIAGNOSTIC ONLY, never ranked: for an ATM straddle it is ~57.5% structurally and RISES with fat tails, so it is highest exactly where losses are worst.'},
+    {key:'atm_iv',label:'IV',fmt:v=>v==null?'—':fmt(v,1)},
+    {key:'hv20',label:'HV20',fmt:v=>v==null?'—':fmt(v,1)},
+    {key:'legacy_rom',label:'RoM%',fmt:v=>v==null?'—':sspan(v,2)},
+    {key:'legacy_rom_rank',label:'RoM #',fmt:v=>v==null?'—':fmt(v,0)},
+    {key:'rank_delta_vs_rom',label:'Δ RANK',
+     fmt:v=>v==null?'—':`<span class="${v>0?'up':v<0?'down':'neu'}">${v>0?'+':''}${fmt(v,0)}</span>`,
+     sortValue:v=>v==null?0:v,
+     help:'Legacy RoM rank minus model rank. Positive = the model likes this name far more than the RoM sort does. On the first live day the two correlated -0.06 and shared only 2 of the top 20, so most rows disagree — which is what makes running both worth the effort.'},
+    {key:'gate_reasons',label:'GATE',
+     fmt:(v,r)=>r.gate_pass?'<span class="up">✓</span>'
+       :`<span class="down" title="${String(v||'').replace(/"/g,'&quot;')}">✕</span>`,
+     sortValue:(v,r)=>r.gate_pass?1:0,
+     exportValue:(v,r)=>r.gate_pass?'pass':(v||'reject')},
+  ];
+  document.getElementById('volTable').innerHTML = makeTbl(rows,cols);
+  const s=document.getElementById('volSearch');
+  if(s && s.value) filterTableBySymbol('volTable', s.value);
+}
+
+async function loadVolCompare(){
+  const el=document.getElementById('volCompare');
+  if(!el) return;
+  try{
+    const res=await api('/api/vol_screener/compare');
+    if(!res.ready){
+      // Say this plainly rather than hiding the panel. An absent page implies
+      // nothing is being measured; this says the opposite -- it IS being
+      // measured, and it is too early to read.
+      el.innerHTML=`<div style="padding:10px;font-family:var(--mono);font-size:10px;`
+        +`color:var(--muted);line-height:1.5">`
+        +`<b>Accumulating.</b> ${res.n||0} resolved rows across ${res.periods||0} `
+        +`expiries.<br>Needs roughly 20–30 resolved expiries — about two years at `
+        +`monthly cadence — before the per-expiry IC standard error is small `
+        +`enough to separate the models. An early lead here means nothing.`
+        +`</div>`;
+      return;
+    }
+    const cols=[
+      {key:'ranker',label:'RANKER',
+       fmt:(v,r)=>r.is_model?`<b>${v}</b>`:v},
+      {key:'ic',label:'IC',fmt:v=>sspan(v,4)},
+      {key:'t',label:'t',fmt:v=>v==null?'—':fmt(v,2)},
+      {key:'positive',label:'POS',fmt:(v,r)=>`${v}/${r.periods}`,
+       sortValue:(v,r)=>r.periods?v/r.periods:0},
+      {key:'periods',label:'EXPIRIES',fmt:v=>fmt(v,0)},
+    ];
+    el.innerHTML=`<div style="font-size:9px;color:var(--muted);padding:0 10px 6px">`
+      +`Same candidates, same expiries — only the ranking rule differs. `
+      +`Bold rows are the new model.</div>`
+      +makeTbl(res.rankers||[],cols);
+  }catch(e){
+    el.innerHTML=`<div class="empty">Error: ${e.message}</div>`;
+  }
+}
+
+document.getElementById('btnVol')?.addEventListener('click',loadVolScreener);
+document.getElementById('btnVolGuide')?.addEventListener('click',()=>{
+  const g=document.getElementById('volGuide');
+  if(!g) return;
+  if(!g.dataset.built){ g.innerHTML=_volGuideHtml(); g.dataset.built='1'; }
+  g.style.display = g.style.display==='none' ? '' : 'none';
+});
+
+function _volGuideHtml(){
+  const sec=(title,body)=>`<b style="color:var(--text)">${title}</b><br>${body}<br><br>`;
+  return sec('WHAT THIS PAGE IS',
+    `A second, independent ranking for the same ATM straddles as the `
+    +`<b>STRADDLE</b> tab, scored by a model instead of by sorting one column. `
+    +`It reads last night's frozen prediction log (<code>vol_prediction</code>), `
+    +`not a live recalculation — what you see here is exactly what will later `
+    +`be graded, so the two can never quietly drift apart. The model has 71 `
+    +`expiries of backtest and forward evidence only from 2026-09-18, so treat `
+    +`it as a second opinion to weigh against the older tab, not a replacement `
+    +`for it — that is also why both are kept on the dashboard side by side.`)
+
+  + sec('THE MODEL, IN ONE LINE',
+    `Equal-weighted rank of two numbers — <b>EV/MGN</b> (does the simulator `
+    +`expect this trade to make money) and <b>TREND</b> (was the stock's prior `
+    +`month choppy or trending). Backtest IC 0.131, t = 8.2, over 71 monthly `
+    +`expiries with corporate-action-corrected returns and a real bid-ask `
+    +`spread charged — net RoM 2.21% after those costs. Ten other candidate `
+    +`signals (VRP, gamma regime, dealer positioning, compression duration, `
+    +`liquidity ratios…) were tried and measured to be worthless or actively `
+    +`backwards, so they were cut rather than diluting the two that work.`)
+
+  + sec('COLUMN REFERENCE',
+    [['#','Rank by SCORE, best first. This is the order to work down.'],
+     ['SCORE','The composite — average percentile of EV/MGN and TREND. Higher is better. Hover a row\'s other cells for the full breakdown.'],
+     ['EV/MGN','Simulated expected P&amp;L per rupee of margin, on corporate-action-corrected historical paths, net of modelled spread. Does most of the work alone (standalone IC 0.125) — treat as "is this trade good", with TREND as a tiebreaker.'],
+     ['TREND','Prior 20-day path efficiency. HIGHER is better, which is the non-obvious part: a name that trended hard for a month tends to go quiet next, so recent trendiness argues FOR a straddle, not against one.'],
+     ['SPRD%','Modelled entry cost, as a share of the credit you collect. Calibrated on 37,868 real quotes by volume and DTE — thin chains near 15–20%, deep ones under 1%. Before this existed, every backtest filled at mid and overstated returns by up to 84%.'],
+     ['CVaR5','Average of the worst 5% of simulated outcomes. A risk GATE, not a ranking input — it correlates 0.96 with EV/MGN so ranking on both would double-count the same thing.'],
+     ['POP','Simulated probability of profit. Shown for reference ONLY — never use this to pick between rows. For an ATM straddle it sits near 57.5% by construction and actually RISES as tails get fatter, so a high POP can flag the worse trade.'],
+     ['IV / HV20','Current implied vol and 20-day realised vol of the stock, for context against the legacy BE/HV read.'],
+     ['RoM% / RoM #','The legacy tab\'s return-on-margin figure and its rank — the other opinion, shown alongside rather than hidden.'],
+     ['Δ RANK','Legacy RoM rank minus this model\'s rank. Positive = this model rates the name much higher than the old sort does. On the first live day the two agreed on almost nothing — rank correlation −0.06, only 2 of the top 20 names shared — so most rows will show a large Δ. That disagreement is the point of running both: if they always agreed there would be nothing to learn by comparing them.'],
+     ['GATE','✓ = this candidate is tradeable as scored. ✕ = rejected; hover for why (usually spread/credit, volume floor, or CVaR). Flip SHOW to "ALL + REJECTS" to audit what is being filtered out — a gate you cannot see the rejects of cannot be checked.'],
+    ].map(([k,v])=>`<b style="color:var(--acc)">${k}:</b> ${v}`).join('<br>'))
+
+  + sec('HOW TO USE IT',
+    `1) Start at the top of <b>#</b> and work down — don't cherry-pick a row `
+    +`from the middle because one number looks good; the SCORE already `
+    +`combined what matters.<br>`
+    +`2) Check <b>GATE</b> is ✓ and glance at <b>SPRD%</b> — a name can rank `
+    +`well and still be expensive to actually trade.<br>`
+    +`3) Compare <b>Δ RANK</b>: a large positive value means this model likes `
+    +`a name the old tab doesn't — worth a second look before sizing up on `
+    +`it alone, since it has less of a track record. A large negative value `
+    +`(old tab likes it, this one doesn't) is worth understanding too, not `
+    +`dismissing.<br>`
+    +`4) Ignore <b>POP</b> when choosing — it is there for completeness, not `
+    +`for ranking.<br>`
+    +`5) Check <b>MODEL TRACKING</b> below before trusting either ranking `
+    +`blindly — while it reads "Accumulating" there isn't yet enough forward `
+    +`evidence to say which model is actually better live.`)
+
+  + sec('CONFIRM ELSEWHERE ON THE DASHBOARD',
+    [['STRADDLE tab','The other opinion — BE/HV, VRP, IV percentile. If both tabs like the same name, that is a stronger signal than either alone.'],
+     ['IV ANALYSIS','Check where current IV sits in its own history before selling premium — a good EV/MGN score on IV that is already cheap is a different trade than the same score on IV that is rich.'],
+     ['GEX &amp; GAMMA','A short straddle wants the dealer positioned to dampen moves. Check the gamma regime for the strike — EV/MGN alone knows nothing about dealer hedging flows.'],
+     ['OI WALLS','Confirm the ATM strike isn\'t sitting right on top of a wall that could void the day\'s realised move behaviour either way.'],
+     ['DIVERGENCE / SHOCKERS','A name mid a fresh IV or OI shock is not the quiet, mean-reverting setup TREND is measuring — the backtest\'s history for that name may not apply this week.'],
+    ].map(([k,v])=>`<b style="color:var(--acc)">${k}:</b> ${v}`).join('<br>'));
+}
+
+['volFilterGroup','volGateGroup'].forEach(id=>{
+  document.getElementById(id)?.addEventListener('click',e=>{
+    if(e.target.tagName!=='BUTTON') return;
+    // The gate toggle changes what the SERVER returns; the index/stock toggle
+    // only re-slices rows already in hand, so it must not re-fetch.
+    if(id==='volGateGroup') loadVolScreener();
+    else { _renderVolKpis({gated_only:getFilter('volGateGroup')!=='all',model:{}});
+           renderVolTable(); }
+  });
+});
+
+// ── Short strangle (delta-selected) ─────────────────────────────────
+let _sgRows=[];
+function _sgDelta(){ return parseInt(document.getElementById('sgDelta')?.value||'20',10); }
+function _sgSyncDelta(v){
+  const el=document.getElementById('sgDelta'); if(el) el.value=v;
+  ['sgDeltaLabel','sgDeltaBadge'].forEach(id=>{
+    const n=document.getElementById(id); if(n) n.textContent=v+'\u0394';
+  });
+  // Presets and slider are two views of one value — keep the preset highlight
+  // honest when the slider lands off a preset.
+  document.querySelectorAll('#sgDeltaGroup button').forEach(b=>
+    b.classList.toggle('active', parseInt(b.dataset.dt,10)===v));
+}
+async function loadStrangleScreener(){
+  const ft=getFilter('sgFilterGroup');
+  const rank=document.getElementById('sgRank')?.value||'0';
+  const minOi=Math.max(0,parseFloat(document.getElementById('sgMinOi')?.value)||0);
+  const tgt=_sgDelta();
+  document.getElementById('sgTable').innerHTML='<div class="loading"><div class="spinner"></div>Loading…</div>';
+  document.getElementById('sgKpis').innerHTML='';
+  try{
+    const res=await api(`/api/strangle_screener?filter_type=${ft}&expiry_rank=${rank}`
+      +`&target_delta=${tgt}&min_oi=${minOi}`);
+    _sgRows=res.rows||[];
+    if(!_sgRows.length){
+      document.getElementById('sgTable').innerHTML='<div class="empty">No strangles match — try a higher delta or lower MIN OI</div>';
+      return;
+    }
+    const med=arr=>{if(!arr.length)return null;const s=[...arr].sort((a,b)=>a-b);return s[Math.floor(s.length/2)];};
+    const holds=_sgRows.map(r=>r.p_hold).filter(v=>v!=null);
+    const zs=_sgRows.map(r=>r.z_min).filter(v=>v!=null);
+    document.getElementById('sgKpis').innerHTML=[
+      {label:'SYMBOLS',value:_sgRows.length,sub:`${tgt}Δ · ${rank==='0'?'nearest':'next'} expiry`},
+      {label:'MEDIAN Z MIN',value:zs.length?fmt(med(zs),2):'—',sub:'narrower side, in σ'},
+      {label:'MEDIAN P(HOLD)',value:holds.length?fmt(med(holds),1)+'%':'—',sub:'realised · empirical'},
+      {label:'MEDIAN EDGE',value:(()=>{const e=_sgRows.map(r=>r.edge).filter(v=>v!=null);return e.length?sspan(med(e),1)+'pp':'—';})(),
+       sub:'P(hold) − P(otm)'},
+      {label:'MEDIAN RoM',value:fmt(med(_sgRows.map(r=>r.return_on_margin).filter(v=>v!=null)),2)+'%',sub:'SPAN-netted'},
+    ].map(k=>`<div class="kpi"><div class="kpi-label">${k.label}</div><div class="kpi-val acc">${k.value}</div><div class="kpi-sub">${k.sub}</div></div>`).join('');
+    renderSgTable();
+  }catch(e){
+    document.getElementById('sgTable').innerHTML=`<div class="empty">Error: ${e.message}</div>`;
+  }
+}
+
+function _sgDetailTip(r){
+  const row=(lbl,val)=>`<div style="display:flex;gap:10px;margin:2px 0">
+    <span style="color:var(--muted);min-width:94px;font-size:10px">${lbl}</span>
+    <span style="font-size:11px">${val}</span></div>`;
+  const bandTxt={1:'very quiet',2:'quiet',3:'normal',4:'active',5:'volatile'}[r.hv_band]||'—';
+  const m=r.iv_rank_method;
+  return `<div style="font-family:var(--mono);min-width:250px;max-width:315px">
+    <div style="font-weight:600;margin-bottom:5px;color:var(--acc)">${r.symbol}
+      <span style="color:var(--muted);font-weight:400">· ${fmt(r.pe_delta,0)}Δ/${fmt(r.ce_delta,0)}Δ strangle</span></div>
+    ${row('Strikes', `${fmt(r.pe_strike,0)} P / ${fmt(r.ce_strike,0)} C`
+        +` <span style="color:var(--muted)">width ${fmt(r.width_pct,1)}%</span>`)}
+    ${row('Breakeven', `${fmt(r.be_lo,0)} – ${fmt(r.be_hi,0)}`)}
+    ${row('Z each side', r.z_lo!=null?`put ${fmt(r.z_lo,2)}σ · call ${fmt(r.z_hi,2)}σ`:'—')}
+    ${row('P(hold) vs P(otm)', (r.p_hold!=null?fmt(r.p_hold,1)+'%':'—')
+        +' vs '+(r.p_otm!=null?fmt(r.p_otm,1)+'%':'—')
+        +(r.edge!=null?` <span class="${r.edge>0?'up':'down'}">${r.edge>0?'+':''}${fmt(r.edge,1)}pp</span>`:''))}
+    ${row('Legs', `PE ${fmt(r.pe_ltp,2)} + CE ${fmt(r.ce_ltp,2)}`)}
+    ${row('Prem/lot', `₹${fmtL(r.strangle_prem_lot)} · lot ${r.lot_size}`)}
+    ${row('Margin', r.margin!=null?`₹${fmtL(r.margin)} <span style="color:var(--muted);font-size:9px">SPAN-netted</span>`:'—')}
+    <div style="border-top:1px solid var(--bd);margin:5px 0"></div>
+    ${row('Vol band', `${bandTxt} <span style="color:var(--muted);font-size:9px">hv20 ${fmt(r.hv20,1)}</span>`)}
+    ${row('IV rank', r.iv_rank!=null
+        ? `${fmt(r.iv_rank,1)}<span style="color:var(--muted);font-size:9px"> · ${m||'?'} · n=${r.iv_rank_n||0}</span>`
+          +(m==='band'?' <span style="color:var(--amber);font-size:9px">(DTE-sensitive)</span>':'')
+        : '<span style="color:var(--muted)">— too few samples</span>')}
+    ${row('EM (1 day)', r.em_1d!=null?`±${fmt(r.em_1d,1)}`:'—')}
+    ${row('OI', `PE ${fmtL(r.pe_oi)} · CE ${fmtL(r.ce_oi)}`)}
+    <div style="color:var(--muted);font-size:9px;margin-top:5px;line-height:1.35">
+      P(hold) is what the stock has DONE — measured, fat-tailed, read from this
+      row's vol band. P(otm) is what the market is PRICING — lognormal on each
+      side's IV. They disagree for two reasons at once: realised vs implied vol,
+      and measured vs assumed tails (the latter is ~−5pp at 2σ). So EDGE ranks
+      well but is not a probability you can size against.</div>
+  </div>`;
+}
+function _showSgTip(trigger){
+  const idx=parseInt(trigger.dataset.sgidx,10);
+  const r=_sgRows[idx]; if(!r) return;
+  const el=_ensureWallTipEl();
+  el.innerHTML=_sgDetailTip(r);
+  el.style.display='block';
+  const tr=trigger.getBoundingClientRect();
+  const pw=el.offsetWidth, ph=el.offsetHeight, vw=window.innerWidth, vh=window.innerHeight;
+  let left=tr.right-pw; if(left<8) left=8; if(left+pw>vw-8) left=vw-8-pw;
+  let top=tr.bottom+6; if(top+ph>vh-8) top=tr.top-ph-6; if(top<8) top=8;
+  el.style.left=left+'px'; el.style.top=top+'px';
+}
+function _wireSgTips(){
+  const tbl=document.querySelector('#sgTable table');
+  if(!tbl) return;
+  tbl.querySelectorAll('.wall-tip-trigger[data-sgidx]').forEach(t=>{
+    t.addEventListener('mouseenter',()=>{ t._over=true;
+      const el=_ensureWallTipEl(); el._triggerOver=true; _showSgTip(t); });
+    t.addEventListener('mouseleave',()=>{ t._over=false;
+      const el=document.getElementById('wallTipPop'); if(el) el._triggerOver=false;
+      _hideWallTip(); });
+    t.addEventListener('focus',()=>_showSgTip(t));
+    t.addEventListener('blur',()=>_hideWallTip());
+  });
+}
+
+function renderSgTable(){
+  const cols=[
+    {key:'symbol',label:'SYMBOL'},
+    {key:'expiry',label:'EXPIRY'},
+    {key:'dte',label:'DTE',fmt:v=>fmt(v,0)},
+    {key:'fut_price',label:'FUT',fmt:v=>fmt(v,1)},
+    {key:'pe_strike',label:'PUT K',fmt:v=>fmt(v,0)},
+    {key:'ce_strike',label:'CALL K',fmt:v=>fmt(v,0)},
+    {key:'strangle_prem',label:'PREMIUM',fmt:v=>fmt(v,2)},
+    {key:'width_pct',label:'WIDTH%',fmt:v=>v!=null?fmt(v,1)+'%':'—'},
+    {key:'z_min',label:'Z MIN',fmt:v=>v==null?'—':
+      `<span class="${v>=2.2?'up':v<1.6?'down':'neu'}">${fmt(v,2)}</span>`,
+     help:'Breakeven distance on the NARROWER side, in units of realised vol over the remaining DTE. The side that breaks first.'},
+    {key:'p_hold',label:'P(HOLD)',fmt:v=>v==null?'—':
+      `<span class="${v>=92?'up':v<85?'down':'neu'}">${fmt(v,1)}%</span>`,
+     help:'REALISED view: empirical probability both breakevens survive, from 725k observations, conditioned on the trailing vol band. Fat-tailed — a normal overstates by ~5pp at 2 sigma.'},
+    {key:'p_otm',label:'P(OTM)',fmt:v=>v==null?'—':fmt(v,1)+'%',
+     help:'IMPLIED view: P(finish between the breakevens) under Black-76 using each side\'s own IV. This is the number delta intuition gives you.'},
+    {key:'edge',label:'EDGE',fmt:v=>v==null?'—':sspan(v,1),
+     help:'P(HOLD) minus P(OTM), in percentage points. Positive = realised movement says the band is safer than the market is pricing it. CAVEAT: the two differ in vol source AND distribution, so part of this gap is fat tails (~-5pp at 2 sigma), not premium. Use it to rank, not to size.'},
+    {key:'atm_iv',label:'IV',fmt:v=>fmt(v,1)},
+    {key:'iv_change',label:'IV CHG',fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'iv_pctile',label:'IV %ILE',fmt:v=>v!=null?fmt(v,0):'—'},
+    {key:'hv20',label:'HV20',fmt:v=>v!=null?fmt(v,1):'—'},
+    {key:'return_on_margin',label:'RoM%',fmt:v=>v!=null?sspan(v,2):'—'},
+    {key:'_detail',label:'',sortable:false,
+     fmt:(v,r)=>`<span class="wall-tip-trigger" tabindex="0" data-sgidx="${r._idx}">⊕</span>`},
+  ];
+  _sgRows.forEach((r,i)=>{ r._idx=i; });
+  document.getElementById('sgTable').innerHTML=makeTbl(_sgRows,cols);
+  _wireSgTips();
+}
+
 VIEW_INIT['delta'] = ()=>{
   loadDsTimestamps();  // populates dsTimestamp using best available symbol
+  loadDsExpiries();    // cross-symbol live expiry list
+  // Seed the liquidity floors from Settings so the saved defaults still apply,
+  // but they are editable per-load and are sent to the API rather than being
+  // used to hide rows after the fact.
+  const oiEl=document.getElementById('dsMinOi'), volEl=document.getElementById('dsMinVol');
+  if(oiEl && !oiEl.dataset.seeded){ oiEl.value=getSetting('stgDsMinOi')||0; oiEl.dataset.seeded='1'; }
+  if(volEl && !volEl.dataset.seeded){ volEl.value=getSetting('stgDsMinVol')||0; volEl.dataset.seeded='1'; }
   // For premium lens: if plSymbol already has a selection, cascade it;
   // otherwise it will populate once user picks a symbol.
   const plSym=document.getElementById('plSymbol')?.value;
   if(plSym) loadCascade('plSymbol','plExpiry','plTimestamp');
 };
+
+// Cross-symbol expiry list for the delta screener. Reuses the OI-walls endpoint
+// (distinct live expiries across ALL symbols) rather than /api/expiries, which
+// is per-symbol and so cannot serve a screener that spans the whole universe.
+async function loadDsExpiries(){
+  const sel=document.getElementById('dsExpiry');
+  if(!sel) return;
+  try{
+    const exps=await api('/api/oi_walls_expiries');
+    const list=(exps||[]).map(e=>(typeof e==='string')?e:(e.expiry||''))
+                         .filter(Boolean);
+    const prev=sel.value;
+    sel.innerHTML='<option value="all">ALL EXPIRIES</option>'
+      +list.map(e=>`<option value="${e}">${e}</option>`).join('');
+    if(prev && [...sel.options].some(o=>o.value===prev)) sel.value=prev;
+  }catch(e){/* leave ALL EXPIRIES */}
+}
 
 // ══════════════════════════════════════════════════════════════════
 // Button listeners
@@ -1567,10 +2155,17 @@ function filterTableBySymbol(tableContainerId, query){
   const container=document.getElementById(tableContainerId);
   if(!container)return;
   const q=query.trim().toUpperCase();
+  // Find the SYMBOL column from the header rather than assuming cell 0. It IS
+  // cell 0 on OI Walls, but the delta screener leads with TYPE (CE/PE), so a
+  // hardcoded 0 matched every keystroke against "CE"/"PE" and blanked the grid.
+  let idx=0;
+  const heads=container.querySelectorAll('thead th');
+  for(let i=0;i<heads.length;i++){
+    if((heads[i].textContent||'').trim().toUpperCase()==='SYMBOL'){ idx=i; break; }
+  }
   const rows=container.querySelectorAll('tbody tr');
   rows.forEach(row=>{
-    // First cell is always the symbol
-    const sym=row.cells[0]?.textContent.trim().toUpperCase()||'';
+    const sym=row.cells[idx]?.textContent.trim().toUpperCase()||'';
     row.style.display=(!q||sym.includes(q))?'':'none';
   });
 }
@@ -2973,22 +3568,45 @@ function defendCell(r, idx){
 }
 
 // Popover HTML — three narrative groups + COM distance + hold-prob breakdown.
+//
+// EM ratios are resolved to PRICES here. A "2× EM breach 12%" reads as an
+// abstraction; "outside 22327–25161" is the thing you size against. Every
+// input is already on the row (exposure_screener does SELECT e.* off
+// exposure_eod), so this costs nothing.
+//
+// HORIZON WARNING: r.expected_move is the 1-sigma move to EXPIRY (calibrated
+// /243, see exposure_core), NOT a next-day number — while the hold probability
+// beside it IS next-day. Both horizons are labelled explicitly below so the
+// band is never misread as one session.
+function _emBand(r,mult){
+  if(r==null||!r.expected_move||r.fut_price==null||!isFinite(r.fut_price)) return null;
+  const w=r.expected_move*mult, c=r.fut_price;
+  return {w:w, lo:c-w, hi:c+w};
+}
+function _emPts(r,ratio){
+  if(r==null||!r.expected_move||ratio==null||!isFinite(ratio)) return null;
+  return ratio*r.expected_move;
+}
 function _expDetailTip(r){
   const d=_comDistEM(r);
   const h=_defenseHoldProb(r);
   const row=(lbl,val)=>`<div style="display:flex;gap:10px;margin:2px 0">
     <span style="color:var(--muted);min-width:96px;font-size:10px">${lbl}</span>
     <span style="font-size:11px">${val}</span></div>`;
+  const b2=_emBand(r,2);
   let hold;
   if(h){
     const col=h.bucket==='High'?'var(--green)':(h.bucket==='Low'?'var(--red)':'var(--amber)');
     hold=`<span style="color:${col};font-weight:600">${h.p}% — ${h.bucket}</span>
       <span style="color:var(--muted);font-size:9px"> (${h.detail})</span>
       <div style="margin-top:2px;font-size:10px">2× EM breach ${h.br2}% — <span style="color:${
-        h.rr>=1.15?'var(--red)':(h.rr<=0.85?'var(--green)':'var(--muted)')}">${h.tail}</span></div>`;
+        h.rr>=1.15?'var(--red)':(h.rr<=0.85?'var(--green)':'var(--muted)')}">${h.tail}</span></div>`
+      + (b2?`<div style="margin-top:2px;font-size:10px;color:var(--muted)">2× EM → ±${fmt(b2.w,0)} · ${fmt(b2.lo,0)}–${fmt(b2.hi,0)} <span style="font-size:9px">(to expiry)</span></div>`:'');
   } else {
     hold='<span style="color:var(--muted)">no ATM IV reading</span>';
   }
+  const comPts=_emPts(r,d);
+  const divPts=_emPts(r,r.dealer_divergence);
   return `<div style="font-family:var(--mono);min-width:240px;max-width:300px">
     <div style="font-weight:600;margin-bottom:5px;color:var(--acc)">${r.symbol}
       <span style="color:var(--muted);font-weight:400">· defense readout</span></div>
@@ -2998,14 +3616,28 @@ function _expDetailTip(r){
     <div style="border-top:1px solid var(--bd);margin:5px 0"></div>
     ${row('Centers', (r.gamma_shelf_center!=null?`γ-COM ${fmt(r.gamma_shelf_center,0)}`:'γ-COM —')
         + (r.oi_com_inrange!=null?` · OI-COM ${fmt(r.oi_com_inrange,0)}`:'')
-        + (r.dealer_divergence!=null?` · Δ ${(r.dealer_divergence>0?'+':'')}${r.dealer_divergence.toFixed(2)} EM (${r.dealer_divergence_label})`:''))}
-    ${row('COM dist', d==null?'—':`${d>0?'+':''}${d.toFixed(2)} EM from price`)}
+        + (r.dealer_divergence!=null?` · Δ ${(r.dealer_divergence>0?'+':'')}${r.dealer_divergence.toFixed(2)} EM${divPts!=null?` (${divPts>0?'+':''}${fmt(divPts,0)} pts)`:''}`:'')
+        + (r.dealer_divergence_label?` ${r.dealer_divergence_label}`:''))}
+    ${row('COM dist', d==null?'—'
+        :`${d>0?'+':''}${d.toFixed(2)} EM${comPts!=null?` = ${comPts>0?'+':''}${fmt(comPts,0)} pts`:''}`
+         +(r.fut_price!=null&&comPts!=null?` <span style="color:var(--muted)">from ${fmt(r.fut_price,0)}</span>`:''))}
+    ${row('EM (expiry)', r.expected_move!=null
+        ?`±${fmt(r.expected_move,0)}${r.dte!=null?` over ${r.dte}d`:''}`
+        :'—')}
+    ${row('EM (1 day)', r.em_1d!=null
+        ?`±${fmt(r.em_1d,0)}`
+         +(r.fut_price?` · ${fmt(r.fut_price-r.em_1d,0)}–${fmt(r.fut_price+r.em_1d,0)}`:'')
+         +(r.hv20!=null?` <span style="color:var(--muted)">hv20 ${fmt(r.hv20,1)}%</span>`:'')
+        :'<span style="color:var(--muted)">— no hv20</span>')}
     ${row('Zone holds', hold)}
     <div style="color:var(--muted);font-size:9px;margin-top:5px;line-height:1.3">
       Empirical next-day containment, banded on dealer negative-gamma share.
       Trust the ordering, not the level: band ranks are stable out-of-sample
       but the percentages move with the vol regime (up to 16pts). The 2×-breach
-      multiple is the steadier read — it is what sizes a short-premium position.</div>
+      multiple is the steadier read — it is what sizes a short-premium position.
+      EM (expiry) is the 1-sigma move to expiry from ATM IV; EM (1 day) is the
+      next session, blended 10% IV / 90% realised. Both are 1-sigma — and both
+      under-cover in the tail, so treat 2× bands as a floor on risk.</div>
   </div>`;
 }
 
@@ -4756,3 +5388,859 @@ function _pbWire(){
   });
 }
 _pbWire();
+
+// ══════════════════════════════════════════════════════════════════
+// RV FORECAST MONITOR — Phase 0 (next-day + rest-of-day). EXPERIMENTAL.
+// Reads a rolling pseudo-OOS backtest log (rv.duckdb), not a live nightly
+// forecast yet for next-day, and rest-of-day has no live path at all (same-
+// day resolution, backtest only). See areas/rv-forecast.md and
+// oc_dashboard/routes/rv_forecast.py.
+// ══════════════════════════════════════════════════════════════════
+let _rvScoreData = null;
+let _rvScatterRows = [];   // last full (unfiltered) scatter payload, for filterRvBySymbol
+let _rvScatterUnits = 'ann_vol_pct';
+
+function _rvHorizon(){ return document.getElementById('rvHorizon')?.value || 'next_day'; }
+
+async function loadRvForecast(){
+  const btn=document.getElementById('btnRvFcst');
+  if(btn){btn.textContent='LOADING…';btn.disabled=true;}
+  document.getElementById('rvKpis').innerHTML='';
+  setLoad('rvScorecard');
+  setLoad('rvScatter');
+  document.getElementById('rvLatestTable').innerHTML=
+    '<div class="loading"><div class="spinner"></div>Loading…</div>';
+  const horizon = _rvHorizon();
+  document.getElementById('rvHorizonNote').textContent = horizon==='rest_of_day'
+    ? 'Rest-of-day: forecasts the REMAINING variance from issue time to close, same trading day. Issued at 5 points through the session (bucket 1-5, roughly hourly from 09:15). Backtest only — resolves same-evening, no live path yet. naive here extrapolates today\'s own realised rate to the remaining buckets, not "today=tomorrow".'
+    : 'Next-day: forecasts tomorrow\'s full-session RV from today\'s close. naive here is plain persistence (tomorrow = today).';
+  try{
+    const sc = await api(`/api/rv_forecast/scorecard?horizon=${horizon}`);
+    _rvScoreData = sc;
+    _renderRvBadgeAndKpis(sc, horizon);
+    _renderRvScorecard(sc);
+  }catch(e){
+    document.getElementById('rvScorecard').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
+    document.getElementById('rvBadge').textContent='error';
+  }
+  await Promise.all([_loadRvLatest(), _loadRvScatter()]);
+  if(btn){btn.textContent='REFRESH';btn.disabled=false;}
+}
+
+function _renderRvBadgeAndKpis(sc, horizon){
+  const badge=document.getElementById('rvBadge');
+  badge.textContent = sc.ready
+    ? `EXPERIMENTAL · ${sc.n_issue_days} issue days scored`
+    : `COLLECTING · ${sc.n_issue_days} issue days`;
+  badge.style.color = sc.ready ? '' : 'var(--amber)';
+
+  const models = sc.models||[];
+  const best = models.find(m=>m.model==='ols_aug') || models[0];
+  const kpis=[
+    {label:'ISSUE DAYS', value:sc.n_issue_days, sub:sc.ready?'ready':'below 20-day floor'},
+    {label:'BEST QLIKE', value:best?fmt(best.qlike,4):'—',
+     sub:best?best.model:''},
+    {label:'BIAS RATIO', value:best?fmt(best.bias_ratio,3):'—',
+     sub:'actual/fcst, 1.0 = unbiased'},
+    {label:'MZ SLOPE (b)', value:best?fmt(best.mz_b,3):'—',
+     sub:'1.0 = calibrated'},
+    {label:'WITHIN-SYM R²', value:best&&best.mz_r2_within!=null?fmt(best.mz_r2_within,4):'—',
+     sub:'day-to-day timing skill'},
+  ];
+  const readNote = horizon==='rest_of_day'
+    ? `Within-symbol R² here is genuinely high (~0.35) — rest-of-day has real `
+      +`timing skill, unlike next-day. Bucket 5 (least time left) still runs `
+      +`noisier than 1-4 — fewer remaining returns to sum, a sampling-noise `
+      +`floor, not a model defect.`
+    : `Within-symbol R² near zero means the model mostly knows which names `
+      +`run hot vs cold, not that vol is about to move for a given name `
+      +`tomorrow. Fine for sizing/screening; not yet a timing signal.`;
+  document.getElementById('rvKpis').innerHTML = kpis.map(k=>
+    `<div class="kpi"><div class="kpi-label">${k.label}</div>`
+    +`<div class="kpi-val acc">${k.value}</div>`
+    +`<div class="kpi-sub">${k.sub}</div></div>`).join('')
+    + `<div class="kpi" style="max-width:260px">`
+    + `<div class="kpi-label">READ THIS FIRST</div>`
+    + `<div style="font-size:9px;color:var(--muted);line-height:1.4;margin-top:4px">`
+    + `${readNote}</div></div>`;
+}
+
+function _renderRvScorecard(sc){
+  const cols=[
+    {key:'model',label:'MODEL',fmt:v=>v==='naive'?v:`<b>${v}</b>`},
+    {key:'n',label:'N',fmt:v=>fmt(v,0)},
+    {key:'n_symbols',label:'SYMS',fmt:v=>fmt(v,0)},
+    {key:'qlike',label:'QLIKE',fmt:v=>v==null?'—':fmt(v,4),
+     help:'Lower is better. straddle_core\'s canonical QLIKE on variance — not MSE, which is dominated by the highest-vol names and ranks models differently (and worse).'},
+    {key:'bias_ratio',label:'BIAS',fmt:v=>v==null?'—':fmt(v,3),
+     help:'sum(actual)/sum(forecast). 1.0 = unbiased in aggregate. Can look fine here while individual vol deciles are still off — see straddle_core.'},
+    {key:'mz_a',label:'MZ α',fmt:v=>v==null?'—':fmt(v,3),
+     help:'Mincer-Zarnowitz intercept, log-variance, pooled with two-way clustered SE (straddle_core.pooled_mz_clustered). Only interpretable jointly with mz_b — see mz_b tooltip.'},
+    {key:'mz_b',label:'MZ β',fmt:v=>v==null?'—':fmt(v,3),
+     help:'Mincer-Zarnowitz slope. 1.0 = calibrated forecast level. This is the number that matters more than α alone.'},
+    {key:'mz_r2_within',label:'R² WITHIN',fmt:v=>v==null?'—':fmt(v,4),
+     help:'Within-symbol R² (pooled R² after removing each symbol\'s own mean). Measures day-to-day TIMING skill, not cross-sectional level ("high-vol stocks have high vol", which inflates plain pooled R² without being real skill).'},
+  ];
+  document.getElementById('rvScorecard').innerHTML = makeTbl(sc.models||[], cols)
+    + `<div style="padding:6px 10px;font-family:var(--mono);font-size:9px;color:var(--muted)">${sc.note||''}</div>`;
+}
+
+async function _loadRvLatest(){
+  const model = document.getElementById('rvModel')?.value || 'ols_aug';
+  const horizon = _rvHorizon();
+  try{
+    const res = await api(`/api/rv_forecast/latest?model=${model}&horizon=${horizon}`);
+    document.getElementById('rvLatestAsof').textContent = res.issue_d ? `as of ${res.issue_d}` : '—';
+    if(!res.rows?.length){
+      document.getElementById('rvLatestTable').innerHTML =
+        '<div class="empty">No forecasts logged for this model yet.</div>';
+      return;
+    }
+    const isRod = horizon==='rest_of_day';
+    const valKey = res.units==='session_vol_pct' ? 'session_vol_pct' : 'ann_vol_pct';
+    const valLabel = res.units==='session_vol_pct' ? 'FCST SESSION VOL % (not annualised)' : 'FCST ANN. VOL %';
+    const cols=[
+      {key:'symbol',label:'SYMBOL'},
+      ...(isRod ? [{key:'issue_bucket',label:'ISSUE BKT',fmt:v=>v==null?'—':fmt(v,0)}] : []),
+      // next_day forecasts issued by rv_model --live are stored with target_d NULL
+      // ("pending") until the next session's data exists -- by design, so holidays
+      // never mis-resolve. Show that, rather than a blank.
+      {key:'target_d',label:isRod?'DATE':'TARGET DATE',
+       fmt:v=>v==null ? (isRod?'—':'<span style="color:var(--muted)" title="resolves after the next session\'s EOD">pending · next session</span>') : String(v).slice(0,10)},
+      {key:valKey,label:valLabel,fmt:v=>v==null?'—':fmt(v,1)},
+    ];
+    document.getElementById('rvLatestTable').innerHTML = makeTbl(res.rows, cols);
+    const s=document.getElementById('rvSearch');
+    if(s && s.value) filterTableBySymbol('rvLatestTable', s.value);
+  }catch(e){
+    document.getElementById('rvLatestTable').innerHTML = `<div class="empty err">⚠ ${e.message}</div>`;
+  }
+}
+
+async function _loadRvScatter(){
+  const model = document.getElementById('rvModel')?.value || 'ols_aug';
+  const horizon = _rvHorizon();
+  try{
+    const res = await api(`/api/rv_forecast/scatter?model=${model}&horizon=${horizon}`);
+    _rvScatterRows = res.rows||[];
+    _rvScatterUnits = res.units || 'ann_vol_pct';
+    const badge = document.getElementById('rvScatterBadge');
+    if(badge) badge.textContent = horizon==='rest_of_day'
+      ? 'rest-of-day session vol % (not annualised) · selected model'
+      : 'next-day ann. vol % · selected model';
+    const s=document.getElementById('rvSearch');
+    _renderRvScatter(s&&s.value ? _rvScatterRows.filter(r=>r.symbol.toUpperCase().includes(s.value.toUpperCase())) : _rvScatterRows, model);
+  }catch(e){
+    _rvScatterRows=[];
+    setEmpty('rvScatter',`⚠ ${e.message}`);
+  }
+}
+
+function _renderRvScatter(rows, model){
+  if(!rows.length){ setEmpty('rvScatter','No scored forecasts for this filter'); return; }
+  const unitLabel = _rvScatterUnits==='session_vol_pct' ? 'session vol % (not ann.)' : 'ann. vol %';
+  const xs=rows.map(r=>r.fcst_vol), ys=rows.map(r=>r.actual_vol);
+  const lo=Math.min(...xs,...ys), hi=Math.max(...xs,...ys);
+  plot('rvScatter',[
+    {name:'ref (y=x)',x:[lo,hi],y:[lo,hi],type:'scatter',mode:'lines',
+      line:{color:C.muted,width:1,dash:'dot'},hoverinfo:'skip'},
+    {name:model,x:xs,y:ys,type:'scatter',mode:'markers',
+      marker:{color:C.acc,size:5,opacity:.55},
+      text:rows.map(r=>`${r.symbol} · ${r.d}`),hovertemplate:'%{text}<br>fcst %{x:.1f}% vs actual %{y:.1f}%<extra></extra>'},
+  ],{...LB,
+    xaxis:{...LB.xaxis,title:`FORECAST ${unitLabel}`},
+    yaxis:{...LB.yaxis,title:`REALISED ${unitLabel}`},
+    showlegend:false,
+  });
+}
+
+// Symbol filter for the tab. Applies to the latest-forecast table AND the
+// scatter chart (re-filtered from the cached _rvScatterRows, no refetch).
+// Deliberately does NOT touch the scorecard: that table is one row per
+// MODEL, aggregated across the whole universe -- filtering it by symbol
+// would just blank it, not narrow it, since no row IS a symbol.
+function filterRvBySymbol(query){
+  filterTableBySymbol('rvLatestTable', query);
+  const model = document.getElementById('rvModel')?.value || 'ols_aug';
+  const rows = query ? _rvScatterRows.filter(r=>r.symbol.toUpperCase().includes(query.toUpperCase()))
+                     : _rvScatterRows;
+  _renderRvScatter(rows, model);
+}
+
+document.getElementById('btnRvFcst')?.addEventListener('click', loadRvForecast);
+document.getElementById('rvHorizon')?.addEventListener('change', loadRvForecast);
+document.getElementById('rvModel')?.addEventListener('change', ()=>{
+  _loadRvLatest(); _loadRvScatter();
+});
+
+// ══════════════════════════════════════════════════════
+// VRP (variance risk premium) dashboard. Phases 1-4 built and validated
+// (parity, weekly forward, standardized rank, constant-maturity IV, regime
+// warning + backtest, harvesting signals). EXPERIMENTAL -- reads vrp.duckdb,
+// an offline EOD batch (vrp_build.py / vrp_signals.py in
+// C:\Users\aniru\od\claude). See areas/vrp-dashboard.md and
+// oc_dashboard/routes/vrp.py.
+// ══════════════════════════════════════════════════════
+const VRP_INDEXES = ['NIFTY','BANKNIFTY','FINNIFTY'];
+
+function _vrpHorizon(){ return document.getElementById('vrpHorizon')?.value || '30d'; }
+function _vrpAnchor(){ return document.getElementById('vrpAnchor')?.value || 'fwd'; }
+
+async function loadVrp(){
+  const btn=document.getElementById('btnVrpRefresh');
+  if(btn){btn.textContent='LOADING…';btn.disabled=true;}
+  document.getElementById('vrpKpis').innerHTML='';
+  setLoad('vrpLatestTable');
+  setLoad('vrpChart');
+  setLoad('vrpRegimeChart');
+  setLoad('vrpSignalsTable');
+  await Promise.all([_loadVrpLatest(), _loadVrpChart(), _loadVrpRegime(), _loadVrpSignals()]);
+  if(btn){btn.textContent='REFRESH';btn.disabled=false;}
+}
+
+// True/false/absent, rendered so all three read differently at a glance.
+// True → a coloured YES badge. False → a plain, muted "no" (data IS present,
+// the signal just isn't active). Absent (no row at all -- e.g. the harvesting
+// signals haven't been built yet, or this date/symbol has no vrp_iv_cm
+// coverage) → a dash with a tooltip, so "off" and "unknown" never look the same.
+function _vrpBoolCell(v, trueClass, absentTitle){
+  if(v === true) return `<span class="badge ${trueClass}">YES</span>`;
+  if(v === false) return `<span style="color:var(--muted);opacity:.7">no</span>`;
+  return `<span title="${absentTitle}" style="color:var(--muted);cursor:help">—</span>`;
+}
+
+async function _loadVrpLatest(){
+  const horizon=_vrpHorizon(), anchor=_vrpAnchor();
+  try{
+    const res = await api(`/api/vrp/latest?horizon=${horizon}&anchor=${anchor}`);
+    const rows = res.rows||[];
+    const nWarn = rows.filter(r=>r.regime_warning).length;
+    const nHarvest = rows.filter(r=>r.harvest_candidate).length;
+    const avgPct = rows.filter(r=>r.pct_rank!=null);
+    const meanPct = avgPct.length ? avgPct.reduce((s,r)=>s+r.pct_rank,0)/avgPct.length : null;
+    document.getElementById('vrpBadge').textContent = `EXPERIMENTAL · ${horizon} · ${anchor} anchor`;
+
+    // Freshness note: vrp_metrics/vrp_rank need options data (for IV) and can lag
+    // vrp_regime, which only needs futures/index data. Surface the gap instead of
+    // letting a stale-looking "AS OF" date look like a bug.
+    const ivDates = rows.map(r=>r.d).filter(Boolean).sort();
+    let regimeMaxDate = null;
+    try{
+      const rg = await api('/api/vrp/regime');
+      Object.values(rg.series||{}).forEach(legs=>{
+        (legs.same_index||[]).forEach(pt=>{ if(!regimeMaxDate || pt.d > regimeMaxDate) regimeMaxDate = pt.d; });
+      });
+    }catch(e){/* freshness note is best-effort */}
+    const ivMax = ivDates.length ? ivDates[ivDates.length-1] : null;
+    const note = document.getElementById('vrpFreshnessNote');
+    if(note){
+      if(ivMax && regimeMaxDate && ivMax !== regimeMaxDate){
+        note.innerHTML = `IV/premium data through <b>${ivMax}</b>, regime data through <b>${regimeMaxDate}</b> — `
+          +`the gap is upstream F&amp;O bhavcopy lag (options/futures ingestion running behind the cash index), `
+          +`not a pipeline fault. Regime warnings are current; the premium table above is as fresh as the options chain.`;
+      } else if(ivMax){
+        note.textContent = `Data current through ${ivMax}.`;
+      } else {
+        note.textContent = '';
+      }
+    }
+    const kpis=[
+      {label:'REGIME WARNINGS', value:`${nWarn}/3`, sub:nWarn?'active now':'none active'},
+      {label:'HARVEST CANDIDATES', value:`${nHarvest}/3`, sub:'pct≥80, z≥1, no warning, no inversion'},
+      {label:'MEAN PCT RANK', value:meanPct!=null?fmt(meanPct,1):'—', sub:'across the 3 indexes'},
+    ];
+    document.getElementById('vrpKpis').innerHTML = kpis.map(k=>
+      `<div class="kpi"><div class="kpi-label">${k.label}</div>`
+      +`<div class="kpi-val acc">${k.value}</div>`
+      +`<div class="kpi-sub">${k.sub}</div></div>`).join('')
+      + `<div class="kpi" style="max-width:280px">`
+      + `<div class="kpi-label">READ THIS FIRST</div>`
+      + `<div style="font-size:9px;color:var(--muted);line-height:1.4;margin-top:4px">`
+      + `Percentile/z-score are validated (calibration checked against uniform/normal `
+      + `theory on the full history). The regime warning fires 2-3 days INTO a shock, `
+      + `not before it -- a fast confirmation, not a prediction. Harvest/cheap/compressing `
+      + `thresholds are starting points, not yet backtested for forward-premium quality.</div></div>`;
+
+    if(!rows.length){
+      document.getElementById('vrpLatestTable').innerHTML = '<div class="empty">No VRP data yet.</div>';
+      return;
+    }
+    const cols=[
+      {key:'symbol',label:'SYMBOL',fmt:v=>`<b>${v}</b>`},
+      {key:'d',label:'AS OF'},
+      {key:'dte_cal',label:'DTE',fmt:v=>v==null?'—':fmt(v,0)},
+      {key:'pct_rank',label:'PCT RANK',fmt:v=>v==null?'—':fmt(v,1)},
+      {key:'z_score',label:'Z',fmt:v=>v==null?'—':fmt(v,2)},
+      {key:'log_ratio',label:'LOG RATIO',fmt:v=>v==null?'—':fmt(v,3)},
+      {key:'spread_vol_pts',label:'SPREAD (VOL PTS)',fmt:v=>v==null?'—':fmt(v,2)},
+      {key:'regime_z',label:'REGIME Z',fmt:(v,row)=>v==null?'—':
+        `<span style="${row.regime_warning?'color:var(--red);font-weight:600':''}">${fmt(v,2)}${row.regime_warning?' ⚠':''}</span>`},
+      {key:'harvest_candidate',label:'HARVEST',
+        fmt:v=>_vrpBoolCell(v,'badge-g','no signal data yet for this symbol/horizon -- run vrp_signals.py --step signals')},
+      {key:'premium_cheap',label:'CHEAP',
+        fmt:v=>_vrpBoolCell(v,'badge-r','no signal data yet for this symbol/horizon -- run vrp_signals.py --step signals')},
+      {key:'premium_compressing',label:'COMPRESSING',
+        fmt:v=>_vrpBoolCell(v,'','no signal data yet for this symbol/horizon -- run vrp_signals.py --step signals')},
+      {key:'term_structure_inversion',label:'INVERTED',
+        fmt:v=>_vrpBoolCell(v,'','no constant-maturity IV coverage for this symbol/date (see vrp_iv_cm method=none)')},
+    ];
+    document.getElementById('vrpLatestTable').innerHTML = makeTbl(rows, cols);
+  }catch(e){
+    document.getElementById('vrpLatestTable').innerHTML = `<div class="empty err">⚠ ${e.message}</div>`;
+    document.getElementById('vrpBadge').textContent='error';
+  }
+}
+
+function _vrpLookback(){ return document.getElementById('vrpLookback')?.value || '180'; }
+
+async function _loadVrpChart(){
+  const symbol = document.getElementById('vrpChartSymbol')?.value || 'NIFTY';
+  const horizon=_vrpHorizon(), anchor=_vrpAnchor(), limit=_vrpLookback();
+  try{
+    const res = await api(`/api/vrp/timeseries?symbol=${symbol}&horizon=${horizon}&anchor=${anchor}&limit=${limit}`);
+    const rows = res.rows||[];
+    const badge=document.getElementById('vrpChartBadge');
+    if(badge) badge.textContent = `${symbol} · ${horizon} · vol-point spread`;
+    if(!rows.length){ setEmpty('vrpChart', 'No history for this filter'); return; }
+    plot('vrpChart',[
+      {name:'spread (vol pts)', x:rows.map(r=>r.d), y:rows.map(r=>r.spread_vol_pts),
+        type:'scatter', mode:'lines', line:{color:C.acc,width:1.4}},
+      {name:'zero', x:[rows[0].d, rows[rows.length-1].d], y:[0,0], type:'scatter', mode:'lines',
+        line:{color:C.muted,width:1,dash:'dot'}, hoverinfo:'skip'},
+    ],{...LB,
+      yaxis:{...LB.yaxis, title:'IV MINUS RV (VOL PTS)'},
+      showlegend:false,
+    });
+  }catch(e){
+    setEmpty('vrpChart', `⚠ ${e.message}`);
+  }
+}
+
+async function _loadVrpRegime(){
+  const symbol = document.getElementById('vrpChartSymbol')?.value || 'NIFTY';
+  const limit=_vrpLookback();
+  try{
+    const res = await api(`/api/vrp/regime?limit=${limit}`);
+    const series = (res.series && res.series[symbol] && res.series[symbol].same_index) || [];
+    if(!series.length){ setEmpty('vrpRegimeChart', 'No regime history for this symbol'); return; }
+    plot('vrpRegimeChart',[
+      {name:'z_shock', x:series.map(r=>r.d), y:series.map(r=>r.z_shock),
+        type:'scatter', mode:'lines', line:{color:C.acc,width:1.4}},
+      {name:'warning threshold', x:[series[0].d, series[series.length-1].d], y:[2,2],
+        type:'scatter', mode:'lines', line:{color:C.red,width:1,dash:'dot'}, hoverinfo:'skip'},
+    ],{...LB,
+      yaxis:{...LB.yaxis, title:'z_shock'},
+      showlegend:false,
+    });
+  }catch(e){
+    setEmpty('vrpRegimeChart', `⚠ ${e.message}`);
+  }
+}
+
+async function _loadVrpSignals(){
+  const horizon=_vrpHorizon();
+  try{
+    const res = await api(`/api/vrp/signals?horizon=${horizon}`);
+    const rows = res.rows||[];
+    document.getElementById('vrpSignalsAsof').textContent = rows.length ? `${rows[0].d} → …` : '—';
+    if(!rows.length){
+      document.getElementById('vrpSignalsTable').innerHTML =
+        '<div class="empty">No signal history yet -- run vrp_signals.py --step signals.</div>';
+      return;
+    }
+    const cols=[
+      {key:'symbol',label:'SYMBOL'},
+      {key:'d',label:'DATE'},
+      {key:'signal',label:'SIGNAL'},
+      {key:'state',label:'STATE'},
+      {key:'value',label:'VALUE',fmt:v=>v==null?'—':fmt(v,2)},
+    ];
+    document.getElementById('vrpSignalsTable').innerHTML = makeTbl(rows, cols);
+    _vrpFilterSignalsTable();
+  }catch(e){
+    document.getElementById('vrpSignalsTable').innerHTML = `<div class="empty err">⚠ ${e.message}</div>`;
+  }
+}
+
+// Combines all three signal-history filters (symbol text, signal dropdown, state
+// text) with AND logic, since filterTableBySymbol alone only handles one column
+// and the three controls need to narrow together, not independently overwrite
+// each other's row.style.display.
+function _vrpFilterSignalsTable(){
+  const container=document.getElementById('vrpSignalsTable');
+  if(!container) return;
+  const symQ=(document.getElementById('vrpSignalsSearch')?.value||'').trim().toUpperCase();
+  const sigQ=document.getElementById('vrpSignalFilter')?.value||'';
+  const stateMode=document.getElementById('vrpStateFilter')?.value||'';   // '', 'triggered', 'not_triggered'
+  const heads=container.querySelectorAll('thead th');
+  let symIdx=0, sigIdx=2, stateIdx=3;
+  heads.forEach((h,i)=>{
+    const t=(h.textContent||'').trim().toUpperCase();
+    if(t==='SYMBOL') symIdx=i; else if(t==='SIGNAL') sigIdx=i; else if(t==='STATE') stateIdx=i;
+  });
+  container.querySelectorAll('tbody tr').forEach(row=>{
+    const sym=row.cells[symIdx]?.textContent.trim().toUpperCase()||'';
+    const sig=row.cells[sigIdx]?.textContent.trim()||'';
+    const state=row.cells[stateIdx]?.textContent.trim().toUpperCase()||'';
+    // relative_richness is a rank (1/2/3), never True/False -- it isn't a trigger, so the
+    // triggered/not-triggered toggle never hides it, only the symbol/signal filters can.
+    let stateOk=true;
+    if(stateMode==='triggered') stateOk = (sig==='relative_richness') || state==='TRUE';
+    else if(stateMode==='not_triggered') stateOk = (sig!=='relative_richness') && state==='FALSE';
+    const ok=(!symQ||sym.includes(symQ)) && (!sigQ||sig===sigQ) && stateOk;
+    row.style.display = ok ? '' : 'none';
+  });
+}
+
+function _vrpGuideHtml(){
+  const sec=(title,body)=>`<b style="color:var(--text)">${title}</b><br>${body}<br><br>`;
+  return sec('WHAT THIS PAGE IS',
+    `The variance risk premium (IV minus realised vol) for NIFTY, BANKNIFTY and FINNIFTY, `
+    +`built offline nightly by <code>vrp_build.py</code> and <code>vrp_signals.py</code>. `
+    +`Four phases, all validated against the full 2020-2026 history before shipping: `
+    +`parity with live IV, a weekly-forward rule checked against traded futures, a `
+    +`standardized percentile/z-score rank, and a same-index shock trigger backtested `
+    +`against an ex-post label. The harvesting signals (bottom section) are the newest `
+    +`and least proven part -- starting-point thresholds, not yet backtested for `
+    +`forward-premium quality.`)
+
+  + sec('MAIN TABLE COLUMNS',
+    [['PCT RANK / Z','Where the current premium sits against its own trailing 252-day history (min 120 observations). Validated: on the full history this averages ~50 / ~0 with the expected spread, so it is trustworthy out of the box.'],
+     ['LOG RATIO','ln(implied total variance / realised total variance) -- the dimensionless premium. Positive means IV is running above realised.'],
+     ['SPREAD (VOL PTS)','The same premium in annualised vol points, on the trading-day (243) display clock.'],
+     ['REGIME Z','The same-index shock trigger: (5-day realised variance − 20-day HV) / (std of the 20-day HV series over its own trailing year). Turns the warning on at z ≥ 2.0. Backtested at precision 0.72-0.84 / recall 0.83-0.93 (z=2.0, full history) -- but it fires 2-3 trading days INTO a shock, not before it. Read it as a fast confirmation, not a prediction.'],
+     ['HARVEST / CHEAP / COMPRESSING / INVERTED','Phase 4 starting-point signals. A plain grey "no" means the signal was computed and is off; a dash with a tooltip means no data exists yet for that row (different problem, different fix -- hover it).'],
+    ].map(([k,v])=>`<b style="color:var(--acc)">${k}:</b> ${v}`).join('<br>'))
+
+  + sec('WHY TWO DATES CAN DIFFER',
+    `The premium table needs the options chain (for IV); the regime chart only needs `
+    +`futures/index prices. When the F&amp;O bhavcopy ingestion lags the cash index feed `
+    +`by a few days, the premium table's "AS OF" date lags the regime chart's. The note `
+    +`under the filter bar says so explicitly when it happens -- it is a data-freshness `
+    +`gap upstream of this dashboard, not a pipeline fault.`)
+
+  + sec('ANCHOR: FORWARD VS SPOT',
+    `Two ways to read "ATM". FORWARD reads IV at the strike nearest the forward price, `
+    +`stripping skew and carry out of the number -- the recommended default. SPOT reads `
+    +`it at the strike nearest spot, matching the live dashboard and screeners elsewhere. `
+    +`They differ by 0.1-0.4 vol point, growing with days to expiry.`)
+
+  + sec('READING THE SIGNALS TOGETHER',
+    `The four boolean signals are not independent votes -- INVERTED is itself one of the `
+    +`conditions inside HARVEST: if a day shows inverted = Yes, harvest_candidate will show `
+    +`False for that reason alone, whatever the percentile says. So seeing both together `
+    +`is not a coincidence, it is the gate working as designed.<br><br>`
+    +`INVERTED means 7-day IV is trading above 30-day IV -- usually read as the market `
+    +`pricing more near-term risk than long-term. But the base rate differs sharply by `
+    +`index: BANKNIFTY inverts on about 49% of days (close to a coin flip -- its term `
+    +`structure genuinely runs close to flat), against about 30% for NIFTY. Treat `
+    +`INVERTED = Yes on BANKNIFTY as closer to routine than alarming; the same reading `
+    +`on NIFTY is a less common event and worth more attention.<br><br>`
+    +`COMPRESSING = Yes means the percentile rank has dropped 20+ points in 5 trading `
+    +`days -- whatever richness existed is fading fast, which argues against a fresh `
+    +`harvest entry even on a day the percentile alone still looks high. None of these `
+    +`thresholds have been backtested yet for actual forward-premium quality (see "What `
+    +`this page is" above) -- read the direction, not the precision.`)
+
+  + sec('SIGNAL HISTORY TABLE: STATE HAS NO MEMORY',
+    `Each row is recomputed fresh from that single day's data -- state = False never `
+    +`means "changed to false" or "hasn't triggered yet," only that the condition was `
+    +`not met that day. HARVEST_CANDIDATE and PREMIUM_CHEAP both display that day's `
+    +`percentile rank as their VALUE column, so seeing the same number on both with `
+    +`both False is normal: a mid-range percentile (say 47) is neither rich enough for `
+    +`harvest (needs 80+) nor low enough for cheap (needs 20 or under). `
+    +`PREMIUM_COMPRESSING's value is instead the 5-day percentile CHANGE, not the level. `
+    +`The TRIGGERED ONLY filter (default) hides the False rows for the four boolean `
+    +`signals but always keeps RELATIVE_RICHNESS visible, since a rank of 1st/2nd/3rd `
+    +`is not a trigger to filter on -- switch to ALL STATES to see every day, including `
+    +`the ones nothing fired.`);
+}
+
+document.getElementById('btnVrpGuide')?.addEventListener('click',()=>{
+  const g=document.getElementById('vrpGuide');
+  if(!g) return;
+  if(!g.dataset.built){ g.innerHTML=_vrpGuideHtml(); g.dataset.built='1'; }
+  g.style.display = g.style.display==='none' ? '' : 'none';
+});
+
+document.getElementById('btnVrpRefresh')?.addEventListener('click', loadVrp);
+document.getElementById('vrpHorizon')?.addEventListener('change', loadVrp);
+document.getElementById('vrpAnchor')?.addEventListener('change', loadVrp);
+document.getElementById('vrpChartSymbol')?.addEventListener('change', ()=>{
+  _loadVrpChart(); _loadVrpRegime();
+});
+document.getElementById('vrpLookback')?.addEventListener('change', ()=>{
+  _loadVrpChart(); _loadVrpRegime();
+});
+
+// ══ WHEEL (BACKTEST + PAPER) ═══════════════════════════════════════
+// Reads oc_dashboard/routes/wheel.py -> wheel_bt.duckdb. EXPERIMENTAL:
+// backtest runs are in-sample unless labelled "split ... OOS"; paper books
+// are a mechanics / slippage check over weeks, not proof of edge.
+let _wheelRunData = null, _wheelTradesAll = [], _wheelBooks = [];
+const _WHEEL_EXIT_COL = {final_exit:C.green, time_exit:C.acc, results:C.pur, corp_action:C.muted,
+  stop_mult:C.red, stop_spot:C.amber, stop_delta:C.acc2, profit:'#34d399', window_end:'#64748b', expiry:'#94a3b8', open:C.acc};
+const _wPct = (v,d=1)=> v==null ? '—' : `${fmt(v*100,d)}%`;
+const _wRs  = v => v==null ? '—' : `₹${fmtL(Math.round(v))}`;
+
+function _wheelTabsInit(){
+  document.querySelectorAll('#wheelTabs .pagetab').forEach(tab=>{
+    if(tab.dataset.bound) return; tab.dataset.bound='1';
+    tab.addEventListener('click',()=>{
+      document.querySelectorAll('#wheelTabs .pagetab').forEach(t=>t.classList.remove('active'));
+      document.querySelectorAll('#view-wheel > .pagetab-panel').forEach(p=>p.classList.remove('active'));
+      tab.classList.add('active');
+      document.getElementById(tab.dataset.wtab).classList.add('active');
+      if(tab.dataset.wtab==='wt-paper' && !tab.dataset.init){ tab.dataset.init='1'; _wheelLoadBooks(); }
+      window.dispatchEvent(new Event('resize'));   // Plotly sizes hidden charts at 0 width
+    });
+  });
+  const b=document.getElementById('btnWheelRefresh'); if(b && !b.dataset.bound){ b.dataset.bound='1'; b.onclick=()=>_wheelLoadRuns(); }
+  const r=document.getElementById('wheelRun'); if(r && !r.dataset.bound){ r.dataset.bound='1'; r.onchange=()=>_wheelLoadRun(); }
+  const c=document.getElementById('wheelCompare'); if(c && !c.dataset.bound){ c.dataset.bound='1'; c.onchange=()=>_wheelLoadRun(); }
+  const pb=document.getElementById('btnWheelPaperRefresh'); if(pb && !pb.dataset.bound){ pb.dataset.bound='1'; pb.onclick=()=>_wheelLoadBooks(); }
+  const bk=document.getElementById('wheelBook'); if(bk && !bk.dataset.bound){ bk.dataset.bound='1'; bk.onchange=()=>_wheelLoadBook(); }
+}
+
+async function loadWheel(){
+  _wheelTabsInit();
+  await _wheelLoadRuns();
+}
+
+async function _wheelLoadRuns(){
+  const sel=document.getElementById('wheelRun'), cmp=document.getElementById('wheelCompare');
+  try{
+    const res=await api('/api/wheel/runs');
+    const rows=res.rows||[];
+    if(!rows.length){
+      ['wheelEqChart','wheelMonthChart','wheelYearChart','wheelExitChart'].forEach(id=>setEmpty(id,'No backtest runs yet — run oc/wheel_bt.py'));
+      document.getElementById('wheelStockTable').innerHTML='<div class="empty">No runs.</div>';
+      document.getElementById('wheelTradesTable').innerHTML='<div class="empty">No runs.</div>';
+      return;
+    }
+    const prev=sel.value, prevC=cmp.value;
+    const opt=r=>`<option value="${r.run_id}">${r.created} · ${r.label||'run'} · ${r.trades??'?'} tr · ${_wRs(r.pnl)}</option>`;
+    sel.innerHTML=rows.map(opt).join('');
+    cmp.innerHTML='<option value="">— none —</option>'+rows.map(opt).join('');
+    if(rows.some(r=>r.run_id===prev)) sel.value=prev;
+    if(rows.some(r=>r.run_id===prevC)) cmp.value=prevC;
+    await _wheelLoadRun();
+  }catch(e){
+    setEmpty('wheelEqChart',`⚠ ${e.message}`);
+  }
+}
+
+async function _wheelLoadRun(){
+  const id=document.getElementById('wheelRun').value, cid=document.getElementById('wheelCompare').value;
+  if(!id) return;
+  ['wheelEqChart','wheelMonthChart','wheelYearChart','wheelExitChart','wheelStockTable','wheelTradesTable'].forEach(x=>setLoad(x));
+  document.getElementById('wheelTradeCard').style.display='none';
+  try{
+    const [d, cmp, tr] = await Promise.all([
+      api(`/api/wheel/run/${encodeURIComponent(id)}`),
+      cid && cid!==id ? api(`/api/wheel/run/${encodeURIComponent(cid)}`) : Promise.resolve(null),
+      api(`/api/wheel/trades?run_id=${encodeURIComponent(id)}`),
+    ]);
+    _wheelRunData=d; _wheelTradesAll=tr.rows||[];
+    const oos = /OOS/.test(d.label||'');
+    document.getElementById('wheelBadge').textContent = oos ? 'OUT-OF-SAMPLE RUN' : 'EXPERIMENTAL · IN-SAMPLE';
+    const pc=d.params_changed||{};
+    document.getElementById('wheelParams').innerHTML =
+      `<b>${d.label||'run'}</b> · ${d.start} → ${d.end} · capital ${_wRs(d.capital)} (cash ${_wRs(d.cash)}) · `
+      + (Object.keys(pc).filter(k=>!['start','end'].includes(k)).map(k=>`${k}=<b>${Array.isArray(pc[k])?pc[k].join('/'):pc[k]}</b>`).join(' · ') || 'all defaults');
+    _wheelKpis(d);
+    _wheelEquity(d, cmp);
+    _wheelMonthly(d);
+    _wheelYears(d);
+    _wheelExits(d);
+    _wheelStocks(d);
+    const rs=document.getElementById('wheelTradeReason');
+    const reasons=[...new Set(_wheelTradesAll.map(t=>t.reason))].sort();
+    rs.innerHTML='<option value="">ALL EXITS</option>'+reasons.map(r=>`<option value="${r}">${r}</option>`).join('');
+    _wheelRenderTrades();
+  }catch(e){
+    ['wheelEqChart','wheelMonthChart','wheelYearChart','wheelExitChart'].forEach(x=>setEmpty(x,`⚠ ${e.message}`));
+    document.getElementById('wheelStockTable').innerHTML=`<div class="empty err">⚠ ${e.message}</div>`;
+    document.getElementById('wheelTradesTable').innerHTML='';
+  }
+}
+
+function _wheelKpis(d){
+  const m=d.metrics||{};
+  const k=(label,value,sub,cls='acc',tip='')=>`<div class="kpi"${tip?` title="${tip.replace(/"/g,'&quot;')}"`:''}><div class="kpi-label">${label}</div><div class="kpi-val ${cls}">${value}</div><div class="kpi-sub">${sub||''}</div></div>`;
+  const pnlCls = (m.pnl||0)>=0?'up':'down';
+  document.getElementById('wheelKpis').innerHTML = [
+    k('NET P&L', _wRs(m.pnl), `${m.trades??0} trades · win ${_wPct(m.win_rate,0)}`, pnlCls),
+    k('CAGR ON CASH', _wPct(m.cagr_on_cash), `on total capital ${_wPct(m.cagr_total)}`, pnlCls,
+      'Annualised return on the cash leg; the pledged collateral keeps earning its own return on top.'),
+    k('MAX DRAWDOWN', _wRs(m.max_dd_rs), `${_wPct(m.max_dd_pct_total)} of total · ${_wPct(m.max_dd_pct_cash)} of cash`, 'down'),
+    k('WORST MONTH', _wRs(m.worst_month_rs), `${_wPct(m.pct_months_negative,0)} of months negative`, 'down'),
+    k('CALMAR', m.calmar==null?'—':fmt(m.calmar,2), 'annual P&L ÷ max drawdown', 'acc',
+      'Risk-adjusted return: higher is better. Compare runs on this before raw P&L.'),
+    k('MARGIN USE', _wPct(m.avg_util,0), `avg of capital · peak ${_wPct(m.max_util_of_capacity,0)} of capacity`, 'acc'),
+    k('BREACHES', `${m.breach_days??0} / ${m.cash_rule_breach_days??0}`, 'margin / 50:50 cash-rule days',
+      (m.breach_days||m.cash_rule_breach_days)?'down':'up'),
+  ].join('');
+}
+
+function _wheelEquity(d, cmp){
+  const cv=d.curve||[];
+  if(!cv.length){ setEmpty('wheelEqChart','No equity rows'); return; }
+  const x=cv.map(r=>r.date);
+  const traces=[
+    {x, y:cv.map(r=>r.pnl), name:'cum P&L', type:'scatter', mode:'lines', line:{color:C.acc,width:1.6}},
+    {x, y:cv.map(r=>r.dd), name:'drawdown', type:'scatter', mode:'lines', fill:'tozeroy',
+     line:{color:C.red,width:1}, fillcolor:'rgba(244,63,94,.25)', yaxis:'y2'},
+  ];
+  if(cmp && (cmp.curve||[]).length){
+    traces.push({x:cmp.curve.map(r=>r.date), y:cmp.curve.map(r=>r.pnl), name:'compare: '+(cmp.label||'run'),
+                 type:'scatter', mode:'lines', line:{color:C.amber,width:1.2,dash:'dot'}});
+  }
+  document.getElementById('wheelEqBadge').textContent = cmp ? 'vs '+(cmp.label||'compare') : '₹';
+  plot('wheelEqChart', traces, {...LB, showlegend:true, legend:{...LB.legend, orientation:'h', y:1.08},
+    yaxis:{...LB.yaxis, domain:[0.34,1], title:{text:'cum P&L',font:{size:9}}},
+    yaxis2:{...LB.yaxis, domain:[0,0.26], title:{text:'DD',font:{size:9}}},
+    xaxis:{...LB.xaxis, anchor:'y2'}, margin:{...LB.margin, t:28}});
+}
+
+function _wheelMonthly(d){
+  const ms=d.monthly||[];
+  if(!ms.length){ setEmpty('wheelMonthChart','No monthly data'); return; }
+  const years=[...new Set(ms.map(r=>r.year))].sort();
+  const mon=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const z=years.map(y=>mon.map((_,i)=>{ const r=ms.find(o=>o.year===y&&o.month===i+1); return r?r.pnl:null; }));
+  const txt=z.map(row=>row.map(v=>v==null?'':fmtL(Math.round(v))));
+  const lim=Math.max(...ms.map(r=>Math.abs(r.pnl)),1);
+  plot('wheelMonthChart',[{type:'heatmap', x:mon, y:years.map(String), z, text:txt, texttemplate:'%{text}',
+    textfont:{size:8}, zmid:0, zmin:-lim, zmax:lim, colorscale:[[0,'#f43f5e'],[0.5,'#162236'],[1,'#10b981']],
+    hovertemplate:'%{y} %{x}: ₹%{z:,.0f}<extra></extra>', showscale:false}],
+    {...LB, yaxis:{...LB.yaxis, autorange:'reversed', type:'category'}, margin:{...LB.margin, l:44}});
+}
+
+function _wheelYears(d){
+  const ys=d.by_year_side||[];
+  if(!ys.length){ setEmpty('wheelYearChart','No trades'); return; }
+  const x=ys.map(r=>String(r.year));
+  plot('wheelYearChart',[
+    {x, y:ys.map(r=>r.PE||0), name:'puts', type:'bar', marker:{color:C.green}},
+    {x, y:ys.map(r=>r.CE||0), name:'calls', type:'bar', marker:{color:C.acc2}},
+    {x, y:ys.map(r=>r.total||0), name:'total', type:'scatter', mode:'lines+markers', line:{color:C.acc,width:1.5}},
+  ], {...LB, barmode:'group', showlegend:true, legend:{...LB.legend, orientation:'h', y:1.08}, margin:{...LB.margin, t:28}});
+}
+
+function _wheelExits(d){
+  const mix=(d.metrics||{}).exit_mix||{};
+  const ks=Object.keys(mix).sort((a,b)=>mix[b]-mix[a]);
+  if(!ks.length){ setEmpty('wheelExitChart','No trades'); return; }
+  const pnl=k=>_wheelTradesAll.filter(t=>t.reason===k).reduce((s,t)=>s+(t.pnl||0),0);
+  plot('wheelExitChart',[{type:'bar', orientation:'h', y:ks, x:ks.map(k=>mix[k]*100),
+    marker:{color:ks.map(k=>_WHEEL_EXIT_COL[k]||C.muted)},
+    text:ks.map(k=>`${fmt(mix[k]*100,1)}% · ${_wRs(pnl(k))}`), textposition:'auto', textfont:{size:9},
+    hovertemplate:'%{y}: %{x:.1f}% of trades<extra></extra>'}],
+    {...LB, xaxis:{...LB.xaxis, title:{text:'% of trades',font:{size:9}}},
+     yaxis:{...LB.yaxis, autorange:'reversed'}, margin:{...LB.margin, l:90}});
+}
+
+function _wheelStocks(d){
+  const p=d.persistence||{};
+  const el=document.getElementById('wheelPersist');
+  if(p.pnl_corr!=null){
+    const weak = Math.abs(p.rank_corr) < 0.3 && p.sign_agreement < 0.65;
+    el.innerHTML = `<span style="color:var(--muted)">PERSISTENCE (before vs after ${p.split}, ${p.stocks} stocks):</span> `
+      + `P&amp;L corr <b>${fmt(p.pnl_corr,2)}</b> · rank corr <b>${fmt(p.rank_corr,2)}</b> · same sign <b>${_wPct(p.sign_agreement,0)}</b> · `
+      + `top-quartile-before then made <b>${_wRs(p.top_quartile_before_avg_after)}</b> vs rest <b>${_wRs(p.rest_avg_after)}</b> per stock — `
+      + (weak ? `<span style="color:var(--amber)">past stock P&amp;L does <b>not</b> predict future here; don't pick stocks off this table.</span>`
+              : `<span style="color:var(--green)">some persistence; still confirm out-of-sample.</span>`);
+  } else el.innerHTML='';
+  const rows=d.stocks||[];
+  if(!rows.length){ document.getElementById('wheelStockTable').innerHTML='<div class="empty">No trades.</div>'; return; }
+  const yrs=Object.keys(rows[0]).filter(k=>/^y\d{4}$/.test(k)).sort();
+  const cols=[
+    {key:'symbol',label:'SYMBOL',fmt:v=>`<a href="#" onclick="document.getElementById('wheelTradeSym').value='${v}';_wheelRenderTrades();document.getElementById('wheelTradesTable').scrollIntoView({behavior:'smooth'});return false">${v}</a>`},
+    {key:'sector',label:'SECTOR'},
+    {key:'trades',label:'TRADES',fmt:v=>fmt(v,0)},
+    {key:'pnl_per_lot',label:'P&L / LOT',fmt:v=>sspan(v,0)},
+    {key:'win',label:'WIN',fmt:v=>_wPct(v,0)},
+    {key:'rom_pct',label:'ROM %',fmt:v=>sspan(v,2)},
+    {key:'stop_rate',label:'STOPPED',fmt:v=>_wPct(v,0)},
+    {key:'puts',label:'PUTS',fmt:v=>v==null?'—':sspan(v,0)},
+    {key:'calls',label:'CALLS',fmt:v=>v==null?'—':sspan(v,0)},
+    {key:'yrs_positive',label:'YRS +',help:'profitable years / years traded'},
+    {key:'worst',label:'WORST',fmt:v=>sspan(v,0)},
+    ...yrs.map(y=>({key:y,label:y.slice(1),fmt:v=>v==null?'—':sspan(v,0)})),
+  ];
+  document.getElementById('wheelStockTable').innerHTML=makeTbl(rows,cols);
+  const s=document.getElementById('wheelStockSearch'); if(s&&s.value) filterTableBySymbol('wheelStockTable', s.value);
+}
+
+function _wheelRenderTrades(){
+  const sym=(document.getElementById('wheelTradeSym').value||'').trim().toUpperCase();
+  const side=document.getElementById('wheelTradeSide').value;
+  const reason=document.getElementById('wheelTradeReason').value;
+  const oc=document.getElementById('wheelTradeOutcome').value;
+  let rows=_wheelTradesAll.filter(t=>(!sym||t.symbol.includes(sym))&&(!side||t.side===side)&&(!reason||t.reason===reason)
+    &&(!oc||(oc==='win'?t.pnl>0:t.pnl<=0)));
+  const tot=rows.reduce((s,t)=>s+(t.pnl||0),0);
+  document.getElementById('wheelTradesBadge').textContent=`${rows.length} trades · ${_wRs(tot)}`;
+  if(!rows.length){ document.getElementById('wheelTradesTable').innerHTML='<div class="empty">No trades match.</div>'; return; }
+  rows=[...rows].reverse();                     // newest first
+  const cols=[
+    {key:'pid',label:'#',fmt:v=>`<a href="#" title="chart this trade" onclick="_wheelTrade(${v});return false">#${v}</a>`},
+    {key:'symbol',label:'SYMBOL'},
+    {key:'side',label:'SIDE',fmt:v=>`<span style="color:${v==='PE'?C.green:C.acc2}">${v}</span>`},
+    {key:'strike',label:'STRIKE',fmt:v=>fmt(v,2)},
+    {key:'expiry',label:'EXPIRY',fmt:v=>String(v).slice(0,10)},
+    {key:'lots',label:'LOTS',fmt:v=>v==null?'1':fmt(v,0)},
+    {key:'entry_date',label:'ENTRY',fmt:v=>String(v).slice(0,10)},
+    {key:'exit_date',label:'EXIT',fmt:v=>String(v).slice(0,10)},
+    {key:'days',label:'DAYS',fmt:v=>fmt(v,0)},
+    {key:'entry_px',label:'ENTRY PX',fmt:v=>fmt(v,2),help:'NSE settle at entry (before slippage)'},
+    {key:'exit_px',label:'EXIT PX',fmt:v=>fmt(v,2)},
+    {key:'pnl',label:'P&L ₹',fmt:v=>sspan(v,0)},
+    {key:'rom',label:'ROM',fmt:v=>v==null?'—':sspan(v*100,2)+'%'},
+    {key:'reason',label:'EXIT',fmt:v=>`<span style="color:${_WHEEL_EXIT_COL[v]||'inherit'}">${v}</span>`},
+  ];
+  document.getElementById('wheelTradesTable').innerHTML=makeTbl(rows.slice(0,3000),cols)
+    + (rows.length>3000?`<div class="empty">showing 3,000 of ${rows.length}; narrow the filters or use CSV</div>`:'');
+}
+
+async function _wheelTrade(pid){
+  const id=document.getElementById('wheelRun').value;
+  await _wheelDrill({url:`/api/wheel/trade_path?run_id=${encodeURIComponent(id)}&pid=${pid}`,
+    card:'wheelTradeCard', chart:'wheelTradeChart', info:'wheelTradeInfo', badge:'wheelTradeBadge',
+    stopMult:(_wheelRunData?.params||{}).stop_mult});
+}
+
+async function _wheelDrill(o){
+  const card=document.getElementById(o.card); card.style.display='block';
+  setLoad(o.chart); card.scrollIntoView({behavior:'smooth',block:'nearest'});
+  try{
+    const res=await api(o.url);
+    const t=res.trade, pth=res.path||[];
+    const ed=String(t.entry_date).slice(0,10), xd=t.exit_date?String(t.exit_date).slice(0,10):null;
+    document.getElementById(o.badge).textContent=`${t.symbol} ${t.side} ${fmt(t.strike,2)} · exp ${String(t.expiry).slice(0,10)}`;
+    document.getElementById(o.info).innerHTML=
+      `entry <b>${ed}</b> @ ${fmt(t.entry_px,2)} (credit ${fmt(t.credit,2)}) → `
+      + (xd ? `exit <b>${xd}</b> @ ${fmt(t.exit_px ?? t.exit_fill,2)} · <b>${t.reason}</b> · P&amp;L ${sspan(t.pnl,0)}` : '<b>still open</b>')
+      + ` · lots ${t.lots??1}`;
+    if(!pth.length){ setEmpty(o.chart,'No SPAN rows for this contract in bhavcopy.duckdb'); return; }
+    const x=pth.map(r=>r.date);
+    const traces=[
+      {x, y:pth.map(r=>r.opt), name:'option (settle)', type:'scatter', mode:'lines+markers', marker:{size:4},
+       line:{color:C.acc,width:1.6}},
+      {x, y:pth.map(r=>r.und), name:'underlying', type:'scatter', mode:'lines', yaxis:'y2', line:{color:'#94a3b8',width:1.2}},
+      {x:[x[0],x[x.length-1]], y:[t.strike,t.strike], name:'strike', type:'scatter', mode:'lines', yaxis:'y2',
+       line:{color:C.amber,width:1,dash:'dash'}},
+      {x:[ed], y:[t.entry_px], name:'entry', type:'scatter', mode:'markers', marker:{color:C.green,size:11,symbol:'triangle-down'}},
+    ];
+    if(xd) traces.push({x:[xd], y:[t.exit_px ?? t.exit_fill], name:'exit · '+t.reason, type:'scatter', mode:'markers',
+                         marker:{color:_WHEEL_EXIT_COL[t.reason]||C.red,size:11,symbol:'x'}});
+    if(o.stopMult) traces.push({x:[x[0],x[x.length-1]], y:[t.entry_px*o.stopMult,t.entry_px*o.stopMult],
+                     name:`${o.stopMult}× stop`, type:'scatter', mode:'lines', line:{color:C.red,width:1,dash:'dot'}});
+    plot(o.chart, traces, {...LB, showlegend:true, legend:{...LB.legend, orientation:'h', y:1.1},
+      yaxis:{...LB.yaxis, title:{text:'option ₹',font:{size:9}}},
+      yaxis2:{...LB.yaxis, overlaying:'y', side:'right', title:{text:'underlying ₹',font:{size:9}}, showgrid:false},
+      margin:{...LB.margin, t:30, r:56}});
+  }catch(e){ setEmpty(o.chart,`⚠ ${e.message}`); }
+}
+
+// ── PAPER tab ──────────────────────────────────────────────────────
+async function _wheelLoadBooks(){
+  const sel=document.getElementById('wheelBook');
+  try{
+    const res=await api('/api/wheel/paper/books');
+    _wheelBooks=res.rows||[];
+    if(!_wheelBooks.length){
+      document.getElementById('wheelPaperNote').innerHTML='No paper books yet — create one with <b>python oc/wheel_paper.py init --book main …</b>';
+      ['wheelPaperChart'].forEach(id=>setEmpty(id,'No paper books'));
+      ['wheelPosTable','wheelPaperTrades','wheelFills'].forEach(id=>document.getElementById(id).innerHTML='<div class="empty">No paper books.</div>');
+      return;
+    }
+    const prev=sel.value;
+    sel.innerHTML=_wheelBooks.map(b=>`<option value="${b.book}">${b.book}</option>`).join('');
+    if(_wheelBooks.some(b=>b.book===prev)) sel.value=prev;
+    await _wheelLoadBook();
+  }catch(e){
+    document.getElementById('wheelPaperNote').innerHTML=`<span style="color:var(--red)">⚠ ${e.message}</span>`;
+  }
+}
+
+async function _wheelLoadBook(){
+  const book=document.getElementById('wheelBook').value; if(!book) return;
+  const meta=_wheelBooks.find(b=>b.book===book)||{};
+  ['wheelPaperChart'].forEach(x=>setLoad(x));
+  document.getElementById('wheelPaperTradeCard').style.display='none';
+  try{
+    const d=await api(`/api/wheel/paper/book/${encodeURIComponent(book)}`);
+    const pc=meta.params_changed||{};
+    const today=new Date().toISOString().slice(0,10);
+    const stale = meta.last_run && meta.last_run < today;
+    document.getElementById('wheelPaperBadge').textContent='PAPER · NOT LIVE ORDERS';
+    document.getElementById('wheelPaperNote').innerHTML =
+      `book <b>${book}</b> since ${meta.created} · last run <b>${meta.last_run||'never'}</b>`
+      + (stale?` <span style="color:var(--amber)">(runs after the 17:45 job on trading days)</span>`:'')
+      + ` · ${Object.keys(pc).filter(k=>!['start','end'].includes(k)).map(k=>`${k}=<b>${Array.isArray(pc[k])?pc[k].join('/'):pc[k]}</b>`).join(' · ')||'all defaults'}`;
+    const daily=d.daily||[], cap=meta.capital||0;
+    const last=daily.length?daily[daily.length-1]:null;
+    const realised=(d.trades||[]).reduce((s,t)=>s+(t.pnl||0),0);
+    const unreal=(d.positions||[]).reduce((s,p)=>s+(p.unreal||0),0);
+    const slip=a=>(d.slippage||[]).find(r=>r.action===a)||{};
+    const sS=slip('S'), sB=slip('B');
+    const slipTxt=r=>r.avg_slip==null?'—':`${fmt(r.avg_slip*100,1)}%`;
+    const slipCls=r=>r.avg_slip==null?'acc':(r.avg_slip<=0.10?'up':'down');
+    const k=(label,value,sub,cls='acc',tip='')=>`<div class="kpi"${tip?` title="${tip.replace(/"/g,'&quot;')}"`:''}><div class="kpi-label">${label}</div><div class="kpi-val ${cls}">${value}</div><div class="kpi-sub">${sub||''}</div></div>`;
+    document.getElementById('wheelPaperKpis').innerHTML=[
+      k('EQUITY P&L', last?_wRs(last.equity-cap):'—', `${daily.length} session(s)`, last&&last.equity>=cap?'up':'down'),
+      k('REALISED', _wRs(realised), `${(d.trades||[]).length} closed`, realised>=0?'up':'down'),
+      k('UNREALISED', _wRs(unreal), `${(d.positions||[]).length} open`, unreal>=0?'up':'down'),
+      k('MARGIN USED', last?_wRs(last.used_margin):'—', last?`of ${_wRs(last.capacity)} capacity`:''),
+      k('SELL SLIP', slipTxt(sS), `${sS.settled||0}/${sS.n||0} fills settled · spread ${sS.avg_spread==null?'—':fmt(sS.avg_spread*100,1)+'%'}`, slipCls(sS),
+        'Average shortfall of the bid fill vs NSE settle, as % of settle. Backtest assumes 10%.'),
+      k('BUY SLIP', slipTxt(sB), `${sB.settled||0}/${sB.n||0} fills settled`, slipCls(sB),
+        'Average excess of the ask fill over NSE settle. Backtest assumes 10%.'),
+    ].join('');
+    if(daily.length){
+      plot('wheelPaperChart',[{x:daily.map(r=>r.date), y:daily.map(r=>r.equity-cap), type:'scatter', mode:'lines+markers',
+        marker:{size:5}, line:{color:C.acc,width:1.6}, name:'P&L'},
+        {x:daily.map(r=>r.date), y:daily.map(r=>r.n_open), type:'bar', yaxis:'y2', name:'open', marker:{color:'rgba(122,156,191,.25)'}}],
+        {...LB, showlegend:false, yaxis2:{...LB.yaxis, overlaying:'y', side:'right', showgrid:false, title:{text:'open',font:{size:9}}},
+         margin:{...LB.margin, r:44}});
+    } else setEmpty('wheelPaperChart','No sessions run yet');
+    const pos=d.positions||[];
+    document.getElementById('wheelPosBadge').textContent=`${pos.length} open`;
+    document.getElementById('wheelPosTable').innerHTML = pos.length ? makeTbl(pos,[
+      {key:'pid',label:'#',fmt:v=>`<a href="#" onclick="_wheelPaperTrade(${v});return false">#${v}</a>`},
+      {key:'symbol',label:'SYMBOL'},{key:'side',label:'SIDE'},{key:'strike',label:'STRIKE',fmt:v=>fmt(v,2)},
+      {key:'expiry',label:'EXPIRY'},{key:'lots',label:'LOTS',fmt:v=>fmt(v,0)},{key:'entry_date',label:'ENTRY'},
+      {key:'credit',label:'CREDIT',fmt:v=>fmt(v,2)},{key:'mark',label:'MARK',fmt:v=>fmt(v,2)},
+      {key:'unreal',label:'UNREAL ₹',fmt:v=>sspan(v,0)},{key:'delta',label:'Δ',fmt:v=>fmt(v,3)},
+      {key:'margin',label:'MARGIN',fmt:v=>fmtL(v)}]) : '<div class="empty">No open positions.</div>';
+    const trs=d.trades||[];
+    document.getElementById('wheelPaperTrades').innerHTML = trs.length ? makeTbl(trs,[
+      {key:'pid',label:'#',fmt:v=>`<a href="#" onclick="_wheelPaperTrade(${v});return false">#${v}</a>`},
+      {key:'symbol',label:'SYMBOL'},{key:'side',label:'SIDE'},{key:'strike',label:'STRIKE',fmt:v=>fmt(v,2)},
+      {key:'lots',label:'LOTS',fmt:v=>fmt(v,0)},{key:'entry_date',label:'ENTRY'},{key:'exit_date',label:'EXIT'},
+      {key:'credit',label:'CREDIT',fmt:v=>fmt(v,2)},{key:'exit_fill',label:'EXIT FILL',fmt:v=>fmt(v,2)},
+      {key:'pnl',label:'P&L ₹',fmt:v=>sspan(v,0)},
+      {key:'reason',label:'EXIT',fmt:v=>`<span style="color:${_WHEEL_EXIT_COL[v]||'inherit'}">${v}</span>`}]) : '<div class="empty">No closed trades yet.</div>';
+    const fl=d.fills||[];
+    document.getElementById('wheelFills').innerHTML = fl.length ? makeTbl(fl,[
+      {key:'date',label:'DATE'},{key:'action',label:'ACT',fmt:v=>v==='S'?'SELL':'BUY'},{key:'symbol',label:'SYMBOL'},
+      {key:'side',label:'SIDE'},{key:'strike',label:'STRIKE',fmt:v=>fmt(v,2)},{key:'lots',label:'LOTS',fmt:v=>fmt(v,0)},
+      {key:'bid',label:'BID',fmt:v=>fmt(v,2)},{key:'ask',label:'ASK',fmt:v=>fmt(v,2)},{key:'ltp',label:'LTP',fmt:v=>fmt(v,2)},
+      {key:'fill',label:'FILL',fmt:v=>fmt(v,2)},
+      {key:'settle',label:'NSE SETTLE',fmt:v=>v==null?'<span style="color:var(--muted)" title="filled in after that day\'s EOD bhavcopy">pending</span>':fmt(v,2)},
+      {key:'slip_vs_settle',label:'SLIP',fmt:v=>v==null?'—':`<span style="color:${v<=0.10?C.green:C.red}">${fmt(v*100,1)}%</span>`},
+      {key:'reason',label:'WHY'}]) : '<div class="empty">No fills yet.</div>';
+  }catch(e){
+    setEmpty('wheelPaperChart',`⚠ ${e.message}`);
+  }
+}
+
+async function _wheelPaperTrade(pid){
+  const book=document.getElementById('wheelBook').value;
+  const meta=_wheelBooks.find(b=>b.book===book)||{};
+  await _wheelDrill({url:`/api/wheel/trade_path?book=${encodeURIComponent(book)}&pid=${pid}`,
+    card:'wheelPaperTradeCard', chart:'wheelPaperTradeChart', info:'wheelPaperTradeInfo', badge:'wheelPaperTradeBadge',
+    stopMult:(meta.params||{}).stop_mult});
+}

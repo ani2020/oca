@@ -88,18 +88,24 @@ def gamma_analysis(
     if gdf.empty:
         raise HTTPException(404, "No data")
 
-    # ATM IV
+    # ATM IV — filter on the RESOLVED ts_filter, not the raw query param.
+    # A bare `timestamp = ?` bind fails two ways: when the caller omits the
+    # param (None -> matches nothing -> atm_iv silently 0 -> EXP RANGE shows —)
+    # and when it sends minute precision, since stored timestamps carry real
+    # seconds (only ~13% of rows land on :00). ts_filter_clause handles the
+    # 10/16/19-char cases correctly.
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
     raw = qdf(
         f"""
         SELECT strike_price, COALESCE(atm_strike,0) AS atm_strike,
                COALESCE(ce_iv, 0) AS ce_iv
         FROM {tbl()}
         WHERE symbol = ?
-          AND expiry  = ? 
-          AND timestamp = ?
+          AND expiry  = ?
+          {ts_clause}
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], timestamp],
+        [symbol, expiry[:10]] + ts_params,
     )
     atm_str = float(raw["atm_strike"].iloc[0]) if not raw.empty else spot
     near    = raw.iloc[(raw["strike_price"] - atm_str).abs().argsort()[:2]]
@@ -116,15 +122,18 @@ def gamma_analysis(
             f"SELECT AVG(COALESCE(m_volatility, 0)) AS avg_vol, "
             f"AVG(COALESCE(underlying_price, 0)) AS avg_spot "
             f"FROM {tbl()} "
-            f"WHERE symbol = ? AND timestamp = (SELECT MAX(timestamp) FROM {tbl()} WHERE symbol=?)",
-            [symbol, symbol],
+            f"WHERE symbol = ? {ts_clause}",
+            [symbol] + ts_params,
         )
         if not vol_df.empty:
             avg_vol  = float(vol_df["avg_vol"].iloc[0] or 0)
             avg_spot = float(vol_df["avg_spot"].iloc[0] or spot)
             if avg_vol > 0 and avg_spot > 0:
-                # Convert annualised % vol to daily point ATR
-                atr = round(avg_spot * (avg_vol / 100.0) / (252 ** 0.5), 2)
+                # Convert annualised % vol to a 1-session 1-sigma move.
+                # 243 = NSE trading days/year (see exposure_core.TRADING_DAYS_YEAR);
+                # 252 is the NYSE count and was wrong here.
+                # NB: this is a 1-sigma daily move, not a true average true range.
+                atr = round(avg_spot * (avg_vol / 100.0) / (243 ** 0.5), 2)
     except Exception:
         pass
 
@@ -178,8 +187,11 @@ def max_pain(
     i.e. where option writers (MMs) lose least if price expires there.
     Returns: pain curve (intrinsic loss per potential expiry price) + max_pain_strike.
     """
+    # _ts_lo_hi is wrong for minute precision: it returns [ts, ts], so a
+    # BETWEEN degenerates to equality and misses the ~87% of rows whose
+    # seconds are non-zero. ts_filter_clause matches by minute instead.
     ts_filter = timestamp or latest_ts(symbol)
-    lo, hi = _ts_lo_hi(ts_filter)
+    ts_clause, ts_params = ts_filter_clause(ts_filter)
     df = qdf(
         f"""
         SELECT strike_price,
@@ -189,10 +201,10 @@ def max_pain(
                COALESCE(underlying_price, 0) AS spot
         FROM {tbl()}
         WHERE symbol = ? AND expiry = ?
-          AND timestamp = ?
+          {ts_clause}
         ORDER BY strike_price
         """,
-        [symbol, expiry[:10], timestamp],
+        [symbol, expiry[:10]] + ts_params,
     )
     if df.empty:
         raise HTTPException(404, "No data for max pain")
@@ -253,7 +265,9 @@ def max_pain_series(
         if ts is None or (isinstance(ts, float)):
             continue          # skip NaN rows produced by STRFTIME on NULL timestamps
         ts = str(ts)
-        lo, hi = _ts_lo_hi(ts)
+        # Same minute-precision issue as max_pain: ts here comes from
+        # STRFTIME(...,'%Y-%m-%d %H:%M') so it is always 16 chars.
+        ts_clause, ts_params = ts_filter_clause(ts)
         df = qdf(
             f"""
             SELECT strike_price,
@@ -263,10 +277,10 @@ def max_pain_series(
                    COALESCE(underlying_price, 0) AS spot
             FROM {tbl()}
             WHERE symbol = ? AND expiry = ?
-              AND timestamp BETWEEN ? AND ?
+              {ts_clause}
             ORDER BY strike_price
             """,
-            [symbol, expiry[:10], lo, hi],
+            [symbol, expiry[:10]] + ts_params,
         )
         if df.empty:
             continue
