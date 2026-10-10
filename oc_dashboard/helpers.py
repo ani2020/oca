@@ -62,7 +62,15 @@ def _build_gamma_profile(
             COALESCE(days_to_expiry,  0) AS dte,
             COALESCE(atm_strike,      0) AS atm_strike,
             lotsize                       AS raw_lot,
-            COALESCE(ce_iv,           0) AS ce_iv
+            COALESCE(ce_iv,           0) AS ce_iv,
+            -- dealer gamma profile inputs (same chain rule as exposure_eod)
+            COALESCE(pe_iv,           0) AS pe_iv,
+            COALESCE(ce_volume,       0) AS ce_vol,
+            COALESCE(pe_volume,       0) AS pe_vol,
+            COALESCE(ce_ltp,          0) AS ce_ltp,
+            COALESCE(pe_ltp,          0) AS pe_ltp,
+            COALESCE(ce_bid_ask_spread, 0) AS ce_baq,
+            COALESCE(pe_bid_ask_spread, 0) AS pe_baq
         FROM {tbl()}
         WHERE symbol = ?
           AND expiry  = ?
@@ -93,18 +101,24 @@ def _build_gamma_profile(
     atm_iv   = float(df.loc[df["strike_price"] == strikes[atm_mask][0], "ce_iv"].iloc[0]) if atm_mask.any() else 0
     lo, hi   = gamma_analysis_range(fut, atm_iv=atm_iv, dte=dte)
 
-    # Flip point: computed on ACTUAL discrete strikes (not linspace) for accuracy.
-    # Linspace maps multiple levels to same strike, shifting the zero-crossing.
-    # ref_price = fut (futures-based) so the flip/regime match the exposure screener.
-    rng_mask   = (strikes >= lo) & (strikes <= hi)
-    flip_point, flip_nearest, _ = _core.gamma_flip(
-        strikes[rng_mask], net_gex[rng_mask], ref_price=fut
-    )
+    # Flip point: the zero of the DEALER GAMMA PROFILE Gamma(S) on the full
+    # quality-filtered chain -- the same exposure_core function and chain rule
+    # the stored exposure_eod / exposure_hist rows use (2026-10-04), so the live
+    # page and the stored history show the same flip. The old per-strike sign
+    # change mostly found the ATM strike where call OI overtakes put OI.
+    prof = profile_from_chain(df, lot_size, fut, dte, atm_iv, return_curve=True)
+    flip_point   = prof.get("profile_flip")
+    flip_nearest = prof.get("flip_nearest_strike")
+    curve_S, curve_G = prof.get("_curve") or (None, None)
 
-    # Linspace grid for VISUAL chart only (smooth curve)
+    # Linspace grid for VISUAL chart only (smooth curve). total_gamma_billions is
+    # the per-strike GEX of the nearest strike (an OI-layout view, unchanged);
+    # dealer_gamma_billions is the true profile Gamma(level) -- its zero is the flip.
     levels = np.linspace(lo, hi, num_levels)
+    dealer_g = (np.interp(levels, curve_S, curve_G) / 1e9
+                if curve_S is not None else np.full(len(levels), np.nan))
     rows = []
-    for lvl in levels:
+    for j, lvl in enumerate(levels):
         ni = int(np.argmin(np.abs(strikes - lvl)))
         cg =  float(call_gex[ni]) / 1e9
         pg = -float(put_gex[ni])  / 1e9
@@ -114,12 +128,15 @@ def _build_gamma_profile(
             "call_gamma_billions":  cg,
             "put_gamma_billions":   pg,
             "total_gamma_billions": cg + pg,
+            "dealer_gamma_billions": None if np.isnan(dealer_g[j]) else float(dealer_g[j]),
         })
     result_df = pd.DataFrame(rows)
     # Attach flip point to the df so callers can read it directly
-    result_df.attrs["flip_point"]   = flip_point
-    result_df.attrs["flip_nearest"] = flip_nearest
-    result_df.attrs["fut"]          = fut   # futures reference for regime test
+    result_df.attrs["flip_point"]     = flip_point
+    result_df.attrs["flip_nearest"]   = flip_nearest
+    result_df.attrs["fut"]            = fut   # futures reference for regime test
+    result_df.attrs["profile_regime"] = prof.get("profile_regime")
+    result_df.attrs["gamma_position"] = prof.get("gamma_position")
     return result_df, spot, dte, lot_size
 
 
@@ -567,10 +584,73 @@ def gamma_analysis_range(spot, expected_move=None, atm_iv=None, dte=None,
 
 
 def gamma_flip_from_strikes(strikes, net_gex_values):
-    """Gamma flip (zero-crossing) → (flip_strike, nearest_real_strike).
-    Thin wrapper over exposure_core.gamma_flip (single-sourced math)."""
+    """LEGACY per-strike flip (zero-crossing) -> (flip_strike, nearest_real_strike).
+    Superseded for display by profile_from_chain (dealer gamma profile); kept for
+    any caller that still wants the OI-layout crossing."""
     flip, nearest, _regime = _core.gamma_flip(strikes, net_gex_values)
     return flip, nearest
+
+
+def profile_from_chain(chain: pd.DataFrame, lot: float, ref_price: float,
+                       dte: float, atm_iv: float, return_curve: bool = False) -> dict:
+    """Dealer gamma profile for a live chain: exposure_core.dealer_gamma_profile
+    with the same strike-quality rule and futures anchor as exposure_eod.
+
+    chain columns: strike_price, ce_oi, pe_oi, ce_iv, pe_iv, ce_vol, pe_vol,
+    ce_ltp, pe_ltp, ce_baq, pe_baq; optional expiry and dte for multi-expiry
+    chains. With more than one expiry, each expiry's Gamma(S) is computed with
+    its own DTE on ONE shared grid (common anchor, widest expected move) and the
+    curves are summed (exposure_core.profile_from_curves).
+
+    Adds flip_nearest_strike (the listed strike nearest the flip).
+    """
+    empty = {"profile_flip": None, "profile_fnd": None, "profile_regime": None,
+             "gamma_position": None, "profile_n_zeros": None,
+             "flip_nearest_strike": None, "_curve": None}
+    if chain is None or chain.empty or not (ref_price and ref_price > 0):
+        return empty
+    c = chain
+    ce_ltp = c["ce_ltp"].astype(float).to_numpy()
+    pe_ltp = c["pe_ltp"].astype(float).to_numpy()
+    with np.errstate(divide="ignore", invalid="ignore"):
+        ce_bp = np.where(ce_ltp > 0, c["ce_baq"].astype(float).to_numpy() / ce_ltp * 100, np.inf)
+        pe_bp = np.where(pe_ltp > 0, c["pe_baq"].astype(float).to_numpy() / pe_ltp * 100, np.inf)
+    keep = (_core.strike_quality_mask(c["ce_vol"], c["pe_vol"], ce_bp, pe_bp)
+            & ((c["ce_oi"].to_numpy(float) > 0) | (c["pe_oi"].to_numpy(float) > 0)))
+    c = c[keep]
+    if c.empty:
+        return empty
+
+    def _one(g: pd.DataFrame, d: float, em: float, want_curve: bool) -> dict:
+        return _core.dealer_gamma_profile(
+            g["strike_price"].to_numpy(float), g["ce_oi"].to_numpy(float),
+            g["pe_oi"].to_numpy(float), g["ce_iv"].to_numpy(float),
+            g["pe_iv"].to_numpy(float), lot, ref_price, d, em,
+            return_curve=want_curve)
+
+    multi = "expiry" in c.columns and c["expiry"].nunique() > 1
+    if not multi:
+        em = _core.expected_move(ref_price, atm_iv, dte)
+        prof = _one(c, dte, em, return_curve)
+    else:
+        # Common grid: same anchor and the widest expected move across expiries.
+        groups = list(c.groupby("expiry"))
+        dtes = {e: float(g["dte"].median()) if "dte" in g.columns else dte for e, g in groups}
+        em_max = max(_core.expected_move(ref_price, atm_iv, max(d, 0.5)) for d in dtes.values())
+        curves = []
+        for e, g in groups:
+            p = _one(g, dtes[e], em_max, True)
+            if p.get("_curve") is not None:
+                curves.append(p["_curve"])
+        em_ref = _core.expected_move(ref_price, atm_iv, dte)
+        prof = _core.profile_from_curves(curves, ref_price, em_ref)
+        if not return_curve:
+            prof["_curve"] = None
+    flip = prof.get("profile_flip")
+    ks = chain["strike_price"].to_numpy(float)
+    prof["flip_nearest_strike"] = (float(ks[int(np.argmin(np.abs(ks - flip)))])
+                                   if flip is not None and len(ks) else None)
+    return prof
 
 
 def _eod_df(symbol: str, expiry_filter: str, exp_params: list,
@@ -631,6 +711,7 @@ def _eod_df(symbol: str, expiry_filter: str, exp_params: list,
             COALESCE(t.ce_bid_ask_spread,0) AS ce_baq,
             COALESCE(t.pe_bid_ask_spread,0) AS pe_baq,
             COALESCE(t.underlying_price,0)  AS spot,
+            COALESCE(t.fut_price, t.underlying_price, 0) AS fut_price,
             COALESCE(t.days_to_expiry,0)    AS dte,
             COALESCE(t.lotsize, 1)          AS lotsize,
             -- Pre-computed columns from oc_processor

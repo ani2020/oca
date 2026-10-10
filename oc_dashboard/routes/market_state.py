@@ -67,6 +67,7 @@ def market_state(history: int = Query(60, ge=0, le=250,
             SELECT date, n_symbols, ngf_avg, ngf_hi_frac, neg_regime_frac,
                    pos_regime_frac, nifty_spot, nifty_iv, trail_vol5, fwd_vol5,
                    ngf_pctile, iv_pctile, fragility_gap, near_dte, ngf_adj,
+                   gpos_avg, fragility_pctile,
                    coverage_ok, state
             FROM {TABLE}
             ORDER BY date DESC LIMIT 2
@@ -98,6 +99,7 @@ def market_state(history: int = Query(60, ge=0, le=250,
                 SELECT date, n_symbols, ngf_avg, ngf_hi_frac, neg_regime_frac,
                        pos_regime_frac, nifty_spot, nifty_iv, trail_vol5, fwd_vol5,
                        ngf_pctile, iv_pctile, fragility_gap, near_dte, ngf_adj,
+                       gpos_avg, fragility_pctile,
                        coverage_ok, state
                 FROM {TABLE}
                 WHERE state IS NOT NULL
@@ -113,6 +115,8 @@ def market_state(history: int = Query(60, ge=0, le=250,
         out["prev"] = {"date": _n(p["date"]), "state": _n(p["state"]),
                        "ngf_avg": _n(p["ngf_avg"]),
                        "ngf_pctile": _n(p["ngf_pctile"]),
+                       "gpos_avg": _n(p["gpos_avg"]),
+                       "fragility_pctile": _n(p["fragility_pctile"]),
                        "iv_pctile": _n(p["iv_pctile"])}
 
     # Historical behaviour of each state. vol_pay is deliberately absent — see
@@ -122,6 +126,7 @@ def market_state(history: int = Query(60, ge=0, le=250,
             SELECT state,
                    COUNT(*)                                   AS n,
                    AVG(ngf_avg)                               AS ngf_avg,
+                   AVG(gpos_avg)                              AS gpos_avg,
                    AVG(nifty_iv)                              AS nifty_iv,
                    AVG(trail_vol5)                            AS trail_vol5,
                    AVG(fwd_vol5)                              AS fwd_vol5
@@ -142,7 +147,7 @@ def market_state(history: int = Query(60, ge=0, le=250,
     if history:
         try:
             ser = qdf(f"""
-                SELECT date, ngf_avg, ngf_pctile, iv_pctile, nifty_iv,
+                SELECT date, ngf_avg, ngf_pctile, gpos_avg, fragility_pctile, iv_pctile, nifty_iv,
                        trail_vol5, state
                 FROM {TABLE} ORDER BY date DESC LIMIT {int(history)}
             """)

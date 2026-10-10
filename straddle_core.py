@@ -953,26 +953,65 @@ def sweep_stop(st: Structure, paths: np.ndarray, spot: float,
 # 5. scoring features
 # --------------------------------------------------------------------------
 
-# Gamma-regime scoring is a BUCKETED LOOKUP, not a z-score. The empirical
-# relationship is non-monotone: high-delta sells at a wall clearly ABOVE spot
-# outperform, while the same band with spot already pressing the wall collapses
-# to ~40% wins. A linear standardisation averages those two cases into nothing.
-GAMMA_REGIME_SCORE = {
-    # (gex_regime, flip_above_spot) -> score in [0, 1]
-    ("positive", True): 0.85,
-    ("positive", False): 0.45,
-    ("negative", True): 0.35,
-    ("negative", False): 0.15,
-}
+# Gamma-regime score. RETIRED as a lookup on 2026-10-04.
+#
+# The old table scored (per-strike regime, flip above spot): 0.85 / 0.45 / 0.35 /
+# 0.15. Over 71 expiries it ranked straddles BACKWARDS (IC -0.044, t -2.57), and
+# a six-year proxy on exposure_hist (short ATM straddle, ~25 DTE to expiry,
+# cross-sectional IC per expiry) reproduced that: -0.036 (t -2.6) Jun 2020 -
+# Oct 2024 and -0.052 (t -2.5) after. It was built on the per-strike flip, which
+# mostly marks the ATM strike where call OI overtakes put OI; under the dealer
+# gamma-profile definition now stored, its top bucket (positive, flip above
+# spot) occurs on ~0.01% of rows.
+#
+# Replacement: the dealer-profile gamma_position, mapped to [0, 1]. It is a
+# DISPLAY / diagnostic term, still NOT ranked (it is in backtest_straddle's CUT
+# list). The same proxy gives it no stable straddle IC (+0.010, t 0.6, then
+# -0.048, t -1.9): negative-gamma names do move more next day (pooled t -5.4 over
+# six years), but IV already prices that over a 25-day hold. The place for
+# gamma information in this screener is the simulator's volatility (better paths
+# move ev_per_margin), not a ranking term.
 
 
-def gamma_regime_score(gex_regime: Optional[str], gamma_flip: Optional[float],
-                       spot: Optional[float], default: float = 0.5) -> float:
-    if not gex_regime or gamma_flip is None or spot is None:
+# Month-level premium gate (added 2026-10-04). A cross-sectional rank cannot say
+# WHETHER to sell premium this month, only which names; this gate does the first.
+# Measured on backtest_straddle (EWMA paths, 72 expiries 2021-26): when the
+# universe MEDIAN of iv / rv_forecast at entry is below 1.05, the expiry's mean
+# realised P&L per margin was +0.1% (7 expiries) before Nov 2024 and -2.7% (13)
+# after; at or above it, +3.0% (42) and +1.0% (10). Month median vs month mean
+# outcome: rank corr +0.23 (p 0.05), same sign in both regimes. 13 of the 23
+# post-Nov-2024 expiries fell below the line (7 of 49 before), which explains
+# much of the post-2024 decay. Small samples: a gate to validate prospectively
+# (vol_outcome), not a proven rule. Re-test at ~40 post-break expiries.
+UNIVERSE_VRP_MIN = 1.05
+
+
+def universe_premium_gate(iv_pct, rv_fcst_pct, threshold: float = UNIVERSE_VRP_MIN):
+    """(median iv/rv_forecast across the candidate universe, passes?) for one
+    asof/expiry. All candidates count, including stock-level rejects: the gate
+    reads the MARKET's premium, not the shortlist's. (nan, None) when fewer than
+    20 usable ratios."""
+    iv = np.asarray(iv_pct, dtype=float)
+    rv = np.asarray(rv_fcst_pct, dtype=float)
+    ok = np.isfinite(iv) & np.isfinite(rv) & (iv > 0) & (rv > 0)
+    if ok.sum() < 20:
+        return float("nan"), None
+    med = float(np.median(iv[ok] / rv[ok]))
+    return med, bool(med >= threshold)
+
+
+def gamma_regime_score(gamma_position: Optional[float], default: float = 0.5) -> float:
+    """Dealer gamma position Gamma(fut)/max|Gamma| in [-1, 1] -> [0, 1].
+    1 = deep in dealer long gamma (dampened), 0 = deep short gamma (amplified)."""
+    if gamma_position is None:
         return default
-    key = ("positive" if "pos" in str(gex_regime).lower() else "negative",
-           bool(gamma_flip > spot))
-    return GAMMA_REGIME_SCORE.get(key, default)
+    try:
+        g = float(gamma_position)
+    except (TypeError, ValueError):
+        return default
+    if not np.isfinite(g):
+        return default
+    return float(min(1.0, max(0.0, 0.5 * (1.0 + g))))
 
 
 @dataclass
@@ -1210,6 +1249,6 @@ __all__ = [
     "leg_margin", "combo_margin", "spread_fraction", "SPREAD_LUT",
     "SimResult", "simulate_structure", "sweep_stop",
     "Features", "RANK_DIRECTION", "cross_sectional_score", "demean_universe",
-    "gamma_regime_score", "GateConfig", "apply_gates",
+    "gamma_regime_score", "UNIVERSE_VRP_MIN", "universe_premium_gate", "GateConfig", "apply_gates",
     "annualise_vol", "deannualise_vol", "robust_z", "path_efficiency",
 ]

@@ -60,6 +60,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import vol_math as vm  # noqa: E402
+import exposure_core as core  # noqa: E402  (shared dealer gamma profile)
 
 TRADING_DAYS = 243.0
 CALENDAR_DAYS = 365.0
@@ -123,6 +124,24 @@ MIGRATIONS = [
     ("range_hi", "DOUBLE"),
     ("n_strikes_exposure", "INTEGER"),
     ("mean_abs_move", "DOUBLE"),
+    # Dealer gamma profile + dealer-signed vanna (exposure_core, 2026-10-03).
+    # Same function and same definitions as exposure_eod, so these columns are
+    # comparable across the two tables (unlike the legacy gamma_flip /
+    # flip_norm_distance, which here is a FRACTION OF SPOT, not EM units).
+    ("profile_flip", "DOUBLE"),
+    ("gamma_flip_strike", "DOUBLE"),
+    ("flip_norm_distance_strike", "DOUBLE"),
+    ("gex_regime_strike", "VARCHAR"),
+    ("profile_fnd", "DOUBLE"),
+    ("profile_regime", "VARCHAR"),
+    ("gamma_position", "DOUBLE"),
+    ("profile_n_zeros", "INTEGER"),
+    ("dealer_vanna", "DOUBLE"),
+    ("dealer_vanna_put_wing", "DOUBLE"),
+    ("dealer_vanna_atm", "DOUBLE"),
+    ("dealer_vanna_call_wing", "DOUBLE"),
+    ("gross_vanna", "DOUBLE"),
+    ("dealer_vanna_norm", "DOUBLE"),
 ]
 
 
@@ -207,6 +226,33 @@ def _gamma_flip(strikes: np.ndarray, net_gamma: np.ndarray, fwd: float) -> float
     return float(k[i] + (-c0 / (c1 - c0)) * (k[i + 1] - k[i]))
 
 
+def _profile_from_long(K, is_call, oi, iv, ok, t_trad: float, t_cal: float,
+                       lot: float, fwd: float, em: float) -> dict:
+    """Pivot the long (strike, CE/PE) rows to per-strike legs and run the shared
+    exposure_core.dealer_gamma_profile.
+
+    IV here is annualised on 243 TRADING days; the shared function (like
+    exposure_eod) works on CALENDAR time, T = DTE/365, with calendar-quoted IV.
+    Gamma and vanna depend on sigma*sqrt(T) and on sigma itself, so convert the
+    IV to the calendar quote (same total variance) instead of passing a
+    trading-day sigma with a calendar T. Otherwise vanna "per vol point" would
+    mean a different vol point in the two tables.
+    """
+    m = ok & np.isfinite(iv) & (oi > 0)
+    if not (np.isfinite(em) and em > 0) or m.sum() < 2 or not (t_cal > 0):
+        return core.dealer_gamma_profile([], [], [], [], [], 1, 0, 0, 0)  # all None
+    to_cal_pct = np.sqrt(t_trad / t_cal) * 100.0
+    d = pd.DataFrame({"k": K[m], "c": is_call[m], "oi": oi[m], "iv": iv[m] * to_cal_pct})
+    ce = d[d["c"]].groupby("k").agg(oi=("oi", "sum"), iv=("iv", "mean"))
+    pe = d[~d["c"]].groupby("k").agg(oi=("oi", "sum"), iv=("iv", "mean"))
+    ks = ce.index.union(pe.index)
+    ce, pe = ce.reindex(ks, fill_value=0.0), pe.reindex(ks, fill_value=0.0)
+    return core.dealer_gamma_profile(
+        ks.to_numpy(float), ce["oi"].to_numpy(), pe["oi"].to_numpy(),
+        ce["iv"].to_numpy(), pe["iv"].to_numpy(),
+        lot, fwd, t_cal * CALENDAR_DAYS, em)
+
+
 def compute_symbol_expiry(g: pd.DataFrame, fwd: float, spot: float,
                           t_trad: float, t_cal: float, lot: float,
                           lot_src) -> dict | None:
@@ -267,7 +313,17 @@ def compute_symbol_expiry(g: pd.DataFrame, fwd: float, spot: float,
     rr25 = (iv25c - iv25p) if both else np.nan
     bf25 = ((iv25c + iv25p) / 2 - atm_iv) if both and np.isfinite(atm_iv) else np.nan
 
-    mult = lot if np.isfinite(lot) and lot > 0 else 1.0
+    # Bhavcopy OI is already in SHARES (contracts x lot) in every year 2020-2026:
+    # 87-100% of OI values are exact lot multiples, <1% below one lot. Multiplying
+    # by the lot again (the original code) inflated every hist exposure (net_gex,
+    # net_vanna, net_charm, dealer vanna) by the lot size -- 25x to 30,000x across
+    # symbols -- which leaves within-chain ratios intact (flip, regime, gamma
+    # position, vanna share) but makes raw magnitudes incomparable across symbols
+    # and ~550x eod's on the median chain. Found 2026-10-03 comparing
+    # exposure_hist vs exposure_eod dealer_vanna on 2026-08-20 (ratio 538-587,
+    # median lot 550). exposure_eod uses ocdata OI in CONTRACTS x lot = shares,
+    # so with mult = 1 the two tables are on the same scale.
+    mult = 1.0
     gsign = np.where(is_call, 1.0, -1.0)
     gex_all = np.where(ok, gk["gamma"] * oi * mult * fwd * fwd * 0.01 * gsign, 0.0)
     van_all = np.where(ok, gk["vanna"] * oi * mult * gsign, 0.0)
@@ -297,6 +353,10 @@ def compute_symbol_expiry(g: pd.DataFrame, fwd: float, spot: float,
     flip = (_gamma_flip(per_k.index.to_numpy(float), per_k.to_numpy(float), fwd)
             if len(per_k) > 1 else np.nan)
 
+    # Shared dealer gamma profile on the whole smile-window chain (not the
+    # narrow exposure window: OI walls just outside it still carry gamma at spot).
+    prof = _profile_from_long(K, is_call, oi, iv, ok, t_trad, t_cal, mult, fwd, em_h)
+
     return {
         "fut_price": fwd, "spot": spot,
         "basis": fwd - spot,
@@ -313,18 +373,20 @@ def compute_symbol_expiry(g: pd.DataFrame, fwd: float, spot: float,
         "rr25": rr25 * 100 if np.isfinite(rr25) else np.nan,
         "bf25": bf25 * 100 if np.isfinite(bf25) else np.nan,
         "net_gex": net_gex,
-        "gex_regime": "positive" if net_gex > 0 else "negative",
-        "gamma_flip": flip,
-        # SIGNED, matching the live pipeline: negative means the flip sits below
-        # spot. An earlier absolute-value version correlated at 0.38 against the
-        # live column purely because one side was signed and the other was not.
-        #
-        # CAVEAT: even signed, this reconstructs poorly. Median discrepancy
-        # against the live flip is 3.2% of spot, and the live flip typically
-        # sits ~10% below spot while this one lands within ~2.6% -- the two are
-        # not computing the same thing. Treat flip-derived signals as live-only
-        # until the constructions are reconciled; do NOT backtest on them.
-        "flip_norm_distance": ((flip - spot) / spot) if np.isfinite(flip) else np.nan,
+        # CANONICAL names carry the shared PROFILE definition (agreed 2026-10-04),
+        # the same function and units as exposure_eod: flip_norm_distance is now
+        # in EXPECTED-MOVE units, not a fraction of spot.
+        "gex_regime": prof.get("profile_regime"),
+        "gamma_flip": prof.get("profile_flip"),
+        "flip_norm_distance": prof.get("profile_fnd"),
+        # LEGACY hist definitions, kept under the *_strike names exposure_eod
+        # uses for its legacy columns (the constructions differ: here the regime
+        # was the window net GEX sign, the flip a cumulative-sum crossing, and the
+        # distance a FRACTION OF SPOT). The old caveat stands for these: they
+        # reconstruct the live per-strike flip poorly; do NOT backtest on them.
+        "gex_regime_strike": "positive" if net_gex > 0 else "negative",
+        "gamma_flip_strike": flip,
+        "flip_norm_distance_strike": ((flip - spot) / spot) if np.isfinite(flip) else np.nan,
         "neg_gamma_fraction": float((per_k < 0).mean()) if len(per_k) else np.nan,
         "peak_pos_gamma_strike": float(per_k.idxmax()) if len(per_k) else np.nan,
         "peak_neg_gamma_strike": float(per_k.idxmin()) if len(per_k) else np.nan,
@@ -342,6 +404,7 @@ def compute_symbol_expiry(g: pd.DataFrame, fwd: float, spot: float,
         "confidence": ("high" if iv_source == "traded" and n_traded >= 15
                        else "medium" if iv_source == "traded" else "low"),
         "lot": lot, "lot_src": lot_src,
+        **prof,
     }
 
 
@@ -478,17 +541,24 @@ def main() -> int:
                   f"{el:.0f}s elapsed, ~{el / i * (len(days) - i) / 60:.1f}m left")
 
     print(f"\nwrote {total:,} rows to exposure_hist ({errs} day(s) errored)")
+
+    # em_1d with the shared recalibrated model (oc/em1d.py). Overwrites the
+    # per-row value build_day wrote, for exactly the range just rebuilt; the
+    # rolling scale is refreshed from the table first, so it includes these days.
+    import em1d
+    em1d.run(con, args.bhav, hist_range=(args.from_date, args.to_date))
     q = con.execute("""
         SELECT count(*) n, count(DISTINCT symbol) syms, count(DISTINCT date) dates,
                round(100.0*count(*) FILTER (WHERE atm_iv IS NULL)/count(*), 2) iv_null,
                round(100.0*count(*) FILTER (WHERE rr25 IS NULL)/count(*), 2) rr_null,
                round(100.0*count(*) FILTER (WHERE gamma_flip IS NULL)/count(*), 2) flip_null,
-               round(avg(traded_frac)*100, 1) traded_pct
+               round(avg(traded_frac)*100, 1) traded_pct,
+               round(100.0*count(*) FILTER (WHERE profile_regime IS NULL)/count(*), 2) prof_null
         FROM exposure_hist WHERE date BETWEEN ? AND ?
     """, [args.from_date, args.to_date]).fetchone()
     print(f"  rows={q[0]:,} symbols={q[1]} dates={q[2]}")
     print(f"  NULL: atm_iv {q[3]}%  rr25 {q[4]}%  gamma_flip {q[5]}%   "
-          f"avg traded strikes {q[6]}%")
+          f"avg traded strikes {q[6]}%  profile_regime {q[7]}%")
     print(con.execute("""
         SELECT confidence, iv_source, count(*) n FROM exposure_hist
         WHERE date BETWEEN ? AND ? GROUP BY 1, 2 ORDER BY 3 DESC

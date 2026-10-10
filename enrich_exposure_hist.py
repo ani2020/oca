@@ -154,11 +154,14 @@ def stage1_day(con, d: date, prev_com: dict) -> int:
         if ok.sum() < MIN_STRIKES:
             continue
 
-        lot = float(g["lot"].dropna().iloc[0]) if g["lot"].notna().any() else 1.0
+        # Bhavcopy OI is already in SHARES; multiplying by the lot again inflated
+        # every magnitude by 25x-30,000x (see build_exposure_history, 2026-10-03).
+        # Ratios (lopsidedness, shelf centre, transition width) were unaffected;
+        # gamma_shelf_peak_value was not.
         oi = g["oi"].to_numpy(float)
         vol_ = g["volume"].to_numpy(float)
         gsign = np.where(is_call, 1.0, -1.0)
-        gex = np.where(ok, gk["gamma"] * oi * lot * fwd * fwd * 0.01 * gsign, 0.0)
+        gex = np.where(ok, gk["gamma"] * oi * fwd * fwd * 0.01 * gsign, 0.0)
 
         half = (EXPOSURE_EM_MULT * em if np.isfinite(em)
                 else EXPOSURE_FALLBACK_PCT * spot)
@@ -228,7 +231,23 @@ def run_stage1(con, d0: date, d1: date) -> None:
         "SELECT DISTINCT date FROM exposure_hist WHERE date BETWEEN ? AND ? "
         "ORDER BY date", [d0, d1]).fetchall()]
     print(f"stage 1: {len(days)} day(s)")
+    # Seed the shelf centre of mass from the last STORED session before the
+    # window. Starting empty left the window's first day with no migration, and
+    # a rolling nightly window (--from 7 days back) would rebuild every date once
+    # as that first day, so gamma_com_migration would erode to NULL across the
+    # whole history over time (found 2026-10-04 adding hist to eod_all.bat).
     prev_com: dict = {}
+    seed = con.execute("""
+        SELECT symbol, expiry, gamma_shelf_center FROM exposure_hist
+        WHERE date = (SELECT max(date) FROM exposure_hist WHERE date < ?)
+          AND gamma_shelf_center IS NOT NULL
+    """, [d0]).fetchall() if days else []
+    for sym, exp, com in seed:
+        # stage1_day keys on (symbol, pandas.Timestamp) -- its expiry comes from a
+        # DuckDB .df() groupby -- so a datetime.date key would never match.
+        prev_com[(sym, pd.Timestamp(exp))] = float(com)
+    if seed:
+        print(f"  seeded shelf centre for {len(seed)} (symbol, expiry) from the prior session")
     total = 0
     t0 = datetime.now()
     for i, d in enumerate(days, 1):

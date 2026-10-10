@@ -50,7 +50,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import duckdb
@@ -125,6 +125,12 @@ def connect(db: str, bhav: str, read_only: bool = False):
     con.execute(f"ATTACH IF NOT EXISTS '{bhav}' AS bhav (READ_ONLY)")
     if not read_only:
         con.execute(SCHEMA)
+        # Month-level premium gate (2026-10-04): kept SEPARATE from gate_pass so
+        # a low-premium month does not hide which stocks were otherwise fine.
+        for col, typ in (("universe_vrp_median", "DOUBLE"), ("universe_gate", "BOOLEAN")):
+            con.execute(f"ALTER TABLE vol_prediction ADD COLUMN IF NOT EXISTS {col} {typ}")
+        # Read by the OI reconciliation gate; oc/oi_reconcile.py fills it.
+        con.execute("ALTER TABLE exposure_eod ADD COLUMN IF NOT EXISTS oi_recon_ok BOOLEAN")
     return con
 
 
@@ -198,14 +204,17 @@ def load_candidates(con, asof: date, rank: int) -> pd.DataFrame:
         ex_exp AS (
             -- EXPIRY-level measures: these really are per contract.
             SELECT symbol, expiry, atm_iv, expected_move,
-                   gex_regime, gamma_flip, near_earnings
+                   -- Canonical flip/regime = dealer gamma profile (2026-10-04),
+                   -- the same values the GEX and exposure pages show.
+                   gex_regime, gamma_flip,
+                   near_earnings, oi_recon_ok
             FROM exposure_eod WHERE date = ?
         )
         SELECT a.*, v.tvol AS total_vol_in_range, v.toi AS total_oi_in_range,
                v.n_strikes_in_range,
                s.hv20, s.iv_pctile, s.iv_rank, s.em_1d,
                x.atm_iv AS ex_iv, x.expected_move,
-               x.gex_regime, x.gamma_flip, x.near_earnings
+               x.gex_regime, x.gamma_flip, x.near_earnings, x.oi_recon_ok
         FROM atm a
         LEFT JOIN vol    v ON v.symbol = a.symbol AND v.expiry = a.expiry
         LEFT JOIN ex_sym s ON s.symbol = a.symbol
@@ -292,6 +301,13 @@ def cmd_predict(args, con) -> int:
         if np.isfinite(cv) and cv < -args.max_cvar:
             passed = False
             why = why + [f"cvar/margin {cv:.2f}"]
+        # OI reconciliation gate (oc/oi_reconcile.py): the 15:40 snapshot's OI
+        # materially disagrees with bhavcopy's official EOD OI for this chain.
+        # NULL (not reconciled yet) does not fail the gate.
+        if r.get("oi_recon_ok") is False or (pd.notna(r.get("oi_recon_ok"))
+                                               and not bool(r.get("oi_recon_ok"))):
+            passed = False
+            why = why + ["oi snapshot vs bhavcopy mismatch"]
 
         hv20 = float(r["hv20"]) if pd.notna(r.get("hv20")) else np.nan
         mgn = sc.combo_margin(st)
@@ -344,6 +360,31 @@ def cmd_predict(args, con) -> int:
                      ("legacy_vrp", "legacy_vrp_rank"),
                      ("iv_pctile", "legacy_iv_pctile_rank")]:
         out[dst] = out[col].rank(ascending=False, method="min").astype("Int64")
+
+    # Month-level premium gate over ALL candidates (stock-level rejects
+    # included): is the market paying a premium over recent realised vol at all?
+    # Stored beside gate_pass, not folded into it -- a trade needs BOTH.
+    # UNITS: the 1.05 threshold was measured on exposure_hist.atm_iv, annualised
+    # on 243 TRADING days; exposure_eod.atm_iv is the market's CALENDAR quote and
+    # rv_fcst_pct is on 243 trading days. Same total variance to expiry:
+    #   iv_trading = iv_calendar * sqrt((dte_cal/365) / (dte_trading/243))
+    # (hist reproduces this exactly; the factor runs 0.984-1.014, enough to flip
+    # a borderline month at 1.05). Trading days = weekdays to expiry (holidays
+    # ignored: <1% effect).
+    dte_tr = np.array([np.busday_count(asof + timedelta(days=1),
+                                       pd.Timestamp(e).date() + timedelta(days=1))
+                       for e in out["expiry"]], dtype=float)
+    dte_cal = out["dte"].to_numpy(float)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        iv_trading = out["atm_iv"].to_numpy(float) * np.sqrt((dte_cal / 365.0) / (dte_tr / 243.0))
+    u_med, u_ok = sc.universe_premium_gate(iv_trading, out["rv_fcst_pct"],
+                                           args.min_universe_vrp)
+    out["universe_vrp_median"] = u_med
+    out["universe_gate"] = u_ok
+    print(f"  universe premium: median iv/rv_fcst = {u_med:.3f} "
+          f"(gate {args.min_universe_vrp}) -> "
+          + ("PASS" if u_ok else "FAIL: skip / reduce this month" if u_ok is False
+             else "n/a (too few candidates)"))
 
     # Rewriting the same asof/structure/rank is idempotent: a re-run replaces
     # that day's rows rather than duplicating them. It does NOT touch other
@@ -509,6 +550,9 @@ def main() -> int:
     p.add_argument("--max-dte", type=int, default=45, dest="max_dte")
     p.add_argument("--min-volume", type=float, default=1000.0, dest="min_volume")
     p.add_argument("--max-cvar", type=float, default=5.0, dest="max_cvar")
+    p.add_argument("--min-universe-vrp", type=float, default=sc.UNIVERSE_VRP_MIN,
+                   dest="min_universe_vrp",
+                   help="month-level gate: universe median iv/rv_fcst at or above this")
     args = p.parse_args()
 
     con = connect(args.db, args.bhav, read_only=(args.mode in ("status", "compare")))

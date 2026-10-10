@@ -30,7 +30,10 @@ DEFAULTS = {
     "DRIFT_MAX_NORM_DIST": 1.0,    # drift gate: only fire when |flip_norm_distance| < this
                                    #   (tuning range ~1.0–1.25; trends overshoot the EM)
     "PIN_NARROW_FRAC":     0.90,   # transition width must drop below this × prev
-    "INSTAB_DELTA":        0.05,   # neg-gamma fraction rise to flag
+    "INSTAB_DELTA":        0.05,   # neg-gamma fraction rise to flag (fallback only)
+    "INSTAB_PCTILE":       0.90,   # instab_score at/above this fires the label
+    "INSTAB_MIN_HIST":     40,     # prior same-contract changes needed for a score
+    "INSTAB_WINDOW":       250,    # trailing changes the percentile is taken over
 }
 
 
@@ -50,38 +53,45 @@ def strike_interval(strikes: np.ndarray) -> float:
 TRADING_DAYS_YEAR = 243.0
 
 # ── em_1d : one-session expected move ─────────────────────────────────
-# expected_move() is a 1-sigma move to EXPIRY. em_1d is the NEXT-SESSION move,
-# and it is deliberately NOT built from ATM IV alone.
+# expected_move() is a 1-sigma move to EXPIRY. em_1d is the NEXT-SESSION move.
+# Computed in oc/em1d.py (shared by exposure_eod and exposure_hist):
 #
-# Calibration on 19,269 rows (cash_eod settlement closes joined to exposure_eod,
-# rank-0, dte>3). Target for a correctly scaled 1-sigma band is
-# E|X|/sigma = sqrt(2/pi) = 0.798:
-#     IV only            0.762      (band too wide - the vol risk premium)
-#     0.25*IV + 0.75*HV  0.787
-#     0.15*IV + 0.85*HV  0.795
-#     0.10*IV + 0.90*HV  0.799   <- used
-#     HV only            0.809      (band too narrow)
+#   em_1d^2 = k_t * ( w_iv*IV_d^2 + w_r1*r_t^2 + w_rv5*RV5 + w_rv22*RV22 )
 #
-# HV dominates because realised vol is the better predictor of the NEXT day;
-# implied carries a persistent premium. Do not read the weights as "IV is
-# useless" - the IV leg is what moves first when a regime breaks, and this
-# sample covers one quiet regime (2025-12 to 2026-09). Revisit after a vol event.
+# RECALIBRATED 2026-10-04 on exposure_hist rank 0, 286k symbol-days, target the
+# next-day squared return, QLIKE loss, results windows excluded, fit Jun 2020 -
+# Oct 2024 / test Nov 2024 - Sep 2026. QLIKE vs the previous formula on the test
+# period: -0.045 (best in every year 2021-26); mean |z| stable 0.72-0.75 a year
+# where the old formula drifted 0.75 -> 0.80.
 #
-# CAVEAT: fitting E|X|/sigma gets the average right, not the shape. 1-sigma
-# coverage runs 72.0% against a theoretical 68.3%, and 2-sigma covers 93.1%
-# against 95.4% - too much mass in the middle AND in the far tail. Treat any
-# 2-sigma band built from this as optimistic.
+# The previous 0.10*IV + 0.90*HV20 weights were fitted on nine quiet months
+# (2025-12 to 2026-09); over six years IV carries about half the information.
+# k_t (trailing 250-session pooled mean of r^2/sigma^2, sessions before t only)
+# absorbs regime drift, e.g. the post-2024 compression of option premia; it has
+# ranged 0.84-1.39 on variance (0.92-1.18 on em_1d). Refit the weights yearly
+# walk-forward; do not hand-tune k.
+#
+# em_1d is a VARIANCE-MATCHED 1-sigma. Returns are fat-tailed, so mean |z| sits
+# near 0.72, not the normal 0.798, and normal band multipliers are wrong. Use
+# EM1D_BAND_MULT (empirical |z| quantiles, stable 2021-26 and on the test set).
+EM1D_HAR_W = {"iv2": 0.508, "r1": 0.1045, "rv5": 0.0458, "rv22": 0.1919}
+EM1D_SCALE_WINDOW = 250      # sessions in the rolling calibration scale
+EM1D_SCALE_MIN_DAYS = 125    # below this many prior sessions, no scale (em_1d NULL)
+EM1D_MIN_OBS = 20            # returns needed in the 22-session window
+EM1D_BAND_MULT = {0.683: 0.86, 0.954: 2.0, 0.99: 3.0}
+
+# LEGACY blend, kept only so old scripts (backfill_em1d.py, em_calibration.py)
+# still import. Not used by the pipelines since 2026-10-04.
 EM1D_W_IV = 0.10
 EM1D_W_HV = 0.90
 
-# HV20 construction. NSE does NOT adjust bhavcopy prevclose on ex-dates (verified
-# on VEDL 2026-04-30: close 271.55 against prevclose 773.60, unadjusted), and
-# prevclose is in fact exactly LAG(close), so it carries no adjustment at all.
-# Without a corporate-actions feed the only defence is to drop pathological
-# returns: a single -104% log return put VEDL's HV20 at 372% for a month.
-# Excluding |r| > 0.15 caps the observed maximum at 76% and moves the calibration
-# by 0.003 - it costs nothing and removes a catastrophic tail.
-HV_WINDOW_DAYS   = 20      # trailing sessions, lagged 1 (no look-ahead)
+# HV20 construction. Since 2026-10-04 hv20 and em_1d use CA-ADJUSTED returns
+# (bhavcopy cash_returns_adj, built by nse_ca.py apply), including the current
+# session. The old defence against unadjusted ex-dates -- dropping |r| > 0.15 --
+# removed 8,502 genuine moves for every 507 corporate-action artefacts (2020-26)
+# and biased HV down exactly where it matters. HV_MAX_ABS_RET is retained for
+# the legacy liquidity-band helpers below; the em_1d path no longer clips.
+HV_WINDOW_DAYS   = 20      # trailing sessions INCLUDING the current one
 HV_MAX_ABS_RET   = 0.15    # drop |log return| above this before estimating
 HV_MIN_OBS       = 20      # below this, hv20 is NULL rather than a thin guess
 
@@ -236,7 +246,11 @@ def expected_move(ref_price: float, atm_iv: float, dte: float) -> float:
 
 
 def expected_move_1d(ref_price: float, atm_iv: float) -> float:
-    """Expected 1-sigma move over ONE trading session.
+    """IV-only expected 1-sigma move over ONE trading session.
+
+    NOT the stored em_1d: that is the recalibrated IV + realised-variance model in
+    oc/em1d.py, which needs the day's return history. This IV-only version is for
+    live/intraday callers that only have the chain (helpers gamma analysis).
 
     Deliberately separate from expected_move(): a next-day forecast must not carry
     the sqrt(dte) horizon factor. Comparing a one-session realised move against an
@@ -417,6 +431,253 @@ def width_norm(tw: Optional[float], exp_move: float) -> Optional[float]:
     if wn > DEGENERATE_WIDTH_NORM:
         return None
     return round(wn, 4)
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Dealer gamma profile — zero-gamma flip, regime, gamma position, dealer vanna
+# ═══════════════════════════════════════════════════════════════════
+#
+# ONE function, shared by oc_exposure_eod and build_exposure_history, so the
+# flip and the regime label mean the same thing everywhere (agreed 2026-10-03).
+#
+#   Gamma(S) = lot * sum_k [ OI_ce,k * g(S,K,sig_ce,k) - OI_pe,k * g(S,K,sig_pe,k) ]
+#
+# Dealer convention: long calls, short puts (same sign as net_gex). Black-76
+# gamma on the future, T = DTE/365 calendar (matches ocdata ce_gamma: median
+# ratio 0.996 over 22k strikes), IV held per strike as S moves (sticky strike;
+# sticky-moneyness moved the flip a median 0.08 EM only). The S^2 dollar scaling
+# is a positive factor at each S and cannot move a zero, so it is omitted.
+#
+# Why not the per-strike flip (gamma_flip above): the sign change of per-strike
+# net GEX nearest futures is mostly the ATM strike where call OI overtakes put
+# OI (median -0.05 EM from price), i.e. an OI-layout fact, not a price at which
+# dealer hedging changes sign. It can also contradict the regime label (e.g.
+# ASHOKLEY 2026-10-01: regime negative, per-strike flip ABOVE price).
+#
+# Why the FULL quality-filtered chain, not the +-1.1 EM analysis window: OI walls
+# just outside the window still carry real gamma at spot. Window vs full chain
+# moved the flip with corr 0.89; +-2 EM vs full chain was 0.99.
+#
+# Prototype over 22,822 rank-0 chains (Jan 23 - Oct 1 2026): exactly one
+# significant zero on 98%, 1.9 ms/chain. Next-day |move|/em_1d, pooled two-way:
+# profile flip proximity t 3.7 (per-strike flip t 2.6, loses when both are in);
+# gamma_position t -3.5.
+
+PROFILE_SPAN_EM    = 3.0     # grid covers fut +- this many expected moves
+PROFILE_STEP_FRAC  = 0.001   # grid step as a fraction of fut (0.1%)
+PROFILE_MAX_PTS    = 800     # cap on grid points (very wide EMs)
+PROFILE_MIN_PTS    = 50
+PROFILE_MIXED_BAND = 0.05    # |Gamma| < band * max|Gamma| = dead band / "mixed"
+PROFILE_MIN_DTE    = 0.5     # floor on DTE (days) so T never hits 0 on expiry day
+VANNA_ATM_BAND_EM  = 0.25    # |K - fut| <= this * EM -> ATM vanna bucket
+_SQRT_2PI = math.sqrt(2.0 * math.pi)
+
+
+def _b76_d1(S: np.ndarray, K: np.ndarray, sig: np.ndarray, T: float) -> np.ndarray:
+    """d1 on an (m, n) grid: S (m,) prices x K/sig (n,) strikes."""
+    vs = sig[None, :] * math.sqrt(T)
+    return (np.log(S[:, None] / K[None, :]) + 0.5 * vs * vs) / vs
+
+
+def _b76_gamma_grid(S: np.ndarray, K: np.ndarray, sig: np.ndarray, T: float) -> np.ndarray:
+    d1 = _b76_d1(S, K, sig, T)
+    return np.exp(-0.5 * d1 * d1) / (_SQRT_2PI * S[:, None] * sig[None, :] * math.sqrt(T))
+
+
+def _b76_vanna(F: float, K: np.ndarray, sig: np.ndarray, T: float) -> np.ndarray:
+    """dDelta/dSigma per 1 vol POINT (0.01). Same for call and put.
+    Positive for K above ~F, negative below."""
+    d1 = _b76_d1(np.array([F]), K, sig, T)[0]
+    d2 = d1 - sig * math.sqrt(T)
+    pdf = np.exp(-0.5 * d1 * d1) / _SQRT_2PI
+    return -pdf * d2 / sig * 0.01
+
+
+def _profile_zeros(S: np.ndarray, G: np.ndarray, eps: float) -> List[float]:
+    """Zeros of G between significant regions of opposite sign.
+
+    Values with |G| < eps form a dead band; a crossing counts only when G moves
+    from one significant sign to the other, and is placed at the actual zero
+    inside that transition nearest its midpoint (linear interpolation)."""
+    sig = np.where(G > eps, 1, np.where(G < -eps, -1, 0))
+    idx = np.flatnonzero(sig != 0)
+    zeros: List[float] = []
+    for a, b in zip(idx[:-1], idx[1:]):
+        if sig[a] == sig[b]:
+            continue
+        seg = np.arange(a, b + 1)
+        zc = seg[:-1][np.sign(G[seg[:-1]]) != np.sign(G[seg[1:]])]
+        if len(zc) == 0:
+            continue
+        mid = 0.5 * (S[a] + S[b])
+        j = int(zc[np.argmin(np.abs(S[zc] - mid))])
+        zeros.append(float(S[j] - G[j] * (S[j + 1] - S[j]) / (G[j + 1] - G[j])))
+    return zeros
+
+
+def dealer_gamma_profile(strikes, ce_oi, pe_oi, ce_iv, pe_iv, lot: float,
+                         fut: float, dte: float, exp_move: float,
+                         span_em: float = PROFILE_SPAN_EM,
+                         band: float = PROFILE_MIXED_BAND,
+                         return_curve: bool = False) -> Dict[str, Any]:
+    """Zero-gamma flip, regime, gamma position and dealer vanna for one chain.
+
+    Inputs are the quality-filtered FULL chain (not the analysis window). IVs in
+    percent; a leg with no IV borrows the other leg's IV at the same strike;
+    strikes with no IV on either leg are dropped.
+
+    Returns (None-valued keys when the chain is unusable):
+      profile_flip      zero of Gamma(S) nearest fut within +-span_em EM
+      profile_fnd       (profile_flip - fut) / exp_move
+      profile_regime    sign of Gamma(fut): positive / negative / mixed (|.| in
+                        dead band); all_positive / all_negative when Gamma never
+                        changes sign significantly on the grid. Always the
+                        sign on price's side of the flip. Typically positive
+                        <=> flip below price (99.99% of rank-0 rows), but not
+                        always: with 2+ zeros price can sit in a pocket
+                        bounded on both sides, and heavy ITM put OI above
+                        price (seen on next-month chains) inverts the shape.
+      gamma_position    Gamma(fut) / max|Gamma| on the grid, in [-1, 1]
+      profile_n_zeros   significant zeros on the grid (1 on ~98% of chains)
+      dealer_vanna      sum of dealer-signed vanna, shares per vol point
+      dealer_vanna_put_wing / _atm / _call_wing
+                        the same split by strike: K < fut - 0.25 EM / within /
+                        above. Kept separate because the dealer sign per wing is
+                        an assumption and IV shocks are not parallel.
+      gross_vanna       sum of |vanna| x OI x lot, both legs
+      dealer_vanna_norm dealer_vanna / gross_vanna, in [-1, 1]
+
+    return_curve=True adds "_curve": (S, Gamma) numpy arrays for charting (the
+    live GEX page draws the true profile from it). Off by default so the batch
+    pipelines, which insert dict keys by column name, never see it.
+    """
+    keys = ("profile_flip", "profile_fnd", "profile_regime", "gamma_position",
+            "profile_n_zeros", "dealer_vanna", "dealer_vanna_put_wing",
+            "dealer_vanna_atm", "dealer_vanna_call_wing", "gross_vanna",
+            "dealer_vanna_norm")
+    out: Dict[str, Any] = {k: None for k in keys}
+    K = np.asarray(strikes, dtype=float)
+    oc = np.nan_to_num(np.asarray(ce_oi, dtype=float))
+    op = np.nan_to_num(np.asarray(pe_oi, dtype=float))
+    ivc = np.nan_to_num(np.asarray(ce_iv, dtype=float))
+    ivp = np.nan_to_num(np.asarray(pe_iv, dtype=float))
+    if not (fut and fut > 0 and exp_move and exp_move > 0) or len(K) < 2:
+        return out
+    sc = np.where(ivc > 0, ivc, ivp) / 100.0
+    sp = np.where(ivp > 0, ivp, ivc) / 100.0
+    ok = (sc > 0) & (sp > 0) & (K > 0) & ((oc > 0) | (op > 0))
+    if ok.sum() < 2:
+        return out
+    K, oc, op, sc, sp = K[ok], oc[ok], op[ok], sc[ok], sp[ok]
+    T = max(float(dte), PROFILE_MIN_DTE) / 365.0
+    lot = float(lot) if lot and lot > 0 else 1.0
+
+    # Gamma profile on a price grid
+    half = max(span_em * exp_move, 0.02 * fut)
+    half = min(half, 0.95 * fut)                       # keep S > 0
+    n = int(min(PROFILE_MAX_PTS, max(PROFILE_MIN_PTS,
+                                     round(2 * half / (PROFILE_STEP_FRAC * fut)))))
+    S = np.linspace(fut - half, fut + half, n + 1)
+    G = lot * ((_b76_gamma_grid(S, K, sc, T) * oc).sum(axis=1)
+               - (_b76_gamma_grid(S, K, sp, T) * op).sum(axis=1))
+    gmax = float(np.abs(G).max())
+    if return_curve:
+        out["_curve"] = (S, G)
+    if np.isfinite(gmax) and gmax > 0:
+        eps = band * gmax
+        g_at = float(np.interp(fut, S, G))
+        zeros = _profile_zeros(S, G, eps)
+        out["gamma_position"] = round(g_at / gmax, 4)
+        out["profile_n_zeros"] = len(zeros)
+        if zeros:
+            z = np.array(zeros)
+            flip = float(z[np.argmin(np.abs(z - fut))])
+            out["profile_flip"] = round(flip, 2)
+            out["profile_fnd"] = round((flip - fut) / exp_move, 4)
+            out["profile_regime"] = ("mixed" if abs(g_at) < eps
+                                     else "positive" if g_at > 0 else "negative")
+        else:
+            out["profile_regime"] = ("mixed" if abs(g_at) < eps
+                                     else "all_positive" if g_at > 0 else "all_negative")
+
+    # Dealer vanna at fut (calls +, puts -), split by strike bucket
+    vc = _b76_vanna(fut, K, sc, T) * oc * lot
+    vp = _b76_vanna(fut, K, sp, T) * op * lot
+    dv = vc - vp
+    lo_b, hi_b = fut - VANNA_ATM_BAND_EM * exp_move, fut + VANNA_ATM_BAND_EM * exp_move
+    gross = float(np.abs(vc).sum() + np.abs(vp).sum())
+    out["dealer_vanna"] = round(float(dv.sum()), 2)
+    out["dealer_vanna_put_wing"] = round(float(dv[K < lo_b].sum()), 2)
+    out["dealer_vanna_atm"] = round(float(dv[(K >= lo_b) & (K <= hi_b)].sum()), 2)
+    out["dealer_vanna_call_wing"] = round(float(dv[K > hi_b].sum()), 2)
+    out["gross_vanna"] = round(gross, 2)
+    out["dealer_vanna_norm"] = round(float(dv.sum()) / gross, 4) if gross > 0 else None
+    return out
+
+
+# Strike-quality rule shared by every caller of dealer_gamma_profile (batch eod,
+# live GEX page, live exposure page) so they all see the same chain. Keep a strike
+# if EITHER leg traded today OR either leg's bid-ask spread is within
+# STRIKE_BAQ_MAX_PCT of its premium. Post-close (15:40) quotes widen or vanish, so
+# the spread test alone dropped ~5% of symbol-days; a traded leg has a real
+# LTP-based IV. (exposure_hist uses bhavcopy volume > 0, the same idea.)
+STRIKE_BAQ_MAX_PCT = 10.0
+
+
+def strike_quality_mask(ce_vol, pe_vol, ce_baq_pct, pe_baq_pct,
+                        baq_max: float = STRIKE_BAQ_MAX_PCT) -> np.ndarray:
+    cv = np.nan_to_num(np.asarray(ce_vol, dtype=float))
+    pv = np.nan_to_num(np.asarray(pe_vol, dtype=float))
+    cb = np.nan_to_num(np.asarray(ce_baq_pct, dtype=float), nan=np.inf)
+    pb = np.nan_to_num(np.asarray(pe_baq_pct, dtype=float), nan=np.inf)
+    return (cv > 0) | (pv > 0) | (cb <= baq_max) | (pb <= baq_max)
+
+
+def profile_from_curves(curves, fut: float, exp_move: float,
+                        band: float = PROFILE_MIXED_BAND) -> Dict[str, Any]:
+    """Flip / regime / gamma position for SEVERAL expiries together.
+
+    curves: list of (S, Gamma) from dealer_gamma_profile(..., return_curve=True),
+    one per expiry, each on its own grid. They are interpolated onto one common
+    grid and summed (each expiry already carries its own T and IVs), then the
+    same zero/regime logic as the single-chain case is applied. Used by the live
+    exposure page in all-expiry mode.
+    """
+    out: Dict[str, Any] = {"profile_flip": None, "profile_fnd": None,
+                           "profile_regime": None, "gamma_position": None,
+                           "profile_n_zeros": None, "_curve": None}
+    curves = [(np.asarray(s, float), np.asarray(g, float)) for s, g in curves
+              if s is not None and len(s) > 1]
+    if not curves or not (fut and fut > 0):
+        return out
+    lo = max(c[0][0] for c in curves)
+    hi = min(c[0][-1] for c in curves)
+    if not hi > lo:
+        return out
+    n = int(min(PROFILE_MAX_PTS, max(PROFILE_MIN_PTS,
+                                     round((hi - lo) / (PROFILE_STEP_FRAC * fut)))))
+    S = np.linspace(lo, hi, n + 1)
+    G = np.sum([np.interp(S, s, g) for s, g in curves], axis=0)
+    out["_curve"] = (S, G)
+    gmax = float(np.abs(G).max())
+    if not (np.isfinite(gmax) and gmax > 0):
+        return out
+    eps = band * gmax
+    g_at = float(np.interp(fut, S, G))
+    zeros = _profile_zeros(S, G, eps)
+    out["gamma_position"] = round(g_at / gmax, 4)
+    out["profile_n_zeros"] = len(zeros)
+    if zeros:
+        z = np.array(zeros)
+        flip = float(z[np.argmin(np.abs(z - fut))])
+        out["profile_flip"] = round(flip, 2)
+        out["profile_fnd"] = round((flip - fut) / exp_move, 4) if exp_move and exp_move > 0 else None
+        out["profile_regime"] = ("mixed" if abs(g_at) < eps
+                                 else "positive" if g_at > 0 else "negative")
+    else:
+        out["profile_regime"] = ("mixed" if abs(g_at) < eps
+                                 else "all_positive" if g_at > 0 else "all_negative")
+    return out
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -764,9 +1025,16 @@ def derive_signals(curr: Dict, prev: Optional[Dict],
                    params: Optional[Dict] = None) -> Tuple[str, str]:
     """
     Return (fired_signals_csv, active_regime). Needs prev-day dict for triggers.
-    Signals: regime_flip_to_neg/pos, flip_drift_up/down, pin_strengthening,
-             instability_widening, crash_risk, bull_trend_reinforce,
-             bear_trend_reinforce.
+    Signals (DESCRIPTIVE LABELS, not predictions -- see SIGNAL_INFO):
+             regime_flip_to_neg/pos, flip_drift_up/down, pin_strengthening
+             (shown as "Zone Narrowed"), instability_widening.
+
+    RETIRED 2026-10-04: crash_risk, bull_trend_reinforce, bear_trend_reinforce.
+    Their vanna legs read ce_vanna / pe_vanna, which are NOT dealer-signed (both
+    legs enter with the same sign), so "pe_vanna < 0" only said put OI sits below
+    the forward (true on 69% of rows) and "ce_vanna > 0" was true on 96%. None
+    showed a next-day edge. Rebuild on dealer_vanna (and its wing split) before
+    reinstating any of them.
 
     NOTE: flip_velocity may be supplied here (legacy path) or computed in the
     Stage-2 SQL layer. When present on `curr`, drift is evaluated here.
@@ -807,23 +1075,21 @@ def derive_signals(curr: Dict, prev: Optional[Dict],
         fired.append("pin_strengthening")
 
     ng_c, ng_p = curr.get("neg_gamma_fraction"), prev.get("neg_gamma_fraction")
-    if ng_c is not None and ng_p is not None and (ng_c - ng_p) > p["INSTAB_DELTA"]:
+    # Continuous instab_score (2026-10-04): today's ngf change as a percentile of
+    # this symbol's own trailing changes (filled by Stage 2). A fixed +0.05 fired
+    # on ~27% of rows because one strike changing sign moves ngf 0.055-0.083 on a
+    # 12-18 strike range -- the label meant "one strike flipped", not "unusual".
+    # Fall back to the fixed threshold until a symbol has enough history.
+    sc_ = curr.get("instab_score")
+    try:
+        sc_ = None if sc_ is None else float(sc_)
+    except (TypeError, ValueError):
+        sc_ = None
+    if sc_ is not None and sc_ == sc_:                      # not NaN
+        if ng_c is not None and ng_p is not None and ng_c > ng_p and sc_ >= p["INSTAB_PCTILE"]:
+            fired.append("instability_widening")
+    elif ng_c is not None and ng_p is not None and (ng_c - ng_p) > p["INSTAB_DELTA"]:
         fired.append("instability_widening")
-
-    iv_chg = curr.get("iv_change") or 0
-    # Crash risk: negative gamma + RISING IV + negative PE vanna (disorderly,
-    # dealers sell into weakness — vanna feedback loop).
-    if cr in NEG and iv_chg > 0 and (curr.get("pe_vanna") or 0) < 0:
-        fired.append("crash_risk")
-    # Bull trend reinforce: positive gamma + positive CE vanna + RISING IV
-    # (orderly upside continuation — dealers buy stock).
-    if cr in POS and (curr.get("ce_vanna") or 0) > 0 and iv_chg > 0:
-        fired.append("bull_trend_reinforce")
-    # Bear trend reinforce: negative gamma + negative PE vanna + FALLING IV
-    # (orderly downside grind / healthy pullback — vol being sold). Distinct from
-    # crash_risk by IV direction (mutually exclusive: iv_chg < 0 vs > 0).
-    if cr in NEG and iv_chg < 0 and (curr.get("pe_vanna") or 0) < 0:
-        fired.append("bear_trend_reinforce")
 
     return ",".join(fired), active
 
@@ -858,21 +1124,25 @@ def confidence(total_oi: float, n_strikes: int, tw_norm: Optional[float],
 # ═══════════════════════════════════════════════════════════════════
 # Structural Strength Score (history view differentiator)
 # ═══════════════════════════════════════════════════════════════════
-# Per-day, day-over-day descriptive heuristic. Six independent-ish axes, +1/−1
-# each, range [−6, +6]. "+" = structure stabilising (regime building), "−" =
+# Per-day, day-over-day descriptive heuristic. Five independent-ish axes, +1/−1
+# each, range [−5, +5]. "+" = structure stabilising (regime building), "−" =
 # destabilising. The CUMULATIVE running sum over the window is the headline
 # "building vs deteriorating" number.
 #
 # DISCIPLINE — this describes the *regime*, NOT an exogenous-shock forecast.
 # BANKINDIA stabilised structurally into the Jun-19 crash; a high score did not
 # predict the gap. Validate against next_day_realized_move before any predictive
-# claim. The six axes:
+# claim. The five axes:
 #   1. lopsided (net_gex_norm) more positive  → +1 / more negative → −1
 #   2. neg_gamma_fraction shrinking            → +1 / expanding     → −1
 #   3. atm_iv_smoothed falling (iv_change<0)   → +1 / rising        → −1
 #   4. flip receding (|flip_norm_distance| ↑)  → +1 / approaching   → −1
 #   5. regime unchanged                        → +1 / changed       → −1
-#   6. transition_width_norm narrowing         → +1 / widening      → −1
+#
+# REMOVED 2026-10-04: axis 6, transition_width_norm narrowing → +1. The width
+# is the gap between the two strikes around the per-strike crossing, so it is
+# ~83% strike-grid density, and narrow zones held LESS often than wide ones
+# (31% vs 58%) -- the axis pointed the wrong way and added grid noise.
 #
 # EXCLUDED on purpose:
 #   - realized-move shrinking → forward-outcome leak (validate AGAINST it, don't
@@ -880,9 +1150,8 @@ def confidence(total_oi: float, n_strikes: int, tw_norm: Optional[float],
 #   - basis → stock-noisy in v1; revisit once dead-zoned basis history is trusted.
 #
 # OVERLAP NOTE: axes 1 (lopsided) and 5 (regime unchanged) partly co-capture
-# regime persistence — intentional emphasis on persistence, not 6 fully
-# orthogonal axes. Axis 6 (transition_width) was added precisely because it is
-# more independent of the regime/lopsided pair.
+# regime persistence — intentional emphasis on persistence, not 5 fully
+# orthogonal axes.
 
 STRENGTH_EPS = 1e-9  # treat |delta| below this as "no change" (0 contribution)
 
@@ -890,8 +1159,7 @@ STRENGTH_EPS = 1e-9  # treat |delta| below this as "no change" (0 contribution)
 def strength_axes(curr: Dict, prev: Optional[Dict]) -> Dict[str, int]:
     """Per-axis ±1/0 contributions for one day vs the previous row.
     First row of a window (prev is None) → all zeros (no day-over-day basis)."""
-    ax = {"lopsided": 0, "neg_gamma": 0, "iv": 0, "flip": 0,
-          "regime": 0, "trans_w": 0}
+    ax = {"lopsided": 0, "neg_gamma": 0, "iv": 0, "flip": 0, "regime": 0}
     if not prev:
         return ax
 
@@ -931,16 +1199,11 @@ def strength_axes(curr: Dict, prev: Optional[Dict]) -> Dict[str, int]:
     if rc is not None and rp is not None:
         ax["regime"] = 1 if rc == rp else -1
 
-    # 6. transition_width narrowing (good) / widening (bad)
-    a, b = _f(curr, "transition_width_norm"), _f(prev, "transition_width_norm")
-    if a is not None and b is not None and abs(a - b) > STRENGTH_EPS:
-        ax["trans_w"] = 1 if a < b else -1
-
     return ax
 
 
 def strength_score(curr: Dict, prev: Optional[Dict]) -> int:
-    """Net per-day structural strength score in [-6, +6] (sum of strength_axes)."""
+    """Net per-day structural strength score in [-5, +5] (sum of strength_axes)."""
     return int(sum(strength_axes(curr, prev).values()))
 
 
@@ -1180,37 +1443,41 @@ def oi_shelf(strikes, oi, oi_change=None, ltp_change=None,
     return out
 
 
-# Signal metadata for UI / docs (single source of truth)
+# Signal metadata for UI / docs (single source of truth).
+# These are DESCRIPTIVE LABELS of what changed since the previous session. None
+# showed a stable next-day edge in the 2026-10 re-validation (date-clustered on
+# eod, six years on hist); the predictive content is in the regime LEVEL and the
+# gamma position, not in the day something changed. Wording says what happened,
+# not what to do.
 SIGNAL_INFO = {
     "regime_flip_to_neg": ("Regime → Negative",
-        "Gamma flipped from positive (pinning) to negative (amplifying) at spot. "
-        "Vol expansion likely; favor protection / long premium."),
+        "Price moved below its zero-gamma level: dealers are now short gamma at "
+        "price, so their hedging amplifies moves. Usually follows a fall through "
+        "the flip. See γ POS for how deep."),
     "regime_flip_to_pos": ("Regime → Positive",
-        "Gamma flipped to positive (pinning) regime. Favor premium selling near the flip."),
+        "Price moved back above its zero-gamma level: dealers are long gamma at "
+        "price again, so their hedging dampens moves. See γ POS for how deep."),
     # Text is INTERPOLATED from DEFAULTS, not hardcoded. The previous literal
     # said ">15% of expected move" long after DRIFT_FRAC was raised to 0.25,
     # so the tooltip described a threshold the code had stopped using.
     "flip_drift_up": ("Flip Drifting Up",
-        f"Gamma balance point migrating higher (>{DEFAULTS['DRIFT_FRAC']:.0%} of expected "
-        f"move, and only while the flip sits within {DEFAULTS['DRIFT_MAX_NORM_DIST']:g} EM "
-        "of price). Resistance/pin rising."),
+        f"Zero-gamma level moved up by >{DEFAULTS['DRIFT_FRAC']:.0%} of the expected "
+        f"move since the last session, while within {DEFAULTS['DRIFT_MAX_NORM_DIST']:g} EM "
+        "of price."),
     "flip_drift_down": ("Flip Drifting Down",
-        f"Gamma balance point migrating lower (>{DEFAULTS['DRIFT_FRAC']:.0%} of expected "
-        f"move, same relevance gate). Support broadening downward."),
-    "pin_strengthening": ("Pin Strengthening",
-        "Transition zone narrowing under positive gamma — sharper pin. Sell premium around flip."),
-    "instability_widening": ("Instability Widening",
-        "Negative-gamma fraction rising — amplification zone broadening. Higher move risk."),
-    "crash_risk": ("Crash Risk",
-        "Negative gamma + rising IV + negative PE vanna — dealers sell into weakness "
-        "(vanna feedback). Downside amplification setup."),
-    "bull_trend_reinforce": ("Bull Trend Reinforce",
-        "Positive gamma + positive CE vanna + rising IV — orderly upside continuation "
-        "(dealers buy stock to stay neutral). Trend-supportive."),
-    "bear_trend_reinforce": ("Bear Trend Reinforce",
-        "Negative gamma + negative PE vanna + FALLING IV — orderly downside grind / "
-        "healthy pullback (vol being sold). Distinct from crash_risk: falling IV means "
-        "controlled selling, not the disorderly vanna-feedback flush."),
+        f"Zero-gamma level moved down by >{DEFAULTS['DRIFT_FRAC']:.0%} of the expected "
+        f"move since the last session, while within {DEFAULTS['DRIFT_MAX_NORM_DIST']:g} EM "
+        "of price."),
+    # Key kept for history and filters; shown as "Zone Narrowed". The width is the
+    # gap between the two strikes around the per-strike crossing, so it is mostly
+    # strike-grid density; narrow zones held LESS often than wide ones (31% vs 58%).
+    "pin_strengthening": ("Zone Narrowed",
+        "Per-strike transition zone narrowed by more than 10% under positive gamma. "
+        "Mostly reflects the strike grid; not a pin-strength measure."),
+    "instability_widening": ("Neg-γ Strikes Up",
+        "Share of in-range strikes with negative net gamma rose by more than this "
+        f"symbol usually sees (top {100 - DEFAULTS['INSTAB_PCTILE'] * 100:.0f}% of its own "
+        "day-over-day changes; stored as instab_score)."),
 }
 
 
@@ -1224,15 +1491,24 @@ METRIC_INFO = {
         "Primary price reference. Spot (underlying) shown in tooltip; the basis "
         "between them carries cost-of-carry + positioning."),
     "gex_regime": ("REGIME",
-        "Net gamma sign at price (local-at-fut regime), with a mixed band.",
-        "Positive = dealers long gamma, hedging DAMPENS moves (vol-suppression / pin). "
-        "Negative = dealers short gamma, hedging AMPLIFIES moves (vol-expansion risk). "
-        "Mixed = both signs present near price (near-zero / unstable). all_positive / "
-        "all_negative only when the whole curve is one sign."),
+        "Sign of the dealer gamma profile at the futures price (zero-gamma method), "
+        "with a 5% mixed band.",
+        "Positive = dealers long gamma, hedging DAMPENS moves. Negative = dealers short "
+        "gamma, hedging AMPLIFIES moves. Changes only when price crosses the zero-gamma "
+        "level, so runs are long. all_positive / all_negative when the profile never "
+        "changes sign within ±3 expected moves."),
+    "gamma_position": ("γ POS",
+        "Dealer gamma at the futures price divided by the largest |gamma| on the "
+        "profile, in [-1, +1].",
+        "How deep in the regime price sits: +1 deep long gamma, -1 deep short gamma, "
+        "0 at the flip. Lower values have been followed by larger next-day moves "
+        "(six-year test), strongest in falling or fragile markets."),
     "days_in_regime": ("DAYS",
-        "Consecutive sessions in the current gamma regime.",
-        "Higher = established / persistent regime. Just-flipped (low) = fresh, less "
-        "confirmed. Colour: green positive regime, red negative."),
+        "Consecutive sessions the UNDERLYING has spent in the current gamma regime "
+        "(counts across monthly rolls).",
+        "Long positive streaks are normal: the regime only changes when price crosses "
+        "the zero-gamma level. Read it together with γ POS. Colour: green positive, "
+        "red negative."),
     "net_gex_sign": ("AGG",
         "Sign of the aggregate (spot²-scaled) net gamma across the range.",
         "Green + = aggregate positive, red - = aggregate negative. When AGG disagrees "
@@ -1265,10 +1541,11 @@ METRIC_INFO = {
         "transition_width_norm correlates 0.83 with it: control for this column "
         "before reading any behavioural claim off zone width."),
     "gamma_flip": ("γ FLIP",
-        "Gamma balance point — strike where net dealer gamma crosses zero.",
-        "Above flip = positive-gamma (pinning) zone; below = negative (amplifying), or "
-        "vice-versa per regime. The structural boundary price tends to gravitate to / "
-        "react around."),
+        "Zero-gamma level: the price at which total dealer gamma (re-evaluated across "
+        "the whole chain) changes sign, nearest the futures price.",
+        "Price above the flip = positive regime in the usual shape (put OI below, call "
+        "OI above); below = negative. Typically sits about half an expected move "
+        "below price."),
     "gamma_shelf_center": ("γ SHELF",
         "Center of mass of the dominant gamma shelf — the band of strikes carrying the "
         "largest dealer gamma inventory (Q1/Q1b: where hedging is concentrated).",
@@ -1284,9 +1561,11 @@ METRIC_INFO = {
         "Sign = direction of drift; larger magnitude = structure shifting faster. "
         "Calendar-normalised so weekend gaps don't inflate it."),
     "flip_norm_distance": ("FLIP DIST",
-        "Flip distance from price in expected-move units = (flip - fut) / expected_move.",
-        "|value| < 1 = flip within one expected move = LIVE, relevant boundary price "
-        "could cross. > 1 = distant, less relevant. Sign = flip above / below price."),
+        "Zero-gamma level distance from price in expected-move units = "
+        "(flip - fut) / expected_move.",
+        "Closer to 0 = price near the level where dealer hedging switches sign; next-day "
+        "moves have been larger there. Negative = flip below price (usual in positive "
+        "regime)."),
     "transition_width_norm": ("TRANS W",
         "Width of the gamma-flip transition zone, normalised.",
         "Lower = sharper, well-defined flip (clean pin / abrupt regime boundary). "

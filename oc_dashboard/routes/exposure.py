@@ -9,7 +9,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
 from ..db import qdf, tbl, safe_response, _safe
-from ..helpers import _eod_df, gamma_flip_from_strikes, gamma_analysis_range
+from ..helpers import _eod_df, gamma_flip_from_strikes, gamma_analysis_range, profile_from_chain
 from .. import config
 
 router = APIRouter()
@@ -37,7 +37,13 @@ def _gamma_layer(snap: pd.DataFrame) -> Dict[str, Any]:
     atm_iv = float(snap.loc[snap["ce_iv"] > 0, "ce_iv"].median()) if (snap["ce_iv"] > 0).any() else 0
     lo, hi = gamma_analysis_range(spot, atm_iv=atm_iv, dte=dte)
     mask = (strikes >= lo) & (strikes <= hi)
-    flip_interp, flip_strike = gamma_flip_from_strikes(strikes[mask], net_gex[mask])
+    # Flip: zero of the DEALER GAMMA PROFILE (exposure_core via profile_from_chain),
+    # anchored on futures, same chain rule as exposure_eod and the GEX page. In
+    # all-expiry mode each expiry's profile carries its own DTE and they are summed.
+    fut = (float(snap["fut_price"].median())
+           if "fut_price" in snap.columns and snap["fut_price"].median() > 0 else spot)
+    prof = profile_from_chain(snap, lot_size, fut, dte, atm_iv)
+    flip_interp, flip_strike = prof.get("profile_flip"), prof.get("flip_nearest_strike")
 
     # Peak positive gamma (vol suppression / pin candidate) — within ±10% of spot
     gex_near = np.where(mask, net_gex, 0)  # zero out far-OTM for peak search
@@ -60,6 +66,8 @@ def _gamma_layer(snap: pd.DataFrame) -> Dict[str, Any]:
     return {
         "flip_point":    flip_interp,
         "flip_strike":   flip_strike,
+        "profile_regime": prof.get("profile_regime"),
+        "gamma_position": prof.get("gamma_position"),
         "peak_pos":      peak_pos,
         "peak_neg":      peak_neg,
         "total_gex_m":   total_gex,

@@ -27,6 +27,25 @@ from fastapi import APIRouter, Query
 
 from ..db import qdf, to_records, safe_response
 
+import pandas as pd
+
+try:  # oc/ is on sys.path once helpers is imported; fall back if not
+    import straddle_core as _sc
+    _UNIVERSE_VRP_MIN = float(_sc.UNIVERSE_VRP_MIN)
+except Exception:  # pragma: no cover
+    _UNIVERSE_VRP_MIN = 1.05
+
+
+def _has_universe_cols() -> bool:
+    """universe_* columns appear on build_vol_predictions' first run after
+    2026-10-04; until then select NULLs so the page does not break."""
+    try:
+        return int(qdf("SELECT count(*) AS n FROM duckdb_columns() "
+                       "WHERE table_name = 'vol_prediction' "
+                       "AND column_name = 'universe_gate'")["n"].iloc[0]) > 0
+    except Exception:
+        return False
+
 router = APIRouter()
 
 #: legacy sortable columns, logged alongside the model score so the two can be
@@ -57,6 +76,25 @@ def vol_screener_straddle(
         return safe_response({"asof": None, "rows": [], "note": "log is empty"})
 
     gate = "AND p.gate_pass" if gated_only else ""
+    has_u = _has_universe_cols()
+    ucols = ("p.universe_vrp_median, p.universe_gate," if has_u else
+             "NULL::DOUBLE AS universe_vrp_median, NULL::BOOLEAN AS universe_gate,")
+    # Month-level premium gate (one value per asof/expiry_rank). Separate from the
+    # stock gates: gated_only filters STOCK gates only, so a failing month still
+    # shows its otherwise-clean names, flagged, instead of an empty page.
+    universe = {"median_iv_over_rv": None, "threshold": _UNIVERSE_VRP_MIN, "pass": None}
+    if has_u:
+        try:
+            u = qdf("""
+                SELECT any_value(universe_vrp_median) AS med, any_value(universe_gate) AS ok
+                FROM vol_prediction
+                WHERE asof_date = ? AND structure = 'straddle' AND expiry_rank = ?
+            """, [str(day)[:10], expiry_rank])
+            med, okv = u["med"].iloc[0], u["ok"].iloc[0]
+            universe["median_iv_over_rv"] = None if med is None or pd.isna(med) else float(med)
+            universe["pass"] = None if okv is None or pd.isna(okv) else bool(okv)
+        except Exception:
+            pass
     df = qdf(
         f"""
         SELECT p.symbol, p.expiry, p.dte, p.expiry_rank,
@@ -73,6 +111,7 @@ def vol_screener_straddle(
                p.legacy_vrp, p.legacy_vrp_rank, p.legacy_iv_pctile_rank,
                -- decision + provenance
                p.gate_pass, p.gate_reasons, p.event_in_window,
+               {ucols}
                p.model_version, p.data_source
         FROM vol_prediction p
         WHERE p.asof_date = ? AND p.structure = 'straddle'
@@ -89,7 +128,7 @@ def vol_screener_straddle(
             [str(day)[:10], expiry_rank],
         )["n"].iloc[0])
         return safe_response({"asof": str(day)[:10], "expiry_rank": expiry_rank,
-                              "n_total": n_total, "rows": []})
+                              "n_total": n_total, "rows": [], "universe": universe})
 
     rows = to_records(df)
     n_total = int(qdf(
@@ -112,6 +151,7 @@ def vol_screener_straddle(
         "gated_only": gated_only,
         "n": len(rows),
         "n_total": n_total,
+        "universe": universe,
         "rows": rows,
         "model": {
             "terms": ["ev_per_margin", "trend_eff"],

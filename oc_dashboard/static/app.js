@@ -556,6 +556,63 @@ function jumpGex(sym){
 }
 
 // ── GEX ───────────────────────────────────────────────────────────
+// ── Net GEX chart: per-strike bars + dealer gamma profile overlay ──
+// The BARS are each strike's net dealer gamma at today's price; where they change
+// colour is the OI CROSSOVER (call OI overtakes put OI). The LINE is the dealer
+// gamma profile: total dealer gamma re-evaluated at each hypothetical price
+// across the whole chain. The GAMMA FLIP is where the LINE crosses zero, not
+// where the bars change colour (e.g. MCX 2026-10-01: bars cross ~3252, flip
+// 3006, because the 3300-3800 call walls outweigh the 2900-3250 put walls when
+// gamma is ~+/-400 points wide).
+function _oiCrossover(strikes, net, ref){
+  let best=null;
+  for(let i=0;i<strikes.length-1;i++){
+    const a=net[i], b=net[i+1];
+    if(!a || !b || (a>0)===(b>0)) continue;
+    const x=strikes[i]+(strikes[i+1]-strikes[i])*(0-a)/(b-a);
+    if(ref==null || best==null || Math.abs(x-ref)<Math.abs(best-ref)) best=x;
+  }
+  return best;
+}
+function _netGexWithProfile(strikes, netG, gp){
+  const tr=[{name:'Net GEX per strike',x:strikes,y:netG,type:'bar',
+             marker:{color:netG.map(v=>v>=0?C.green:C.red),opacity:.8},
+             hovertemplate:'strike %{x}<br>net %{y:.2f}<extra></extra>'}];
+  const prof=(gp&&gp.profile)||[];
+  const dg=prof.map(r=>r.dealer_gamma_billions);
+  if(prof.length && dg.some(v=>v!=null)){
+    tr.push({name:'Dealer γ profile (total at each price)',x:prof.map(r=>r.level),y:dg,
+             type:'scatter',mode:'lines',yaxis:'y2',line:{color:C.acc,width:2.5},
+             hovertemplate:'price %{x:.0f}<br>dealer γ %{y:.4f}<extra></extra>'});
+  }
+  return tr;
+}
+function _netGexLayout(strikes, netG, gp){
+  const ref = gp && gp.fut!=null ? gp.fut : (gp && gp.spot);
+  const shapes=[], ann=[];
+  const vline=(x,col,dash,label,yshift)=>{
+    if(x==null || !isFinite(x)) return;
+    shapes.push({type:'line',x0:x,x1:x,y0:0,y1:1,yref:'paper',line:{color:col,width:1.8,dash}});
+    ann.push({x,y:1,yref:'paper',text:label,showarrow:false,yanchor:'bottom',yshift:yshift||0,
+              font:{size:9,color:col}});
+  };
+  const flip = gp && gp.gamma_flip;
+  vline(flip, C.red, 'dot', 'γ flip '+(flip!=null?fmt(flip,0):''), 0);
+  const oc=_oiCrossover(strikes, netG, ref);
+  vline(oc, C.amber, 'dashdot', 'OI crossover '+(oc!=null?fmt(oc,0):''), 12);
+  vline(ref, C.acc2, 'dash', 'FUT '+(ref!=null?fmt(ref,0):''), 24);
+  // Symmetric ranges on both axes so the two zero lines coincide.
+  const m1=Math.max(1e-9, ...netG.map(v=>Math.abs(v||0)))*1.1;
+  const dg=((gp&&gp.profile)||[]).map(r=>r.dealer_gamma_billions).filter(v=>v!=null&&isFinite(v));
+  const m2=dg.length ? Math.max(1e-12, ...dg.map(Math.abs))*1.1 : 1;
+  return {...LB, shapes, annotations:ann, margin:{...LB.margin,t:48,r:58},
+    xaxis:{...LB.xaxis,title:'Strike / price',tickangle:-45},
+    yaxis:{...LB.yaxis,title:'Net GEX per strike (₹M)',range:[-m1,m1],zeroline:true},
+    yaxis2:{...LB.yaxis,title:'Dealer γ profile',overlaying:'y',side:'right',
+            range:[-m2,m2],showgrid:false,zeroline:false},
+    legend:{...LB.legend,orientation:'h',y:-0.28}};
+}
+
 async function loadGex(){
   const sym=document.getElementById('gexSymbol').value;
   const exp=document.getElementById('gexExpiry').value;
@@ -583,49 +640,65 @@ async function loadGex(){
       {name:'PE GEX',x:strikes,y:peG,type:'bar',marker:{color:C.red,opacity:.75}},
       {name:'Net GEX',x:strikes,y:netG,type:'scatter',mode:'lines',line:{color:C.acc,width:2}},
     ],{...LB,barmode:'relative',shapes,xaxis:{...LB.xaxis,title:'Strike',tickangle:-45},yaxis:{...LB.yaxis,title:'GEX (₹M)'}});
-    plot('netGexChart',[{name:'Net GEX',x:strikes,y:netG,type:'bar',marker:{color:netG.map(v=>v>=0?C.green:C.red),opacity:.8}}],
-      {...LB,xaxis:{...LB.xaxis,title:'Strike',tickangle:-45},yaxis:{...LB.yaxis,title:'Net GEX (₹M)'}});
+    plot('netGexChart',_netGexWithProfile(strikes,netG,gp),
+      _netGexLayout(strikes,netG,gp));
     if(gp?.profile?.length){
       const prof=gp.profile,lvl=prof.map(r=>r.level);
       const cg=prof.map(r=>r.call_gamma_billions),pg=prof.map(r=>r.put_gamma_billions),tg=prof.map(r=>r.total_gamma_billions);
-      const pshapes=[];
-      if(gp.gamma_flip!=null)pshapes.push({type:'line',x0:gp.gamma_flip,x1:gp.gamma_flip,y0:0,y1:1,yref:'paper',line:{color:C.red,width:2,dash:'dot'}});
+      // True dealer gamma profile Gamma(level): total dealer gamma re-evaluated at
+      // each hypothetical price across the whole chain. Its zero IS the flip.
+      const dg=prof.map(r=>r.dealer_gamma_billions);
+      const hasDg=dg.some(v=>v!=null);
+      const pshapes=[], pann=[];
+      if(gp.gamma_flip!=null){
+        pshapes.push({type:'line',x0:gp.gamma_flip,x1:gp.gamma_flip,y0:0,y1:1,yref:'paper',line:{color:C.red,width:2,dash:'dot'}});
+        pann.push({x:gp.gamma_flip,y:1,yref:'paper',text:'γ flip '+fmt(gp.gamma_flip,0),showarrow:false,yanchor:'bottom',font:{size:9,color:C.red}});
+      }
       if(gp.fut!=null)pshapes.push({type:'line',x0:gp.fut,x1:gp.fut,y0:0,y1:1,yref:'paper',line:{color:C.acc2,width:1.5,dash:'dash'}});
       if(gp.spot!=null)pshapes.push({type:'line',x0:gp.spot,x1:gp.spot,y0:0,y1:1,yref:'paper',line:{color:C.acc,width:1,dash:'dot'}});
       if(gp.magnet)pshapes.push({type:'rect',x0:gp.magnet.lower,x1:gp.magnet.upper,y0:0,y1:1,yref:'paper',fillcolor:'rgba(0,200,240,.05)',line:{width:0}});
-      plot('gammaProfileChart',[
-        {name:'Call GEX',x:lvl,y:cg,type:'scatter',mode:'lines',fill:'tozeroy',line:{color:C.green,width:1.5},fillcolor:'rgba(16,185,129,.1)'},
-        {name:'Put GEX', x:lvl,y:pg,type:'scatter',mode:'lines',fill:'tozeroy',line:{color:C.red,  width:1.5},fillcolor:'rgba(244,63,94,.1)'},
-        {name:'Total',   x:lvl,y:tg,type:'scatter',mode:'lines',line:{color:C.acc,width:2.5}},
-      ],{...LB,shapes:pshapes,xaxis:{...LB.xaxis,title:'Price Level'},yaxis:{...LB.yaxis,title:'GEX (₹B)'}});
-      // Regime is measured against FUTURES, not spot (Black-76 surface; matches
-      // the exposure screener's ref_price=fut in helpers._build_gamma_profile).
-      // With a 50-60pt NIFTY basis the two can disagree, so FUT and its distance
-      // to the flip are shown explicitly — otherwise "SPOT below flip / Positive
-      // Gamma" reads as a bug when it is the intended convention.
+      const ptraces=[
+        {name:'Call GEX (strike)',x:lvl,y:cg,type:'scatter',mode:'lines',fill:'tozeroy',line:{color:C.green,width:1},fillcolor:'rgba(16,185,129,.08)'},
+        {name:'Put GEX (strike)', x:lvl,y:pg,type:'scatter',mode:'lines',fill:'tozeroy',line:{color:C.red,  width:1},fillcolor:'rgba(244,63,94,.08)'},
+        {name:'Net per strike (OI layout)',x:lvl,y:tg,type:'scatter',mode:'lines',line:{color:C.muted||'#888',width:1,dash:'dash'}},
+      ];
+      if(hasDg) ptraces.push({name:'Dealer γ profile',x:lvl,y:dg,type:'scatter',mode:'lines',line:{color:C.acc,width:2.5},
+        hovertemplate:'price %{x:.0f}<br>dealer γ %{y:.4f}<extra>Dealer γ profile</extra>'});
+      plot('gammaProfileChart',ptraces,{...LB,shapes:pshapes,annotations:pann,
+        xaxis:{...LB.xaxis,title:'Price Level'},yaxis:{...LB.yaxis,title:'GEX (₹B)',zeroline:true}});
+      // Regime is the SIGN OF THE DEALER PROFILE AT FUTURES (stored as
+      // profile_regime), not "fut above flip": with 2+ zeros, or heavy ITM put OI
+      // above price, the profile can be inverted and the flip sit on either side.
       const _ref = gp.fut!=null?gp.fut:gp.spot;
-      const regime=_ref>=(gp.gamma_flip||0)?'Positive Gamma':'Negative Gamma';
+      const _pr = gp.profile_regime||'';
+      const regime=_pr.indexOf('negative')>=0?'Negative Gamma':(_pr==='mixed'?'Mixed (near flip)':
+                   (_pr?'Positive Gamma':(_ref>=(gp.gamma_flip||0)?'Positive Gamma':'Negative Gamma')));
       const _basis=(gp.fut!=null&&gp.spot!=null)?(gp.fut-gp.spot):null;
       const _dist =(gp.gamma_flip!=null&&_ref!=null)?(_ref-gp.gamma_flip):null;
       const _sgn=v=>(v>=0?'+':'')+fmt(v,1);
+      const _gpos=gp.gamma_position;
       document.getElementById('gexKpis').innerHTML=[
         {label:'SPOT',value:fmt(gp.spot),sub:'underlying'},
         {label:'FUT',value:gp.fut!=null?fmt(gp.fut):'—',
          sub:_basis!=null?_sgn(_basis)+' basis':'',subcls:_basis>=0?'up':'down',
-         tip:'Futures price. The gamma flip and the Positive/Negative label are '
-            +'measured against FUT, not spot — same convention as the exposure '
-            +'screener. When the basis is wide, spot can sit the other side of '
-            +'the flip; that is expected, not an error.'},
+         tip:'Futures price. The gamma flip and the regime are measured against '
+            +'FUT, not spot — same convention as the exposure screener. When the '
+            +'basis is wide, spot can sit the other side of the flip; that is '
+            +'expected, not an error.'},
         {label:'GAMMA FLIP',value:gp.gamma_flip!=null?fmt(gp.gamma_flip,0):'—',
          sub:regime+(_dist!=null?' · fut '+_sgn(_dist):''),
-         subcls:regime==='Positive Gamma'?'up':'down',
-         tip:'Zero-crossing of net dealer gamma across strikes, taken at the '
-            +'nearest crossing to FUT. Above it dealers are long gamma and hedge '
-            +'against the move (dampening); below it they hedge with it '
-            +'(amplifying). The label compares FUT to this level. Note the '
-            +'exposure screener\u0027s gex_regime uses a different test — the '
-            +'MAGNITUDE of net_gex_norm, with a neutral band — so it can read '
-            +'"mixed" while this reads Positive when net GEX is near zero.'},
+         subcls:regime==='Positive Gamma'?'up':(regime==='Negative Gamma'?'down':''),
+         tip:'Zero-gamma level: the price at which TOTAL dealer gamma, re-evaluated '
+            +'across the whole chain at that price, changes sign (nearest to FUT). It '
+            +'is where the Dealer \u03b3 profile line crosses zero \u2014 NOT where the '
+            +'per-strike bars change colour (that is the OI crossover, where call OI '
+            +'overtakes put OI). Same value as the exposure screener and history.'},
+        {label:'γ POS',value:_gpos!=null?(_gpos>=0?'+':'')+fmt(_gpos,2):'—',
+         sub:_gpos==null?'':(_gpos>=0.4?'deep long γ':_gpos>=0?'shallow long γ':_gpos>-0.4?'shallow short γ':'deep short γ'),
+         subcls:_gpos==null?'':(_gpos>=0?'up':'down'),
+         tip:'Dealer gamma at FUT / largest |gamma| on the profile, in [-1, +1]. How '
+            +'deep in the regime price sits: lower values have been followed by '
+            +'larger next-day moves.'},
         {label:'MAGNET CTR',value:gp.magnet?fmt(gp.magnet.center,0):'—',sub:gp.magnet?fmt(gp.magnet.lower,0)+'–'+fmt(gp.magnet.upper,0):''},
         {label:'STRENGTH',value:gp.magnet?fmt(gp.magnet.strength,4):'—',sub:'₹B'},
       ].map(k=>`<div class="kpi"${k.tip?` title="${k.tip.replace(/"/g,'&quot;')}"`:''}><div class="kpi-label">${k.label}</div><div class="kpi-val acc">${k.value}</div><div class="kpi-sub ${k.subcls||''}">${k.sub}</div></div>`).join('');
@@ -1456,7 +1529,7 @@ function _strDetailTip(r){
     <div style="border-top:1px solid var(--bd);margin:5px 0"></div>
     ${row('IV rank', rankTxt)}
     ${row('VRP', r.vrp!=null?`${r.vrp>0?'+':''}${fmt(r.vrp,2)} <span style="color:var(--muted);font-size:9px">IV − HV20</span>`:'—')}
-    ${row('EM (1 day)', r.em_1d!=null?`±${fmt(r.em_1d,1)}`:'—')}
+    ${row('EM (1 day)', emBandsHtml(r.em_1d, null, 1))}
     ${row('OI', `CE ${fmtL(r.ce_oi)} · PE ${fmtL(r.pe_oi)}`)}
     <div style="color:var(--muted);font-size:9px;margin-top:5px;line-height:1.35">
       BE/HV compares premium to the move 20d realised vol implies over the same
@@ -1610,10 +1683,26 @@ function _renderVolKpis(res){
     {label:'BACKTEST IC', value:m.backtest_ic!=null?fmt(m.backtest_ic,3):'—',
      sub:`t ${m.backtest_t??'—'} · ${m.backtest_expiries??'—'} expiries`},
   ];
+  // Month-level premium gate: WHETHER to sell premium this expiry at all, not
+  // which names. Universe median iv/rv_forecast over all candidates. Below 1.05
+  // the month lost money in both regimes (2021-26 backtest); see straddle_core.
+  const u=res.universe||{};
+  const gateTile = u.median_iv_over_rv==null
+    ? {label:'PREMIUM GATE', value:'—', sub:'not computed yet', cls:''}
+    : {label:'PREMIUM GATE', value:fmt(u.median_iv_over_rv,3),
+       sub: u.pass ? `≥ ${fmt(u.threshold,2)} · PASS — trade` : `< ${fmt(u.threshold,2)} · FAIL — skip / reduce`,
+       cls: u.pass ? 'up' : 'down',
+       tip:'Universe median of IV / RV forecast at entry, all candidates. When the '
+          +'market as a whole is not paying a premium over recent realised vol, '
+          +'short premium has lost money: below 1.05 the backtest month averaged '
+          +'+0.1% of margin before Nov 2024 and -2.7% after; at or above, +3.0% and '
+          +'+1.0%. Small samples: validate prospectively. Stock-level GATE ticks '
+          +'below are independent of this; a trade needs both.'};
+  kpis.unshift(gateTile);
   document.getElementById('volKpis').innerHTML = kpis.map(k=>
-    `<div class="kpi"><div class="kpi-label">${k.label}</div>`
-    +`<div class="kpi-val acc">${k.value}</div>`
-    +`<div class="kpi-sub">${k.sub}</div></div>`).join('');
+    `<div class="kpi"${k.tip?` title="${k.tip.replace(/"/g,'&quot;')}"`:''}><div class="kpi-label">${k.label}</div>`
+    +`<div class="kpi-val ${k.cls||'acc'}">${k.value}</div>`
+    +`<div class="kpi-sub ${k.cls||''}">${k.sub}</div></div>`).join('');
 }
 
 function renderVolTable(){
@@ -1650,10 +1739,19 @@ function renderVolTable(){
      sortValue:v=>v==null?0:v,
      help:'Legacy RoM rank minus model rank. Positive = the model likes this name far more than the RoM sort does. On the first live day the two correlated -0.06 and shared only 2 of the top 20, so most rows disagree — which is what makes running both worth the effort.'},
     {key:'gate_reasons',label:'GATE',
-     fmt:(v,r)=>r.gate_pass?'<span class="up">✓</span>'
-       :`<span class="down" title="${String(v||'').replace(/"/g,'&quot;')}">✕</span>`,
-     sortValue:(v,r)=>r.gate_pass?1:0,
-     exportValue:(v,r)=>r.gate_pass?'pass':(v||'reject')},
+     // Stock-level gates (events, volume, CVaR) decide the tick; the month-level
+     // premium gate is shown beside it, so a clean name in a failing month reads
+     // "✓ month ✕" instead of disappearing.
+     fmt:(v,r)=>{
+       const stock = r.gate_pass?'<span class="up">✓</span>'
+         :`<span class="down" title="${String(v||'').replace(/"/g,'&quot;')}">✕</span>`;
+       const month = r.universe_gate===false
+         ? ` <span class="down" title="Month-level premium gate failed: universe median IV/RV forecast ${r.universe_vrp_median!=null?fmt(r.universe_vrp_median,3):''} below threshold">month ✕</span>`
+         : '';
+       return stock+month;
+     },
+     sortValue:(v,r)=>(r.gate_pass?1:0)+(r.universe_gate===false?0:1),
+     exportValue:(v,r)=>(r.gate_pass?'pass':(v||'reject'))+(r.universe_gate===false?' | month fail':'')},
   ];
   document.getElementById('volTable').innerHTML = makeTbl(rows,cols);
   const s=document.getElementById('volSearch');
@@ -1847,7 +1945,7 @@ function _sgDetailTip(r){
         ? `${fmt(r.iv_rank,1)}<span style="color:var(--muted);font-size:9px"> · ${m||'?'} · n=${r.iv_rank_n||0}</span>`
           +(m==='band'?' <span style="color:var(--amber);font-size:9px">(DTE-sensitive)</span>':'')
         : '<span style="color:var(--muted)">— too few samples</span>')}
-    ${row('EM (1 day)', r.em_1d!=null?`±${fmt(r.em_1d,1)}`:'—')}
+    ${row('EM (1 day)', emBandsHtml(r.em_1d, null, 1))}
     ${row('OI', `PE ${fmtL(r.pe_oi)} · CE ${fmtL(r.ce_oi)}`)}
     <div style="color:var(--muted);font-size:9px;margin-top:5px;line-height:1.35">
       P(hold) is what the stock has DONE — measured, fat-tailed, read from this
@@ -3227,21 +3325,20 @@ function filterEsRows(query){
 }
 
 // ── #9: Signal icon system (compact column + severity sort + legend) ──
+// Retired 2026-10-04: crash_risk, bull_trend_reinforce, bear_trend_reinforce
+// (built on ce/pe vanna, which are not dealer-signed). Labels below are
+// descriptive; see exposure_core.SIGNAL_INFO.
 const SIGNAL_ICONS = {
-  regime_flip_to_neg:    {icon:'▼', color:'var(--red)',   label:'Regime flip → negative'},
-  regime_flip_to_pos:    {icon:'▲', color:'var(--green)', label:'Regime flip → positive'},
-  crash_risk:            {icon:'⚡', color:'var(--red)',   label:'Crash risk (disorderly, rising IV + PE vanna)'},
-  bull_trend_reinforce:  {icon:'↑', color:'var(--green)', label:'Bull trend reinforce (orderly upside)'},
-  bear_trend_reinforce:  {icon:'↓', color:'var(--amber)', label:'Bear trend reinforce (orderly pullback, falling IV)'},
-  pin_strengthening:     {icon:'◎', color:'var(--acc)',   label:'Pin strengthening (transition narrowing)'},
-  instability_widening:  {icon:'◇', color:'var(--amber)', label:'Instability widening (neg-gamma fraction rising)'},
+  regime_flip_to_neg:    {icon:'▼', color:'var(--red)',   label:'Regime → negative (price fell below zero-gamma level)'},
+  regime_flip_to_pos:    {icon:'▲', color:'var(--green)', label:'Regime → positive (price back above zero-gamma level)'},
+  pin_strengthening:     {icon:'◎', color:'var(--muted)', label:'Zone narrowed (per-strike transition; mostly strike grid)'},
+  instability_widening:  {icon:'◇', color:'var(--amber)', label:'Neg-γ strikes up (share of negative-gamma strikes rose)'},
   flip_drift_up:         {icon:'⤴', color:'var(--muted)', label:'Flip drift up'},
   flip_drift_down:       {icon:'⤵', color:'var(--muted)', label:'Flip drift down'},
 };
-// Severity rank — lower = more urgent (sorts first). crash/flips → reinforce/structural → drift.
+// Sort order only (lower sorts first): regime changes → structural → drift.
 const SIGNAL_SEVERITY = {
-  crash_risk:0, regime_flip_to_neg:1, regime_flip_to_pos:1,
-  bull_trend_reinforce:2, bear_trend_reinforce:2,
+  regime_flip_to_neg:1, regime_flip_to_pos:1,
   pin_strengthening:3, instability_widening:3,
   flip_drift_up:4, flip_drift_down:4,
 };
@@ -3283,15 +3380,13 @@ function renderExposureScreener(d){
   document.getElementById('esDateBadge').textContent = d.date||'';
   // Signal count summary
   const counts = d.counts||{};
-  const order = ['regime_flip_to_neg','regime_flip_to_pos','crash_risk',
-                 'bull_trend_reinforce','bear_trend_reinforce',
+  const order = ['regime_flip_to_neg','regime_flip_to_pos',
                  'pin_strengthening','instability_widening','flip_drift_up','flip_drift_down'];
   // Indicator counts (compression/release) shown alongside signals
   const indCounts = d.indicator_counts||{};
-  const colors = {regime_flip_to_neg:'var(--red)',crash_risk:'var(--red)',
-    regime_flip_to_pos:'var(--green)',bull_trend_reinforce:'var(--green)',
-    bear_trend_reinforce:'var(--amber)',
-    instability_widening:'var(--amber)',pin_strengthening:'var(--acc)'};
+  const colors = {regime_flip_to_neg:'var(--red)',
+    regime_flip_to_pos:'var(--green)',
+    instability_widening:'var(--amber)',pin_strengthening:'var(--muted)'};
   const cntEl=document.getElementById('esCounts');
   let pills = order.filter(k=>counts[k]).map(k=>{
     const col=colors[k]||'var(--muted)';
@@ -3349,6 +3444,7 @@ function renderExposureScreener(d){
     {key:'fut_price',   label:'FUT',     fmt:(v,r)=>v!=null?`<span title="spot: ${r&&r.spot!=null?fmt(r.spot,1):'—'}">${fmt(v,1)}</span>`:'—', exportValue:v=>v==null?'':v},
     {key:'gex_regime',  label:'REGIME',  fmt:(v,r)=>regimePillWithDays(v, r)},
     {key:'days_in_regime',label:'DAYS', fmt:(v,r)=>daysInRegimeBadge(v, r&&r.gex_regime)},
+    {key:'gamma_position',label:'γ POS', fmt:v=>gammaPosCell(v), exportValue:v=>v==null?'':v},
     // #9b: Agg Sign → colored +/- icon (consistent with regime)
     {key:'net_gex_sign',label:'AGG',     fmt:v=>aggSignIcon(v), exportValue:v=>v||''},
     {key:'net_gex_norm',label:'LOPSIDED', fmt:v=>v!=null?sspan(v,3):'—'},
@@ -3527,30 +3623,46 @@ function _narrChange(r){
 // the multiple and the percentage carries a caveat.
 //
 // Fitted on 17,614 rows, expiry_rank=0, corrected IV.
-const _DEFEND_BASE = { hold: 73, br2: 5.4 };
+//
+// REBUILT 2026-10-04 on exposure_hist, 2021-01 to 2026-09, 257k rows (rank 0,
+// results windows excluded), with the recalibrated em_1d and the unified
+// dealer-gamma-profile definitions. Axis switched from neg_gamma_fraction to
+// gamma_position (Gamma at fut / max|Gamma|): same ordering, wider spread in the
+// current regime (68.9 -> 76.7 vs ngf 70.2 -> 77.4 on 2024-26), and it is built on
+// the definitions both tables now share (ngf's count changed with the 2026-10-03
+// strike-filter rebuild). Monotone in 2021-23 and 2024-26 separately, levels
+// within 1.5 points of each other.
+//
+// WHAT IT IS: market fragility, not a stock-specific edge. Against OTHER STOCKS
+// ON THE SAME DAY every band is within +/-1 point; the gradient exists because
+// names deep in short gamma cluster on days that turn rough for everyone. For a
+// held position that is still a fair ex-ante probability; it does not say this
+// name is safer than that one today. (Same reason a gamma tilt added nothing to
+// em_1d out of sample.)
+const _DEFEND_BASE = { hold: 74, br2: 5.0 };
 const _DEFEND_BANDS = [
-  // ngf <= max : hold% (within 1x EM), br2% (beyond 2x EM), n, display label
-  { max: 0.20,     hold: 76, br2: 4.1, n: 1058, label: 'under 20%' },
-  { max: 0.35,     hold: 76, br2: 4.2, n: 3641, label: '20-35%'    },
-  { max: 0.50,     hold: 73, br2: 5.4, n: 9527, label: '35-50%'    },
-  { max: 0.65,     hold: 68, br2: 6.9, n: 2841, label: '50-65%'    },
-  { max: Infinity, hold: 62, br2: 8.0, n:  547, label: 'over 65%'  },
+  // gamma_position <= max : hold% (|next-day move| within 1x em_1d), br2% (beyond 2x)
+  { max: -0.25,    hold: 69, br2: 6.5, n:   4504, label: 'deep short γ (< −0.25)' },
+  { max: 0,        hold: 71, br2: 5.7, n:   6208, label: 'short γ (−0.25..0)'    },
+  { max: 0.4,      hold: 72, br2: 5.3, n:  49415, label: 'shallow long γ (0..0.4)' },
+  { max: 0.7,      hold: 74, br2: 4.9, n: 101205, label: 'long γ (0.4..0.7)'      },
+  { max: Infinity, hold: 76, br2: 4.8, n:  95666, label: 'deep long γ (> 0.7)'    },
 ];
 
 function _defenseHoldProb(r){
-  const ngf = r.neg_gamma_fraction;
-  if(ngf==null || !isFinite(ngf)) return null;
+  const g = r.gamma_position;
+  if(g==null || !isFinite(g)) return null;
   let i = 0;
-  while(i < _DEFEND_BANDS.length-1 && ngf > _DEFEND_BANDS[i].max) i++;
+  while(i < _DEFEND_BANDS.length-1 && g > _DEFEND_BANDS[i].max) i++;
   const b = _DEFEND_BANDS[i];
-  const rr = b.br2 / _DEFEND_BASE.br2;        // 2x-EM tail risk vs book base
+  const rr = b.br2 / _DEFEND_BASE.br2;        // 2x-em_1d tail risk vs base
   return {
     p: b.hold,
     br2: b.br2,
     rr,
     band: i,
-    bucket: i<=1 ? 'High' : (i===2 ? 'Moderate' : 'Low'),
-    detail: 'neg γ ' + b.label + ', n=' + b.n,
+    bucket: b.hold >= 74 ? 'High' : (b.hold >= 72 ? 'Moderate' : 'Low'),
+    detail: b.label + ', n=' + b.n.toLocaleString() + ' · market fragility, not stock-specific',
     tail: (rr>=1.15 || rr<=0.85) ? (rr.toFixed(1)+'x base tail risk')
                                  : 'tail risk near base',
   };
@@ -3625,8 +3737,7 @@ function _expDetailTip(r){
         ?`±${fmt(r.expected_move,0)}${r.dte!=null?` over ${r.dte}d`:''}`
         :'—')}
     ${row('EM (1 day)', r.em_1d!=null
-        ?`±${fmt(r.em_1d,0)}`
-         +(r.fut_price?` · ${fmt(r.fut_price-r.em_1d,0)}–${fmt(r.fut_price+r.em_1d,0)}`:'')
+        ? emBandsHtml(r.em_1d, r.fut_price, 0)
          +(r.hv20!=null?` <span style="color:var(--muted)">hv20 ${fmt(r.hv20,1)}%</span>`:'')
         :'<span style="color:var(--muted)">— no hv20</span>')}
     ${row('Zone holds', hold)}
@@ -3700,6 +3811,22 @@ function daysInRegimeBadge(days, regime){
   return `<span style="font-family:var(--mono);font-size:10px;color:${col};font-weight:600">${days}d</span>`;
 }
 
+// Dealer gamma position = Gamma(fut)/max|Gamma| from the dealer gamma profile,
+// in [-1, +1]: +1 deep in dealer long gamma (moves dampened), -1 deep in short
+// gamma (moves amplified), ~0 at the zero-gamma flip. Shows HOW DEEP in the
+// regime price sits, which is what predicts (next-day move t -5.4 over six
+// years); a long DAYS streak at +0.65 and one at +0.20 are different states.
+function gammaPosCell(v){
+  if(v==null || !isFinite(v)) return '\u2014';
+  const a = Math.min(1, Math.abs(v));
+  const col = v>=0 ? 'var(--green)' : 'var(--red)';
+  const w = Math.round(a*28);
+  const bar = `<span style="display:inline-block;width:28px;height:6px;background:var(--border);border-radius:2px;vertical-align:middle;margin-left:4px;position:relative">`+
+              `<span style="position:absolute;${v>=0?'left':'right'}:0;top:0;height:6px;width:${w}px;background:${col};border-radius:2px"></span></span>`;
+  const tip = 'Dealer gamma position (Gamma at fut / max |Gamma|): +1 deep long gamma (dampened), -1 deep short gamma (amplified), 0 at the flip';
+  return `<span title="${tip}" style="font-family:var(--mono);font-size:10px;color:${col};font-weight:600">${v>=0?'+':''}${fmt(v,2)}</span>${bar}`;
+}
+
 // γ shelf cell — center of mass of the dominant gamma shelf; flags single-strike
 // (sharp, fragile pin) and shows shelf width on hover.
 function gammaShelfCell(v, r){
@@ -3754,8 +3881,8 @@ function confBadge(v){
 }
 function signalChips(v){
   return String(v).split(',').map(s=>{
-    const red=['regime_flip_to_neg','crash_risk'].includes(s);
-    const grn=['regime_flip_to_pos','bull_trend_reinforce'].includes(s);
+    const red=['regime_flip_to_neg'].includes(s);
+    const grn=['regime_flip_to_pos'].includes(s);
     const col=red?'var(--red)':grn?'var(--green)':'var(--amber)';
     return `<span style="display:inline-block;font-size:8px;padding:1px 5px;margin:1px;
       border:1px solid ${col};color:${col};border-radius:3px">${s.replace(/_/g,' ')}</span>`;
@@ -3786,10 +3913,24 @@ const HS_CHANGE_TYPE = {
 };
 
 // Strength axis labels (mirror exposure_core.strength_axes keys) for the tooltip.
+// trans_w removed 2026-10-04 (grid-confounded, pointed the wrong way).
 const HS_AXIS_LABEL = {
   lopsided:'lopsided', neg_gamma:'neg-γ%', iv:'IV',
-  flip:'flip dist', regime:'regime', trans_w:'trans W',
+  flip:'flip dist', regime:'regime',
 };
+
+// One-session expected move with its CALIBRATED bands. em_1d is a variance-
+// matched 1-sigma (oc/em1d.py), and returns are fat-tailed, so ±1 em_1d covers
+// ~73%, not 68%. Empirical multipliers, stable 2021-26 (exposure_core
+// EM1D_BAND_MULT): 68% band ±0.86 em_1d, 95% band ±2.0 em_1d.
+function emBandsHtml(em, fut, d){
+  if(em==null || !isFinite(em)) return '—';
+  const a=0.86*em, b=2.0*em;
+  const tip='68% of next-day moves fell inside ±0.86×em_1d and 95% inside ±2.0×em_1d (2021-26, every year on target). Plain ±em_1d covers ~73%.';
+  let s=`<span title="${tip}">±${fmt(em,d)}</span> <span style="color:var(--muted);font-size:9px">68% ±${fmt(a,d)} · 95% ±${fmt(b,d)}</span>`;
+  if(fut) s+=` <span style="color:var(--muted);font-size:9px">· 68% ${fmt(fut-a,0)}–${fmt(fut+a,0)}</span>`;
+  return s;
+}
 
 let _hsInitPromise = null;
 function initHistory(){
@@ -4045,7 +4186,7 @@ function hsChartStrength(seriesList, id){
       type:'scatter',mode:'lines+markers',line:{color:col,width:2.5},marker:{size:5},yaxis:'y2'});
   });
   plot(id,traces,{...LB,xaxis:{...LB.xaxis,title:''},
-    yaxis:{...LB.yaxis,title:'Day score',range:[-6.5,6.5]},
+    yaxis:{...LB.yaxis,title:'Day score',range:[-5.5,5.5]},
     yaxis2:{overlaying:'y',side:'right',title:'Cumulative',gridcolor:'transparent',
       zerolinecolor:'#243550',tickfont:{size:9}},
     legend:{...LB.legend,orientation:'h',y:1.12}});
@@ -4063,6 +4204,7 @@ const _HS_TABLE_SECTIONS = [
   ]],
   ['REGIME', [
     ['REGIME','gex_regime', (v)=>regimeBox(v)],
+    ['γ POS','gamma_position', (v)=>gammaPosCell(v)],
     ['LOPSIDED','net_gex_norm', (v)=>v!=null?sspan(v,3):'—'],
     ['NEG γ%','neg_gamma_fraction', (v)=>v!=null?fmt(v*100,0)+'%':'—'],
     ['TRANS W','transition_width_norm', (v)=>v!=null?fmt(v,2):'—'],
@@ -4293,18 +4435,20 @@ document.getElementById('btnHsCsv')?.addEventListener('click', ()=>{
 // while correlating 45-72% with the SAME DAY's move. They describe; they do not
 // lead. They are deliberately absent here.
 const _MS_HELP = {
-  ngf: `MEAN NEGATIVE-GAMMA SHARE (ngf)
-Across single-stock F&O names, front monthly expiry: the MEAN (not median) of
-the share of the strike grid where dealers are net short gamma. Short gamma
-means they must hedge WITH the move - sell into weakness, buy into strength -
-which amplifies whatever the market does.
+  ngf: `MARKET GAMMA POSITION (fragility axis since 2026-10-04)
+Across single-stock F&O names, front monthly expiry: the MEAN dealer gamma
+position (dealer gamma at the futures price / largest |gamma| on the profile,
+-1 to +1). Lower = more stocks sitting near or below their zero-gamma level,
+where dealer hedging amplifies moves. The percentile shown is FRAGILITY: the
+cycle-adjusted reading's rank, inverted, vs the trailing 60 sessions (high =
+fragile).
 
-Why this and not implied vol: ngf correlates +51.3 with NIFTY's forward 5-day
-realised vol and only +27.2 with the trailing 5-day, so it leads. NIFTY's own
-ATM IV runs 61.8 forward vs 64.3 trailing - implied vol is essentially
-coincident, repricing after the move has happened.
-
-The percentile is against the trailing 60 sessions, not an absolute level.`,
+Evidence (six years, 1,520 sessions): controlling for NIFTY's own trailing 5d and
+22d realised vol and its IV, mean gamma position still predicts NIFTY's forward
+5-day realised vol (t -4.0; -3.8 before Nov 2024, -2.6 after). Modest: 1 SD
+lower ~ +6-9% weekly NIFTY vol. It replaced mean neg_gamma_fraction, which was
+weaker (t +2.7, fading to +1.3 after the break); the earlier +51 correlation
+was measured on the first 133 days and is +15 over six years.`,
 
   iv: `NIFTY ATM IMPLIED VOL, and its 60-session percentile.
 Shown as the comparison, not the signal. A high IV percentile mostly means a
@@ -4339,14 +4483,14 @@ Two different averages are involved — do not confuse them:
   ACROSS TIME, 60 sessions the split below is at the 50th percentile of that
                            rolling window, i.e. the window's median.
 
-The percentile ranks a CYCLE-ADJUSTED value (ngf_adj = ngf_avg minus its
-near-DTE band's own trailing median), so a reading is compared against days at
-a comparable point in the expiry cycle. Without it the state tracked the
+The percentile ranks a CYCLE-ADJUSTED value (gpos_adj = mean gamma position
+minus its near-DTE band's own trailing median), so a reading is compared against
+days at a comparable point in the expiry cycle. Without it the state tracked the
 calendar: FRAGILE on 69% of post-roll days against 22-24% mid-cycle. This means
-the displayed ngf and the displayed percentile will not reconcile directly.
+the displayed value and the displayed percentile will not reconcile directly.
 
-  STABLE_*  = cycle-adjusted ngf below its 60-session median
-  FRAGILE_* = at or above it
+  STABLE_*  = cycle-adjusted mean gamma position above its 60-session median
+  FRAGILE_* = at or below it
   *_CHEAP   = NIFTY IV below its 60-session median   *_RICH = at or above
 
 LIMITS. 5-day windows overlap, so ~140 rows are more like ~28 independent
@@ -4398,8 +4542,8 @@ async function loadMarketState(){
       <span style="font-size:9px;color:var(--muted)">MARKET ${m.stale?'':(t.date||'')} →</span>
       <span>${_msTip('state','STATE')} <b style="color:${stCol}">${t.state}</b>${
         changed ? ` <span style="color:var(--muted)">(was ${prev.state})</span>` : ''}</span>
-      <span>${_msTip('ngf','NEG γ')} <b>${t.ngf_avg!=null?t.ngf_avg.toFixed(3):'—'}</b>
-        <span style="color:var(--muted)">${pct(t.ngf_pctile)}</span></span>
+      <span>${_msTip('ngf','MKT γ POS')} <b>${t.gpos_avg!=null?((t.gpos_avg>=0?'+':'')+t.gpos_avg.toFixed(3)):'—'}</b>
+        <span style="color:var(--muted)">fragility ${pct(t.fragility_pctile)}</span></span>
       <span>${_msTip('iv','NIFTY IV')} <b>${t.nifty_iv!=null?t.nifty_iv.toFixed(1):'—'}</b>
         <span style="color:var(--muted)">${pct(t.iv_pctile)}</span></span>
       <span>${_msTip('pay','CYCLE')} <b>${t.near_dte!=null?Math.round(t.near_dte)+'d':'—'}</b>
@@ -4430,13 +4574,10 @@ function renderSignalStrip(counts, expDate){
   if(!el) return;
   // Priority signals to surface (high-value only)
   const PRIO = [
-    ['crash_risk','⚡ crash','var(--red)'],
     ['regime_flip_to_neg','▼ →neg','var(--red)'],
     ['regime_flip_to_pos','▲ →pos','var(--green)'],
     ['_releasing','⚡ release','var(--red)'],
     ['_compressing','🌀 coiling','var(--acc)'],
-    ['bull_trend_reinforce','↑ bull','var(--green)'],
-    ['bear_trend_reinforce','↓ bear','var(--amber)'],
   ];
   const parts = PRIO.filter(([k])=>counts[k]).map(([k,label,col])=>
     `<span style="color:${col};font-family:var(--mono);font-size:10px;margin-right:14px;
@@ -5023,6 +5164,10 @@ function pbSell(r){
   const conc = _pbNum(r.concentration);
   const turn = _pbNum(r.oi_turnover_ratio);
   const rr25 = _pbNum(r.rr25);
+  // Dealer gamma position (profile): how deep in long gamma price sits. Replaces
+  // the old flip-distance terms, which were tuned on the per-strike flip
+  // (2026-10-04). Positive-regime quartiles: 0.38 / 0.56 / 0.72.
+  const gpos = _pbNum(r.gamma_position);
 
   // ---- literal gates (checklist as written) ----
   const gates = [
@@ -5032,42 +5177,41 @@ function pbSell(r){
        why:'sparse chains mislead flip/width'},
     {key:'turn',     label:'live book',   ok: turn!=null && turn>=0.05 && turn<=2.0, hard:true,
        why:'stale/thin OI → distrust the row'},
-    {key:'flipfar',  label:'FLIP DIST >1',ok: flipDist!=null && Math.abs(flipDist)>1, hard:false,
-       why:'flip out of reach this cycle'},
+    {key:'gposdeep', label:'γ POS ≥ 0.4', ok: gpos!=null && gpos>=0.4, hard:false,
+       why:'price well inside dealer long gamma, not near the flip'},
     {key:'lop',      label:'LOPSIDED +',  ok: lop!=null && lop>0.29, hard:false,
        why:'positive gamma dominant, not marginal'},
-    {key:'defend',   label:'DEFEND ≥Mod', ok: !!hold && hold.p>=55, hard:false,
-       why:'empirical next-day hold ≥ moderate'},
+    {key:'defend',   label:'DEFEND ≥Mod', ok: !!hold && hold.bucket!=='Low', hard:false,
+       why:'empirical next-day hold ≥ moderate (market fragility, γ POS)'},
     {key:'notpin',   label:'not ◆ pin',   ok: !_pbSingleStrike(r), hard:false,
        why:'single-strike shelf = fragile pin'},
     {key:'wings',    label:'wings calm',  ok: rr25==null || Math.abs(rr25)<=3.0, hard:false,
        why:'both wings bid → naked strangle risk'},
-    {key:'confirm',  label:'pin_strength',ok: _pbHasSignal(r,'pin_strengthening'), hard:false,
-       why:'confirming signal firing'},
   ];
 
   // ---- disqualifier caps (override band regardless of score) ----
   let cap = null;
   if (_pbNeg(r)) cap = 'avoid';                          // wrong regime outright
-  if (_pbHasSignal(r,'crash_risk')) cap = 'avoid';       // overrides everything
   if (_pbHasSignal(r,'compression_release')) cap = 'avoid'; // spring sprang
   const hardFail = gates.some(g=>g.hard && !g.ok);
   if (hardFail && cap==null) cap = 'weak';               // failed a hard gate
 
   // ---- soft weighted score (ranking within band) ----
   // Weights favour the SURVIVING axes of the validated hold model + relevance.
-  const holdS = hold ? Math.max(0, Math.min(1, (hold.p - 40) / 40)) : null; // 40→0,80→1
-  const flipS = flipDist==null ? null : Math.max(0, Math.min(1, (Math.abs(flipDist)-0.5)/1.5)); // .5→0,2→1
+  // DEFEND is keyed on gamma_position since 2026-10-04, so the separate γ POS
+  // depth term was removed (it would have counted the same variable twice, 52%
+  // of the score). holdS spans the rebuilt table's 69-76% range; the old 40-80
+  // scale left every row between 0.72 and 0.90.
+  const holdS = hold ? Math.max(0, Math.min(1, (hold.p - 69) / 7)) : null;  // 69→0, 76→1
   const lopS  = lop==null ? null : Math.max(0, Math.min(1, lop));            // 0→0,1→1 (only + helps)
   const concS = conc==null ? null : (1 - Math.max(0, Math.min(1, (conc-0.20)/0.30))); // diffuse better: .20→1,.50→0
   const strS  = _pbNum(r.strength_cumulative)==null ? null
-                  : Math.max(0, Math.min(1, (r.strength_cumulative+6)/12));  // -6→0,+6→1
+                  : Math.max(0, Math.min(1, (r.strength_cumulative+5)/10));  // -5→0,+5→1 (five axes)
   const daysS = _pbNum(r.days_in_regime)==null ? null
                   : Math.max(0, Math.min(1, r.days_in_regime/8));            // 0→0,8+→1 (context only, low w)
 
   const combo = _pbCombine([
-    {w:30, s:holdS},   // validated hold model — highest weight
-    {w:22, s:flipS},   // relevance: is the flip even reachable
+    {w:30, s:holdS},   // hold model (gamma_position bands, 2021-26)
     {w:18, s:lopS},    // dominance of positive gamma
     {w:14, s:concS},   // distributed > concentrated (fragility)
     {w:12, s:strS},    // multi-day building vs noisy
@@ -5086,20 +5230,21 @@ function pbSell(r){
 // ═══════════════════════════════════════════════════════════════════
 function pbManage(r){
   const flipDist = _pbNum(r.flip_norm_distance);
+  const gpos = _pbNum(r.gamma_position);
   const prevSig = String(r.prev_signals || '');   // present in DROPPED view rows
 
   // Each trigger: fired? + severity weight. Sum → urgency.
   const triggers = [
-    {key:'crash',    label:'crash_risk',        on:_pbHasSignal(r,'crash_risk'),           sev:1.00,
-       act:'get out of the way — overrides all'},
     {key:'release',  label:'compression_release',on:_pbHasSignal(r,'compression_release'),  sev:0.85,
        act:'spring sprang → exit/flip short premium'},
     {key:'flip2neg', label:'regime→neg',        on:_pbHasSignal(r,'regime_flip_to_neg')||_pbNeg(r), sev:0.80,
        act:'hedging now amplifies → reduce/roll/protect'},
-    {key:'instab',   label:'instability_widen', on:_pbHasSignal(r,'instability_widening'),  sev:0.55,
-       act:'amplification zone broadening → tighten'},
-    {key:'flipnear', label:'FLIP DIST <1',      on:flipDist!=null && Math.abs(flipDist)<1, sev:0.45,
-       act:'boundary reachable → pre-plan adj at flip'},
+    {key:'instab',   label:'neg-γ strikes up', on:_pbHasSignal(r,'instability_widening'),  sev:0.55,
+       act:'more strikes in short gamma → tighten'},
+    // Was "FLIP DIST <1": under the profile flip that holds on 88% of positive
+    // rows, so it no longer discriminates. Shallow gamma position does.
+    {key:'flipnear', label:'γ POS < 0.25',      on:gpos!=null && gpos>=0 && gpos<0.25, sev:0.45,
+       act:'price near the zero-gamma level → pre-plan adj at flip'},
     {key:'fragile',  label:'tight+◆ pin',       on:_pbSingleStrike(r) && _pbNum(r.concentration)!=null && r.concentration>0.37, sev:0.40,
        act:'looks-safe-isn\'t → reduce'},
     {key:'dropped',  label:'thesis expired',    on: prevSig.length>0 && !String(r.signals||'').length, sev:0.35,
@@ -5123,12 +5268,14 @@ function pbManage(r){
 // ═══════════════════════════════════════════════════════════════════
 // CHECKLIST 3 — BUY / LONG-PREMIUM SETUP  (guide §2 buy section)
 // The highest-value setup is a MULTI-DAY compression about to release.
-// crash_risk / instability score as directional long-vol/put setups.
+// Alternative thesis: price inside dealer SHORT gamma (amplification), scored by
+// depth (gamma_position). Replaced the retired crash_risk / bear_trend_reinforce
+// legs on 2026-10-04.
 // ═══════════════════════════════════════════════════════════════════
 function pbBuy(r){
   const ivchg = _pbNum(r.iv_change) ?? _pbNum(r.iv_delta);
   const cdays = _pbNum(r.compression_days) ?? 0;
-  const pevanna = _pbNum(r.pe_vanna);
+  const gpos = _pbNum(r.gamma_position);
   const negfrac = _pbNum(r.neg_gamma_fraction);
 
   const gates = [
@@ -5142,10 +5289,9 @@ function pbBuy(r){
        why:'if already released, the move is gone'},
   ];
 
-  // Alternative long thesis: directional amplification (crash / instability).
-  const crash = _pbHasSignal(r,'crash_risk');
+  // Alternative long thesis: price inside dealer short gamma (amplification).
+  const amp = _pbNeg(r) && gpos!=null && gpos<0;
   const instab = _pbHasSignal(r,'instability_widening');
-  const bear = _pbHasSignal(r,'bear_trend_reinforce');
 
   // ---- soft score: reward sustained coil + cheap vol; OR directional amp ----
   const coilS = Math.max(0, Math.min(1, cdays/5));                       // 0→0,5+→1
@@ -5163,17 +5309,13 @@ function pbBuy(r){
       {w:15, s: negS},
       {w:10, s: 1},           // base for being in a compression state at all
     ]);
-  } else if (crash || instab){
-    thesis = crash ? 'crash / downside amp' : 'instability widening';
-    // crash_risk wants: neg gamma + rising IV + negative PE vanna
-    const crashLegs = [
-      _pbNeg(r) ? 1 : 0,
-      (ivchg!=null && ivchg>0) ? 1 : (ivchg==null?null:0),
-      (pevanna!=null && pevanna<0) ? 1 : (pevanna==null?null:0),
-    ].filter(x=>x!=null);
-    const crashS = crashLegs.length ? crashLegs.reduce((a,b)=>a+b,0)/crashLegs.length : null;
+  } else if (amp || instab){
+    thesis = amp ? 'negative gamma / amplification' : 'neg-γ strikes rising';
+    // Depth in short gamma: gamma_position 0 → 0, -0.5 or below → 1
+    // (negative-regime median is -0.23, 10th percentile -0.55).
+    const depthS = gpos==null ? null : Math.max(0, Math.min(1, -gpos/0.5));
     combo = _pbCombine([
-      {w:50, s: crashS},
+      {w:50, s: depthS},
       {w:30, s: negS},
       {w:20, s: instab?1:0},
     ]);
@@ -5185,7 +5327,6 @@ function pbBuy(r){
   let score100 = combo.score==null ? null : Math.round(combo.score*100*releasedPenalty);
   let cap = null;
   if (_pbHasSignal(r,'compression_release') && r.regime_compression) cap='weak'; // released mid-coil
-  if (bear && !crash) cap = cap || 'weak';   // orderly grind, vol being sold — seller's pullback, not a buy
   const band = score100==null ? 'n/a' : _pbBand(score100, cap);
   return {score:score100, band, gates, thesis, cap};
 }
@@ -5348,16 +5489,19 @@ function _pbGuideHtml(){
   <span style="color:var(--red)">✕ hard-fail (caps the band)</span>,
   <span style="color:var(--muted)">· soft-fail (only lowers score)</span>. Hover any chip for why.
   <br><br>
-  <b>SELL</b> — new short-premium setup. Score weights the <i>validated</i> hold model (30),
-  flip reachability (22), positive-gamma dominance (18), shelf diffuseness (14),
+  <b>SELL</b> — new short-premium setup. Score weights the hold model (30: depth in dealer long
+  gamma, γ POS bands fitted 2021-26 — market fragility, not a stock-specific edge),
+  positive-gamma dominance (18), shelf diffuseness (14),
   multi-day strength (12), regime persistence (4, deliberately small — no predictive signal).
-  Negative regime / crash_risk / release ⇒ AVOID.
+  Negative regime / release ⇒ AVOID.
   <br>
   <b>MANAGE</b> — adjustment triggers for a position you already hold. Score = urgency.
-  Any hard trigger (crash_risk, release, regime→neg) ⇒ ACT-NOW. Read the DO column.
+  Any hard trigger (release, regime→neg) ⇒ ACT-NOW. γ POS < 0.25 flags price near the
+  zero-gamma level. Read the DO column.
   <br>
   <b>BUY</b> — long-premium. Multi-day <b>compression</b> (coiled, IV cheap) is the headline
-  setup; crash_risk / instability score as directional long-vol. Already-released ⇒ capped.
+  setup; depth in dealer short gamma (negative γ POS) scores as directional long-vol.
+  Already-released ⇒ capped.
   <br><br>
   <span style="color:var(--amber)">NOTE:</span> width (TRANS W) is deliberately <b>not</b> a
   score axis — the rebuilt hold model dropped it as a grid-density confound. Fragility is read

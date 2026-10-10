@@ -52,6 +52,7 @@ against a selection effect indistinguishable from zero. --timing-gate tests it.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import sys
 import warnings
 from datetime import date, datetime
@@ -129,7 +130,11 @@ def load_snapshot(con, entry: date, expiry: date) -> pd.DataFrame:
             SELECT symbol, dte, dte_trading, spot, fut_price, atm_strike,
                    atm_iv, atm_ce, atm_pe, atm_straddle, hv20, em_1d,
                    expected_move, mean_abs_move, lot, lot_src,
-                   gex_regime, gamma_flip, neg_gamma_fraction, net_vanna,
+                   -- Canonical flip/regime = dealer gamma profile (2026-10-04).
+                   -- gamma_score now comes from gamma_position (see
+                   -- straddle_core.gamma_regime_score); the old lookup is retired.
+                   gex_regime, gamma_flip, gamma_position,
+                   neg_gamma_fraction, net_vanna,
                    rr25, bf25, n_strikes, confidence, traded_frac,
                    total_oi_in_range, total_vol_in_range, expiry_rank,
                    compression_days, days_in_regime, days_since_flip,
@@ -383,6 +388,35 @@ def run_expiry(con, expiry: date, args) -> pd.DataFrame:
         try:
             frv = sc.forward_rv(rr, horizon, model=args.model,
                                 min_obs=min(args.min_obs, rr.size))
+            # --vol-source em1d: anchor the path volatility to the stored em_1d
+            # (oc/em1d.py: IV + today's return + RV5 + RV22, rolling scale)
+            # instead of the return-only model. Innovations (fat tails) and,
+            # for GARCH, the mean-reverting recursion are kept; only the level
+            # is replaced. em_1d forecast realised variance to expiry better than
+            # EWMA on 2021-26 (rank IC 0.574/0.589 vs 0.532/0.535, QLIKE -0.04
+            # to -0.13); whether that ranks STRADDLES better is what this run
+            # measures (2026-10-04).
+            if args.vol_source == "em1d":
+                em = r.get("em_1d")
+                if em is None or not np.isfinite(em) or em <= 0:
+                    continue          # keep the comparison on identical rows
+                em = float(em)
+                # em_1d is already variance-matched to realised moves, so the
+                # resampled residuals must have unit RMS. Residuals standardised
+                # by a lagging EWMA sigma run at RMS ~1.15, which would make
+                # anchored paths ~16% wider than em_1d (measured 0.0243 vs
+                # 0.021). Shape (fat tails) is kept; only the scale is fixed.
+                z = np.asarray(frv.innovations, dtype=float)
+                z = z[np.isfinite(z)]
+                rms = float(np.sqrt(np.mean(z * z))) if z.size else 0.0
+                if rms <= 0:
+                    continue
+                # NOTE for --model garch11_t: only the START is anchored; the
+                # recursion reverts to GARCH's own long-run level within the
+                # hold (0.021 -> 0.0135 by day 17 in a test). Compare on ewma.
+                frv = dataclasses.replace(
+                    frv, var_path=np.full(horizon, em * em), sigma_next=em,
+                    rv_annual_pct=sc.annualise_vol(em), innovations=z / rms)
             mc = sc.fhs_paths(frv, horizon, n_paths=args.paths,
                               drift=0.0, seed=args.seed)
         except Exception:
@@ -423,8 +457,7 @@ def run_expiry(con, expiry: date, args) -> pd.DataFrame:
             symbol=sym,
             ev_per_margin=sim.ev_per_margin,
             vrp_z=z, ts_slope=ts,
-            gamma_score=sc.gamma_regime_score(r.get("gex_regime"),
-                                              r.get("gamma_flip"), float(spot)),
+            gamma_score=sc.gamma_regime_score(r.get("gamma_position")),
             trend_eff=sc.path_efficiency(rr[-20:]),
             liquidity=liq,
             compression_days=_f("compression_days", 0.0),
@@ -476,6 +509,14 @@ def run_expiry(con, expiry: date, args) -> pd.DataFrame:
     out["universe_vrp"] = float(np.nanmedian(
         [f.vrp_z for f in feats])) if feats else np.nan
     out["universe_iv_rank"] = float(np.nanmean([f.iv_rank for f in feats]))
+    # Month-level premium gate, computed exactly as build_vol_predictions does
+    # live (straddle_core.universe_premium_gate): median iv/rv_forecast over ALL
+    # candidates of this expiry, fixed threshold, no look-ahead.
+    u_med, u_ok = sc.universe_premium_gate([f.iv_pct for f in feats],
+                                           [f.rv_fcst_pct for f in feats],
+                                           args.min_universe_vrp)
+    out["universe_vrp_median"] = u_med
+    out["universe_gate"] = u_ok
     return out
 
 
@@ -489,8 +530,8 @@ def spearman(a, b) -> float:
     Guards the constant-input case explicitly. scipy warns and returns NaN when
     either array has no variation, which happens routinely here:
     compression_days is 0 for every symbol on roughly 99% of dates (only ~1% of
-    rows are ever compressed), and gamma_score is a four-value bucket that can
-    collapse to one value on a quiet date. Returning NaN silently is correct --
+    rows are ever compressed). gamma_score was a four-value bucket that could
+    collapse to one value on a quiet date; it is now continuous (gamma_position). Returning NaN silently is correct --
     a constant feature genuinely cannot rank anything -- but the warning spam
     hides real problems, and `constant_report` below turns the same fact into a
     diagnostic instead.
@@ -538,6 +579,39 @@ def constant_report(d: pd.DataFrame, cols: list) -> None:
         if not dead.empty:
             print("  ^ below 50% is a gate, not a ranking term -- move it out of")
             print("    RANK_DIRECTION or bucket it so it actually varies.")
+
+
+def premium_gate_report(df: pd.DataFrame, args) -> None:
+    """Month-level premium gate: what trading only passing expiries would have
+    done, as a monthly P&L record (mean realised P&L per margin of the stock-
+    gated trades each expiry), before and after Nov 2024."""
+    y = "realised_pnl_per_margin"
+    g = df[df.gate_pass]
+    m = g.groupby("expiry").agg(pnl=(y, "mean"), n=(y, "size"),
+                                med=("universe_vrp_median", "first"),
+                                ok=("universe_gate", "first")).reset_index()
+    m["post"] = pd.to_datetime(m["expiry"]) >= pd.Timestamp("2024-11-01")
+    print("\n" + "#" * 80)
+    print(f"#  PREMIUM GATE: universe median iv/rv_forecast >= {args.min_universe_vrp}")
+    print("#" * 80)
+
+    def _rec(x: pd.DataFrame) -> str:
+        if x.empty:
+            return "n=0"
+        c = x["pnl"].cumsum()
+        dd = float((c - c.cummax()).min())
+        return (f"expiries={len(x):3d}  mean/expiry {100*x.pnl.mean():+6.2f}%  "
+                f"sum {100*x.pnl.sum():+7.1f}%  worst {100*x.pnl.min():+6.1f}%  "
+                f"max drawdown {100*dd:+6.1f}%  months>0 {100*(x.pnl > 0).mean():4.0f}%")
+
+    for lab, sub in (("2021 - Oct 2024", m[~m.post]), ("Nov 2024 -     ", m[m.post]),
+                     ("ALL            ", m)):
+        print(f"  {lab} trade every month : {_rec(sub)}")
+        print(f"  {lab} passing months only: {_rec(sub[sub.ok == True])}")  # noqa: E712
+        print(f"  {lab} failing months     : {_rec(sub[sub.ok == False])}")  # noqa: E712
+    print("  per-expiry: " + "  ".join(
+        f"{str(r.expiry)[:7]} {r.med:.2f}{'+' if r.ok else '-'}{100*r.pnl:+.1f}%"
+        for r in m.itertuples() if pd.notna(r.med)))
 
 
 def report(df: pd.DataFrame, gated_only: bool, args) -> None:
@@ -675,6 +749,10 @@ def main() -> int:
                          "target within symbol and add nothing as a point "
                          "forecast, though either is fine for generating paths")
     ap.add_argument("--paths", type=int, default=8000)
+    ap.add_argument("--vol-source", default="model", choices=["model", "em1d"],
+                    dest="vol_source",
+                    help="path volatility level: the --model fit on returns, or the "
+                         "stored exposure_hist em_1d at entry")
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--min-obs", type=int, default=120, dest="min_obs")
     ap.add_argument("--min-dte", type=int, default=10, dest="min_dte")
@@ -690,6 +768,10 @@ def main() -> int:
     ap.add_argument("--timing-gate", action="store_true", dest="timing_gate",
                     help="also report results restricted to expiries whose "
                          "universe_vrp is above its own median")
+    ap.add_argument("--min-universe-vrp", type=float, default=sc.UNIVERSE_VRP_MIN,
+                    dest="min_universe_vrp",
+                    help="month-level premium gate: trade an expiry only when the "
+                         "universe median iv/rv_forecast is at or above this")
     ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
@@ -732,6 +814,9 @@ def main() -> int:
               f"universe_vrp above median")
         print("#" * 80)
         report(df[df.expiry.isin(rich) & df.gate_pass], False, args)
+
+    if "universe_gate" in df.columns:
+        premium_gate_report(df, args)
 
     if args.out:
         df.drop(columns=["rank_parts"], errors="ignore").to_csv(args.out, index=False)

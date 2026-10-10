@@ -184,11 +184,15 @@ check("NaN input does not NaN the score", np.isfinite(scored[0]["score"]), f"{sc
 check("ranks are 1..n unique", sorted(s["score_rank"] for s in scored) == list(range(1, 31)))
 top = max(scored, key=lambda s: s["score"])
 check("top score has rank 1", top["score_rank"] == 1)
-lo_tfr = [s for s in scored if s["tfr"] < 1.1]
-if lo_tfr:
-    check("low TFR gets high tfr rank-part",
-          np.mean([s["rank_parts"]["tfr"] for s in lo_tfr]) > 0.5,
-          f"{np.mean([s['rank_parts']['tfr'] for s in lo_tfr]):.3f}")
+# tfr was cut from the composite (RANK_DIRECTION is ev_per_margin + trend_eff), so
+# its rank-part no longer exists; the old check raised KeyError at import and
+# stopped this whole file from running. Same property on a term still ranked:
+# trend_eff is +1 (higher prior efficiency ranks higher).
+hi_te = [s for s in scored if s["trend_eff"] > 0.45]
+if hi_te:
+    check("high trend_eff gets high trend_eff rank-part",
+          np.mean([s["rank_parts"]["trend_eff"] for s in hi_te]) > 0.5,
+          f"{np.mean([s['rank_parts']['trend_eff'] for s in hi_te]):.3f}")
 
 print("\n=== 10. universe demeaning kills the common factor ===")
 common, idio = 1.4, rng.normal(0, 0.5, 60)
@@ -237,3 +241,14 @@ print("=" * 62)
 def test_all_properties():
     """pytest entry point."""
     assert not fails, f"failed: {fails}"
+
+
+def test_gamma_regime_score_from_gamma_position():
+    """Retired lookup -> gamma_position mapped to [0, 1] (2026-10-04)."""
+    assert sc.gamma_regime_score(1.0) == 1.0
+    assert sc.gamma_regime_score(-1.0) == 0.0
+    assert sc.gamma_regime_score(0.0) == 0.5
+    assert sc.gamma_regime_score(0.4) == 0.7
+    assert sc.gamma_regime_score(3.0) == 1.0          # clipped
+    for bad in (None, float("nan"), "x"):
+        assert sc.gamma_regime_score(bad) == 0.5      # default

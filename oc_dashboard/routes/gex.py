@@ -69,6 +69,8 @@ def gamma_profile(
     fut = gdf.attrs.get("fut") if hasattr(gdf, "attrs") else None
     return safe_response({
         "spot": spot, "fut": fut, "gamma_flip": gamma_flip,
+        "profile_regime": gdf.attrs.get("profile_regime") if hasattr(gdf, "attrs") else None,
+        "gamma_position": gdf.attrs.get("gamma_position") if hasattr(gdf, "attrs") else None,
         "magnet": magnet, "profile": to_records(gdf),
     })
 
