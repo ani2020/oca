@@ -259,6 +259,7 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     <button class="nav-btn" data-view="rvfcst">RV FCST</button>
     <button class="nav-btn" data-view="vrp">VRP</button>
     <button class="nav-btn" data-view="wheel">WHEEL</button>
+    <button class="nav-btn" data-view="premium">PREMIUM</button>
   </nav>
   <div id="marketClock" class="market-clock" style="margin-right:8px"></div>
   <div class="topbar-right">
@@ -1677,6 +1678,121 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
         <span style="margin-left:auto"><button class="btn sec" style="font-size:9px" onclick="csvBtn('wheelFills',()=>'paper_fills_'+(document.getElementById('wheelBook')?.value||'')+'.csv')">⬇ CSV</button></span>
       </div>
       <div id="wheelFills"><div class="loading"><div class="spinner"></div>Loading…</div></div>
+    </div>
+  </div>
+</div>
+
+
+<!-- ══ PREMIUM ═════════════════════════════════════════════════════ -->
+<!-- Strike richness flags (richness.duckdb via oc/build_richness_ref.py, weekly),
+     richness map, and participant positioning (bhavcopy participant_oi, EOD).
+     See routes/premium.py for what each flag means and its limits. -->
+<div class="view" id="view-premium">
+  <div class="subtabs">
+    <button class="subtab active" data-stab="pm-strikes">STRIKE FLAGS</button>
+    <button class="subtab" data-stab="pm-heat">RICHNESS MAP</button>
+    <button class="subtab" data-stab="pm-pos">POSITIONING</button>
+  </div>
+
+  <!-- ── STRIKE FLAGS ── -->
+  <div class="subtab-panel active" id="stab-pm-strikes">
+    <div class="filter-bar">
+      <span class="fl">SYMBOL</span><select id="pmSymbol" style="min-width:110px"></select>
+      <span class="fl">EXPIRY</span><select id="pmExpiry"></select>
+      <span class="fl">TIMESTAMP</span><select id="pmTimestamp"></select>
+      <span class="fl">RANGE</span>
+      <select id="pmMaxK" title="Show strikes out to this many ATM-implied moves from the forward">
+        <option value="1.5">±1.5σ</option><option value="2" selected>±2σ</option><option value="3">±3σ</option>
+      </select>
+      <span class="fl">SHOW</span>
+      <select id="pmShow">
+        <option value="all">ALL</option><option value="good">RICH + GOOD</option><option value="PE">PUTS</option><option value="CE">CALLS</option>
+      </select>
+      <button class="btn" id="btnPm">LOAD</button>
+      <button class="btn sec" style="font-size:9px" id="btnPmGuide" title="How to read this tab">ⓘ GUIDE</button>
+      <span id="pmBadge" class="badge">—</span>
+    </div>
+    <div id="pmGuide" class="pm-guide" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;
+      background:var(--card);border:1px solid var(--border);font-family:var(--mono);
+      font-size:10px;color:var(--muted);line-height:1.7"></div>
+    <div class="kpi-row" id="pmKpis"></div>
+    <div class="card">
+      <div class="card-title">BEST ZONES IN THIS EXPIRY
+        <span class="badge" title="One strike per reference cell, RICH first then GOOD, ranked by historical return on SPAN margin. A flag describes how that cell has paid historically (hold to expiry, futures delta-hedged, net of costs) -- not a forecast for this trade.">HISTORY OF THE CELL, NOT A FORECAST</span>
+      </div>
+      <div class="tw" id="pmBest"><div class="empty">Click LOAD</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">STRIKES
+        <span style="margin-left:auto">
+          <button class="btn sec" style="font-size:9px" onclick="csvBtn('pmTable',()=>'premium_flags_'+(document.getElementById('pmSymbol')?.value||'')+'_'+(document.getElementById('pmExpiry')?.value||'')+'.csv')">⬇ CSV</button>
+        </span>
+      </div>
+      <div class="tw" id="pmTable"><div class="empty">Click LOAD</div></div>
+    </div>
+    <div style="font-family:var(--mono);font-size:9px;color:var(--muted);margin-top:6px;line-height:1.6">
+      RICH: t≥3, ≥20%/yr on SPAN margin, positive in both halves (2020-23 / 2023-26) · GOOD: t≥2, ≥10%/yr, both halves positive ·
+      FAIR: positive, weaker · WEAK: negative in one half or t&lt;1 · AVOID: lost money net of costs.
+      VS USUAL compares today's premium (in σ units) with the cell's history: RICHER ≥ 75th pct, CHEAPER ≤ 25th.
+      History starts after the March-2020 crash; naked-leg tails are real (worst trades lost 20-65% of margin).
+    </div>
+  </div>
+
+  <!-- ── RICHNESS MAP ── -->
+  <div class="subtab-panel" id="stab-pm-heat">
+    <div class="filter-bar">
+      <span class="fl">SYMBOL</span><select id="pmHeatSymbol" style="min-width:110px"></select>
+      <span class="fl">METRIC</span>
+      <select id="pmHeatMetric">
+        <option value="rom_annual_pct">%/YR ON MARGIN</option>
+        <option value="hedged_bps">HEDGED BPS / TRADE</option>
+        <option value="hedged_t">T-STAT</option>
+        <option value="capture">CAPTURE (OF PREMIUM)</option>
+        <option value="payoff_ratio">PAYOFF / PREMIUM</option>
+      </select>
+      <button class="btn" id="btnPmHeat">LOAD</button>
+      <button class="btn sec" style="font-size:9px" id="btnPmHeatGuide" title="How to read the richness map">ⓘ GUIDE</button>
+      <span id="pmHeatBadge" class="badge">—</span>
+    </div>
+    <div id="pmHeatGuide" class="pm-guide" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;
+      background:var(--card);border:1px solid var(--border);font-family:var(--mono);
+      font-size:10px;color:var(--muted);line-height:1.7"></div>
+    <div class="card">
+      <div class="card-title">ENTRY DTE × MONEYNESS (σ from forward) <span class="badge">puts left · calls right · cells outlined by flag</span></div>
+      <div id="pmHeatChart" class="chart-lg"><div class="empty">Click LOAD</div></div>
+    </div>
+  </div>
+
+  <!-- ── POSITIONING ── -->
+  <div class="subtab-panel" id="stab-pm-pos">
+    <div class="filter-bar">
+      <span class="fl">SERIES</span>
+      <select id="pmPosMetric">
+        <option value="put_net_pct">NET INDEX PUTS (% of OI)</option>
+        <option value="call_net_pct">NET INDEX CALLS (% of OI)</option>
+        <option value="fut_net_pct">NET INDEX FUTURES (% of OI)</option>
+        <option value="put_short_share">SHARE OF SHORT PUTS</option>
+        <option value="call_short_share">SHARE OF SHORT CALLS</option>
+      </select>
+      <span class="fl">RANGE</span>
+      <select id="pmPosRange"><option value="60">3M</option><option value="250" selected>1Y</option><option value="750">3Y</option><option value="2000">ALL</option></select>
+      <span class="fl">DATA</span>
+      <select id="pmPosKind"><option value="oi">OPEN INTEREST</option><option value="vol">VOLUME</option></select>
+      <button class="btn" id="btnPmPos">LOAD</button>
+      <button class="btn sec" style="font-size:9px" id="btnPmPosGuide" title="How to read positioning">ⓘ GUIDE</button>
+      <span id="pmPosBadge" class="badge">—</span>
+    </div>
+    <div id="pmPosGuide" class="pm-guide" style="display:none;margin-bottom:8px;padding:10px 14px;border-radius:4px;
+      background:var(--card);border:1px solid var(--border);font-family:var(--mono);
+      font-size:10px;color:var(--muted);line-height:1.7"></div>
+    <div class="kpi-row" id="pmPosKpis"></div>
+    <div class="card">
+      <div class="card-title">BY PARTICIPANT <span class="badge" title="Aggregate across all index options / futures (NIFTY, BANKNIFTY, FINNIFTY, MIDCPNIFTY) and all expiries. NSE does not publish it by underlying, expiry or strike.">MARKET-LEVEL ONLY</span></div>
+      <div id="pmPosChart" class="chart-lg"><div class="empty">Click LOAD</div></div>
+    </div>
+    <div class="card">
+      <div class="card-title">LATEST DAY <span id="pmPosDate" class="badge">—</span></div>
+      <div class="tw" id="pmPosTable"></div>
     </div>
   </div>
 </div>

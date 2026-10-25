@@ -105,12 +105,17 @@ def cache_refresh():
 @router.get("/api/cache/status")
 def cache_status():
     """Show what is currently cached."""
-    with _cache_lock:
-        keys = list(_cache_store.keys())
-    with _margin_cache_lock:
-        margin_count = len(_margin_cache_store)
+    # The old body referenced names that no longer exist (_cache_store etc.) and
+    # raised NameError -> 500 on every call.
+    from .. import cache as _c
+    _margin_cache_path = _c._margin_cache_path
+    with _c._CACHE_LOCK:
+        keys = list(_c._CACHE.keys())
+    with _c._MARGIN_LOCK:
+        margin_count = len(_c._MARGIN_CACHE)
         today = date.today().isoformat()
-        margin_today = sum(1 for v in _margin_cache_store.values() if v.get("date") == today)
+        margin_today = sum(1 for v in _c._MARGIN_CACHE.values()
+                           if str(v.get("cached_at", ""))[:10] == today)
     return {
         "db_cache_keys":     keys,
         "db_cache_count":    len(keys),

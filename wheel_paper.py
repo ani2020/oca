@@ -6,9 +6,11 @@ exactly like the tested configuration. What differs is the data each day
 is fed and how fills are priced:
 
                  backtest                      paper
-  prices         NSE settle (SPAN price)       live mid from the closing chain
-  entry fill     settle x (1 - slippage)       live BID
-  exit fill      settle x (1 + slippage)       live ASK
+  marks/stops    NSE settle (SPAN price)       live mid from the closing chain
+  entry fill     bhavcopy CLOSE x (1 - spread) live BID
+  exit fill      CLOSE x (1 + spread) if the   live ASK
+                 contract traded, else settle
+                 + untraded slippage
   margin         stored EOD SPAN file          latest SPAN file for the day (i5, 15:32)
   delta          SPAN file                     SPAN file, else live chain delta
 
@@ -24,10 +26,11 @@ the job itself runs ~17:45. It refuses to trade if fewer than --min-coverage
 Validation the backtest cannot give
 -----------------------------------
 Every fill is stored with the live LTP / bid / ask / mid. The next run
-reconciles each fill against that day's NSE settle (bhavcopy, loaded in the
-19:30 batch) and stores slip_vs_settle, the real cost of trading at the
-quote relative to the price the backtest assumes. Compare it with the
-backtest's slippage parameter (default 10% of premium).
+reconciles each fill against that day's bhavcopy (loaded in the 19:30 batch):
+slip_vs_close against CLOSE -- the price the backtest fills at since 23 Oct
+2026 -- and slip_vs_settle against SETTLE (kept for history; for options that
+did not trade late, SETTLE is NSE's theoretical price, not a traded one).
+Compare slip_vs_close with the backtest's half-spread for that volume bucket.
 
 Books
 -----
@@ -42,8 +45,8 @@ Usage
     python wheel_paper.py init --book picks --entry-mode all --stop-mult 3 --symbols LICHSGFIN,CIPLA,POWERGRID
     python wheel_paper.py run                      # every book, today (scheduler: ~17:45)
     python wheel_paper.py run --book main --date 2026-10-05 --force
-    python wheel_paper.py status [--book main]     # positions, P&L, slippage vs settle
-    python wheel_paper.py reconcile                # settle-match past fills (also done by run)
+    python wheel_paper.py status [--book main]     # positions, P&L, fill slippage vs bhavcopy close
+    python wheel_paper.py reconcile                # match past fills to the bhavcopy close (also done by run)
     python wheel_paper.py books
 
 Tables (wheel_bt.duckdb): paper_books, paper_state, paper_positions,
@@ -62,6 +65,7 @@ from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent
@@ -107,7 +111,20 @@ def out_con(db: Path = wb.WHEEL_DB):
     import duckdb
     con = duckdb.connect(str(db))
     con.execute(SCHEMA)
+    for col, typ in (("stress", "DOUBLE"), ("stress_cap", "DOUBLE"), ("brake", "BOOLEAN")):   # risk layer
+        con.execute(f"ALTER TABLE paper_daily ADD COLUMN IF NOT EXISTS {col} {typ}")
+    for col in ("close_px", "slip_vs_close"):                                                   # 23 Oct: close basis
+        con.execute(f"ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS {col} DOUBLE")
     return con
+
+
+def _num(v) -> Optional[float]:
+    """NaN/inf -> NULL for DuckDB."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return None
+    return f if f == f and abs(f) != float("inf") else None
 
 
 def in_con():
@@ -203,7 +220,7 @@ def refresh_span(d: date) -> None:
 
 
 def span_lookup(con, d: date, symbols: set):
-    """Latest stored SPAN file on or before d -> {(raw, instr, expiry, strike): (short_scan, delta)}, und, tag."""
+    """Latest stored SPAN file on or before d -> {(raw, instr, expiry, strike): (short_scan, delta, vol)}, und, tag."""
     lf = sp.latest_file(con, d, prefix="bc.")
     if lf is None:
         return {}, {}, None
@@ -211,12 +228,12 @@ def span_lookup(con, d: date, symbols: set):
     syms = sorted(symbols)
     ph = ", ".join("?" * len(syms))
     con_rows = con.execute(f"""
-        SELECT symbol, instr, expiry, strike, short_scan, delta FROM bc.span_contract
+        SELECT symbol, instr, expiry, strike, short_scan, delta, vol FROM bc.span_contract
         WHERE trade_date = ? AND tag = ? AND instr IN ('CE', 'PE') AND symbol IN ({ph})""",
         [fd, tag] + syms).fetchall()
     und = dict(con.execute(f"SELECT symbol, price FROM bc.span_und WHERE trade_date = ? AND tag = ? "
                            f"AND symbol IN ({ph})", [fd, tag] + syms).fetchall())
-    lk = {(s, i, wb._d(e), round(float(k), 2)): (sc, dl) for s, i, e, k, sc, dl in con_rows}
+    lk = {(s, i, wb._d(e), round(float(k), 2)): (sc, dl, wb._f(v)) for s, i, e, k, sc, dl, v in con_rows}
     return lk, und, f"{fd}:{tag}"
 
 
@@ -235,30 +252,39 @@ def build_candidates(p: wb.Params, d: date, ch: pd.DataFrame, span: dict, pclose
     x["dte"] = [(e - d).days for e in x["expiry"]]
     x = x[(x["dte"] >= p.dte_lo) & (x["dte"] <= p.dte_hi)]
     x = x[((x["opt_type"] == "PE") & (x["strike"] < x["und"])) | ((x["opt_type"] == "CE") & (x["strike"] > x["und"]))]
-    x = x[(x["volume"] >= max(p.min_entry_volume, 1)) & (x["bid"] > 0) & (x["mid"] > 0) & (x["lot"] > 0)]
+    # liquidity gate (plan item 0): traded volume and OI (live chain OI is in contracts),
+    # plus a quoted-spread cap the backtest cannot see
+    x = x[(x["volume"] >= max(p.min_entry_volume, 1)) & (x["oi"].fillna(0) >= p.min_entry_oi)
+          & (x["bid"] > 0) & (x["mid"] > 0) & (x["lot"] > 0)]
+    x = x[(x["ask"] - x["bid"]) / x["mid"] <= p.max_quote_spread]
     if x.empty:
         return x
-    sc, dl = [], []
+    sc, dl, sv = [], [], []
     for r in x.itertuples(index=False):
         v = span.get((r.symbol, r.opt_type, r.expiry, round(float(r.strike), 2)))
         sc.append(v[0] if v else NAN)
         dl.append(v[1] if v and v[1] == v[1] else NAN)
+        sv.append(v[2] if v and len(v) > 2 else NAN)
     x["short_scan"] = sc
+    x["svol"] = sv
     x["delta_span"] = dl
     x = x[x["short_scan"].notna()]
     x["delta"] = x["delta_span"].abs().fillna(x["delta"].abs())
     x["margin"] = x["short_scan"] * x["lot"] * p.broker_mult + p.elm * x["und"] * x["lot"]
-    x["rom"] = x["mid"] * x["lot"] / x["margin"]
+    x["rom"] = x["bid"] * x["lot"] / x["margin"]          # ROM on what a sell actually gets
     x = x[(x["rom"] >= p.rom_target) & (x["delta"] <= p.delta_cap)]
     if x.empty:
         return x
-    x = x.sort_values("delta").groupby(["symbol", "opt_type"], as_index=False).first()
+    # same pick as wheel_bt.PICK_SQL: lowest |delta|, ties -> furthest OTM, then nearest expiry
+    x = x.assign(_otm=np.where(x["opt_type"] == "PE", x["strike"], -x["strike"]))
+    x = x.sort_values(["delta", "_otm", "expiry"], kind="mergesort").groupby(["symbol", "opt_type"], as_index=False).first()
     x["move"] = [(u / pclose[s] - 1) if pclose.get(s) else NAN for s, u in zip(x["symbol"], x["und"])]
     return pd.DataFrame({
         "trade_date": d, "symbol": x["symbol"], "opt_type": x["opt_type"], "raw": x["symbol"],
         "expiry": x["expiry"], "strike": x["strike"].astype(float), "premium": x["mid"], "lot": x["lot"],
         "margin": x["margin"], "rom": x["rom"], "delta": x["delta"], "und": x["und"], "oi": x["oi"],
-        "volume": x["volume"], "move": x["move"], "bid": x["bid"], "ask": x["ask"], "ltp": x["ltp"]})
+        "volume": x["volume"], "move": x["move"], "bid": x["bid"], "ask": x["ask"], "ltp": x["ltp"],
+        "svol": x["svol"]})
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +302,7 @@ def load_book(oc, book: str) -> tuple[wb.Params, wb.State, Optional[date]]:
     p = wb.params_from_json(row[0])
     srow = oc.execute("SELECT cash, pid, last_run FROM paper_state WHERE book = ?", [book]).fetchone()
     st = wb.State(cash=p.cash) if srow is None else wb.State(cash=srow[0], pid=srow[1])
+    st.peak = oc.execute("SELECT coalesce(max(equity), 0) FROM paper_daily WHERE book = ?", [book]).fetchone()[0]
     for r in oc.execute(f"SELECT {', '.join(POS_COLS)} FROM paper_positions WHERE book = ? ORDER BY pid",
                         [book]).fetchall():
         d = dict(zip(POS_COLS, r))
@@ -358,9 +385,12 @@ def save_book(oc, book: str, d: date, snap: datetime, st: wb.State, closed: list
                        "strike, lots, qty, ltp, bid, ask, mid, fill, reason) "
                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", [book, d, snap] + list(f))
         oc.execute("DELETE FROM paper_daily WHERE book = ? AND date = ?", [book, d])
-        oc.execute("INSERT INTO paper_daily VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        oc.execute("INSERT INTO paper_daily (book, date, snapshot_ts, equity, cash, liability, used_margin, "
+                   "capacity, n_open, n_new, n_closed, breach, cash_rule_breach, span_file, stress, stress_cap, "
+                   "brake) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                    [book, d, snap, eq["equity"], eq["cash"], eq["liability"], eq["used_margin"], eq["capacity"],
-                    eq["n_open"], eq["n_new"], len(closed), eq["breach"], eq["cash_rule_breach"], span_file])
+                    eq["n_open"], eq["n_new"], len(closed), eq["breach"], eq["cash_rule_breach"], span_file,
+                    _num(eq.get("stress")), _num(eq.get("stress_cap")), bool(eq.get("brake"))])
         oc.execute("DELETE FROM paper_state WHERE book = ?", [book])
         oc.execute("INSERT INTO paper_state VALUES (?, ?, ?, ?, now())", [book, st.cash, st.pid, d])
         oc.execute("COMMIT")
@@ -374,14 +404,23 @@ def save_book(oc, book: str, d: date, snap: datetime, st: wb.State, closed: list
 # ---------------------------------------------------------------------------
 
 def reconcile(oc, bhav_db: Path = wb.BHAV_DB) -> int:
-    """Fill settle + slip_vs_settle for past fills once that day's bhavcopy is loaded.
+    """Fill close_px / slip_vs_close (and settle / slip_vs_settle) for past fills once
+    that day's bhavcopy is loaded.
 
-    slip_vs_settle > 0 means the quote fill was WORSE than settle (the
+    slip_vs_close > 0 means the quote fill was WORSE than the bhavcopy CLOSE (the
     backtest's reference price): sold below it, or bought back above it.
+    Returns the number of fills that got their CLOSE this call.
     """
     oc.execute(f"ATTACH IF NOT EXISTS '{bhav_db}' AS bcr (READ_ONLY)")
     try:
-        n0 = oc.execute("SELECT count(*) FROM paper_fills WHERE settle IS NULL").fetchone()[0]
+        n0 = oc.execute("SELECT count(*) FROM paper_fills WHERE close_px IS NULL").fetchone()[0]
+        oc.execute("""
+            UPDATE paper_fills AS f SET close_px = o.close,
+                slip_vs_close = CASE f.action WHEN 'S' THEN (o.close - f.fill) / o.close
+                                              ELSE (f.fill - o.close) / o.close END
+            FROM bcr.options_eod AS o
+            WHERE f.close_px IS NULL AND o.trade_date = f.date AND o.symbol = f.raw AND o.expiry = f.expiry
+              AND o.strike = f.strike AND o.opt_type = f.side AND o.close > 0""")
         oc.execute("""
             UPDATE paper_fills AS f SET settle = o.settle,
                 slip_vs_settle = CASE WHEN o.settle > 0 THEN
@@ -390,7 +429,7 @@ def reconcile(oc, bhav_db: Path = wb.BHAV_DB) -> int:
             FROM bcr.options_eod AS o
             WHERE f.settle IS NULL AND o.trade_date = f.date AND o.symbol = f.raw AND o.expiry = f.expiry
               AND o.strike = f.strike AND o.opt_type = f.side AND o.settle IS NOT NULL""")
-        n1 = oc.execute("SELECT count(*) FROM paper_fills WHERE settle IS NULL").fetchone()[0]
+        n1 = oc.execute("SELECT count(*) FROM paper_fills WHERE close_px IS NULL").fetchone()[0]
     finally:
         oc.execute("DETACH bcr")
     return n0 - n1
@@ -424,7 +463,8 @@ def run_book(oc, book: str, d: date, *, force: bool, ch: pd.DataFrame, snap: dat
         sscan = v[0] if v else NAN
         dl = v[1] if v and v[1] == v[1] else r.delta
         quotes[k] = dict(symbol=r.symbol, ltp=r.ltp, bid=r.bid, ask=r.ask, mid=r.mid)
-        rows[k] = (r.ltp, float(r.volume or 0), r.mid, dl, sscan, r.und, r.ask)
+        rows[k] = (r.ltp, float(r.volume or 0), r.mid, dl, sscan, r.und, r.ask,
+                   v[2] if v and len(v) > 2 else NAN)
 
     def row_of(k):
         return rows.get(k)
@@ -432,11 +472,17 @@ def run_book(oc, book: str, d: date, *, force: bool, ch: pd.DataFrame, snap: dat
     missing = [ps.key for ps in st.book if ps.key not in rows]
     if missing:
         print(f"  [{book}] warn: {len(missing)} open contract(s) not in today's chain; carrying last mark: {missing[:4]}")
+    if p.hedge:
+        print(f"  [{book}] note: the index hedge is simulated in the backtest only; paper trades without it")
+        p = wb.replace(p, hedge=False)
     cands = build_candidates(p, d, ch, span, pclose)
     closed, opened, eq = wb.step(p, st, d, ctx, row_of, cands, fill_mode="quote")
     save_book(oc, book, d, snap, st, closed, opened, eq, quotes, span_file, raw_by_pid)
 
-    print(f"\n  [{book}] {d}  snapshot {snap:%H:%M}  span {span_file}  candidates={len(cands)}")
+    stress = eq.get("stress")
+    risk = (f"  stress {stress:,.0f} / cap {eq.get('stress_cap'):,.0f}" if stress == stress and stress is not None
+            else "") + ("  BRAKE ON (no new puts)" if eq.get("brake") else "")
+    print(f"\n  [{book}] {d}  snapshot {snap:%H:%M}  span {span_file}  candidates={len(cands)}{risk}")
     for t in closed:
         print(f"    CLOSE {t['symbol']:<11} {t['side']} {t['strike']:>9} {t['expiry']}  x{t['lots']}  "
               f"fill {t['exit_fill']:.2f}  pnl {t['pnl']:>10,.0f}  ({t['reason']})")
@@ -465,7 +511,7 @@ def cmd_run(a) -> int:
             return 1
         n = reconcile(oc)
         if n:
-            print(f"  reconciled {n} fill(s) against NSE settle")
+            print(f"  reconciled {n} fill(s) against the bhavcopy close")
     finally:
         oc.close()
 
@@ -487,8 +533,12 @@ def cmd_run(a) -> int:
         if span_file is None or not span_file.startswith(str(d)):
             print(f"  warn: margin from SPAN file {span_file} (none stored for {d} yet)")
         pclose = prev_close(ic, d, syms)
-        res, ca = wb.load_events(ic, d - timedelta(days=10), d + timedelta(days=120))
-        ctx = wb.Ctx(build_calendar(ic, d, hol), res, ca, dict(wb.SECTOR))
+        ev = wb.load_events_full(ic, d - timedelta(days=10), d + timedelta(days=120))
+        # VIX / NIFTY / betas / trend as of the latest stored close (today's index and cash
+        # files land in the 19:30 batch, after this 17:45 run, so the brake uses yesterday)
+        mkt = wb.load_market(ic, d - timedelta(days=30), d)
+        ctx = wb.Ctx(build_calendar(ic, d, hol), ev["results"], ev["ca"], dict(wb.SECTOR),
+                     ev["board"], ev["known"], ev["coverage"], mkt)
     finally:
         ic.close()
 
@@ -544,11 +594,13 @@ def cmd_status(a) -> int:
                 round(exit_fill, 2) exit_fill, round(pnl) pnl, reason FROM paper_trades {where}
                 ORDER BY exit_date DESC LIMIT 20""", prm).df()
             print("\n  Last closed trades:\n  " + (tr.to_string(index=False).replace("\n", "\n  ") if len(tr) else "(none)"))
-            sl = oc.execute(f"""SELECT book, action, count(*) fills, count(settle) settled,
-                round(100 * avg(slip_vs_settle), 2) avg_slip_pct, round(100 * median(slip_vs_settle), 2) med_slip_pct,
+            sl = oc.execute(f"""SELECT book, action, count(*) fills, count(close_px) reconciled,
+                round(100 * avg(slip_vs_close), 2) avg_slip_close_pct, round(100 * median(slip_vs_close), 2) med_slip_close_pct,
+                round(100 * avg(slip_vs_settle), 2) avg_slip_settle_pct,
                 round(100 * avg((ask - bid) / nullif(mid, 0)), 2) avg_spread_pct
                 FROM paper_fills {where} GROUP BY 1, 2 ORDER BY 1, 2""", prm).df()
-            print("\n  Fill quality vs NSE settle (backtest assumes 10% of premium each side):\n  "
+            print("\n  Fill quality vs the bhavcopy CLOSE (the backtest's fill price; it charges the half-spread"
+                  "\n  of the contract's volume bucket, ~2-10% of premium):\n  "
                   + (sl.to_string(index=False).replace("\n", "\n  ") if len(sl) else "(no fills yet)"))
     finally:
         oc.close()

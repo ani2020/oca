@@ -253,55 +253,43 @@ def max_pain_series(
     Time series of max pain strike for one symbol+expiry across all timestamps in DB.
     Shows how max pain drifts intraday as OI changes.
     """
-    # Get all distinct timestamps for this symbol+expiry
-    ts_df = qdf(
-        f"SELECT DISTINCT STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS ts "
-        f"FROM {tbl()} WHERE symbol = ? AND expiry = ? ORDER BY ts",
+    # ONE query for the whole expiry, grouped by minute in pandas. This used to
+    # run a separate query per snapshot (N+1), each on a fresh connection at
+    # ~0.3 s, so a monthly NIFTY expiry (1,000-2,600 snapshots) held the CPU for
+    # 5-13 minutes -- and kept going after the user left the tab. Minute grouping
+    # and the within-minute strike order match the old per-minute query exactly.
+    # lotsize is dropped: it is a positive constant per snapshot, so it cannot
+    # move the argmin (verified identical on 2,655 snapshots, 2026-10-12).
+    df = qdf(
+        f"""
+        SELECT STRFTIME(timestamp, '%Y-%m-%d %H:%M') AS ts,
+               strike_price,
+               COALESCE(ce_oi, 0)            AS ce_oi,
+               COALESCE(pe_oi, 0)            AS pe_oi,
+               COALESCE(underlying_price, 0) AS spot
+        FROM {tbl()}
+        WHERE symbol = ? AND expiry = ? AND timestamp IS NOT NULL
+        ORDER BY ts, strike_price
+        """,
         [symbol, expiry[:10]],
     )
-    if ts_df.empty:
+    if df.empty:
         raise HTTPException(404, "No timestamps found")
 
     series = []
-    for ts in ts_df["ts"].tolist():
-        if ts is None or (isinstance(ts, float)):
-            continue          # skip NaN rows produced by STRFTIME on NULL timestamps
-        ts = str(ts)
-        # Same minute-precision issue as max_pain: ts here comes from
-        # STRFTIME(...,'%Y-%m-%d %H:%M') so it is always 16 chars.
-        ts_clause, ts_params = ts_filter_clause(ts)
-        df = qdf(
-            f"""
-            SELECT strike_price,
-                   COALESCE(ce_oi, 0) AS ce_oi,
-                   COALESCE(pe_oi, 0) AS pe_oi,
-                   COALESCE(lotsize, 1) AS lotsize,
-                   COALESCE(underlying_price, 0) AS spot
-            FROM {tbl()}
-            WHERE symbol = ? AND expiry = ?
-              {ts_clause}
-            ORDER BY strike_price
-            """,
-            [symbol, expiry[:10]] + ts_params,
-        )
-        if df.empty:
-            continue
-        strikes = df["strike_price"].values
-        ce_oi   = df["ce_oi"].values
-        pe_oi   = df["pe_oi"].values
-        lot     = max(int(df["lotsize"].iloc[0]), 1)
-        spot    = float(df["spot"].iloc[0])
-        pain_vals = []
-        for price in strikes:
-            total = float(np.sum(np.maximum(price - strikes, 0) * ce_oi * lot) +
-                          np.sum(np.maximum(strikes - price, 0) * pe_oi * lot))
-            pain_vals.append(total)
-        mp_idx = int(np.argmin(pain_vals))
+    for ts, g in df.groupby("ts", sort=True):
+        k  = g["strike_price"].to_numpy(float)
+        ce = g["ce_oi"].to_numpy(float)
+        pe = g["pe_oi"].to_numpy(float)
+        d  = k[:, None] - k[None, :]          # candidate expiry price minus strike
+        pain = np.maximum(d, 0) @ ce + np.maximum(-d, 0) @ pe
+        mp_idx = int(np.argmin(pain))
+        spot = float(g["spot"].iloc[0])
         series.append({
-            "timestamp":       ts,
-            "max_pain_strike": float(strikes[mp_idx]),
+            "timestamp":       str(ts),
+            "max_pain_strike": float(k[mp_idx]),
             "spot":            spot,
-            "distance_pts":    round(float(strikes[mp_idx]) - spot, 2),
+            "distance_pts":    round(float(k[mp_idx]) - spot, 2),
         })
 
     return safe_response({"symbol": symbol, "expiry": expiry[:10], "series": series})

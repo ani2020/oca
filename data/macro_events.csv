@@ -1,0 +1,52 @@
+# Macro events for iv_events.py. event_date = announcement day; a non-trading day maps to the
+# next session in the bhavcopy calendar. verified=false rows: please check / correct, and
+# APPEND later events (MPC meetings after Dec 2025, Budget 2026 and later, etc.).
+event_date,event_type,description,verified
+2019-10-04,MPC,RBI MPC decision,true
+2019-12-05,MPC,RBI MPC decision,true
+2020-02-01,BUDGET,Union Budget FY21 (Saturday; special session),true
+2020-02-06,MPC,RBI MPC decision,true
+2020-03-27,MPC,RBI off-cycle cut (COVID),true
+2020-05-22,MPC,RBI off-cycle cut (COVID),true
+2020-08-06,MPC,RBI MPC decision,true
+2020-10-09,MPC,RBI MPC decision,true
+2020-12-04,MPC,RBI MPC decision,true
+2021-02-01,BUDGET,Union Budget FY22,true
+2021-02-05,MPC,RBI MPC decision,true
+2021-04-07,MPC,RBI MPC decision,true
+2021-06-04,MPC,RBI MPC decision,true
+2021-08-06,MPC,RBI MPC decision,true
+2021-10-08,MPC,RBI MPC decision,true
+2021-12-08,MPC,RBI MPC decision,true
+2022-02-01,BUDGET,Union Budget FY23,true
+2022-02-10,MPC,RBI MPC decision,true
+2022-04-08,MPC,RBI MPC decision,true
+2022-05-04,MPC,RBI off-cycle hike,true
+2022-06-08,MPC,RBI MPC decision,true
+2022-08-05,MPC,RBI MPC decision,true
+2022-09-30,MPC,RBI MPC decision,true
+2022-12-07,MPC,RBI MPC decision,true
+2023-02-01,BUDGET,Union Budget FY24,true
+2023-02-08,MPC,RBI MPC decision,true
+2023-04-06,MPC,RBI MPC decision,true
+2023-06-08,MPC,RBI MPC decision,true
+2023-08-10,MPC,RBI MPC decision,true
+2023-10-06,MPC,RBI MPC decision,true
+2023-12-08,MPC,RBI MPC decision,true
+2024-02-01,BUDGET,Interim Budget FY25,true
+2024-02-08,MPC,RBI MPC decision,true
+2024-04-05,MPC,RBI MPC decision,true
+2024-06-04,ELECTION,General election results,true
+2024-06-07,MPC,RBI MPC decision,true
+2024-07-23,BUDGET,Union Budget FY25 (full),true
+2024-08-08,MPC,RBI MPC decision,true
+2024-10-09,MPC,RBI MPC decision,true
+2024-12-06,MPC,RBI MPC decision,true
+2025-02-01,BUDGET,Union Budget FY26 (Saturday; special session),true
+2025-02-07,MPC,RBI MPC decision,true
+2025-04-09,MPC,RBI MPC decision,true
+2025-06-06,MPC,RBI MPC decision,true
+2025-08-06,MPC,RBI MPC decision,false
+2025-10-01,MPC,RBI MPC decision,false
+2025-12-05,MPC,RBI MPC decision,false
+2026-02-01,BUDGET,Union Budget FY27,false

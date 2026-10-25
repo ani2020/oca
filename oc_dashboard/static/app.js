@@ -1285,6 +1285,7 @@ const VIEW_INIT={
   rvfcst:()=>loadRvForecast(),
   vrp:()=>loadVrp(),
   wheel:()=>loadWheel(),
+  premium:()=>initPremium(),
 };
 
 // ── #10: Screener mid-level page-tabs (Delta/Premium | Divergence | Shockers | Movers) ──
@@ -3440,6 +3441,8 @@ function renderExposureScreener(d){
     {key:'symbol',      label:'SYMBOL', fmt:(v)=>`<span style="cursor:pointer;color:var(--acc);font-weight:600"
                                         onclick="jumpHistory('${v}')" title="Open trend history for ${v}">${v}</span>`},
     ...droppedCol,
+    {key:'next_results_date', label:'RESULTS', fmt:(v,r)=>eventCell(r),
+     sortValue:(v,r)=>r.near_earnings ? 0 : (v ? 1 : 2), exportValue:v=>v?String(v).slice(0,10):''},
     // #9c: primary price = FUT (fut_price); spot shown in tooltip
     {key:'fut_price',   label:'FUT',     fmt:(v,r)=>v!=null?`<span title="spot: ${r&&r.spot!=null?fmt(r.spot,1):'—'}">${fmt(v,1)}</span>`:'—', exportValue:v=>v==null?'':v},
     {key:'gex_regime',  label:'REGIME',  fmt:(v,r)=>regimePillWithDays(v, r)},
@@ -5103,6 +5106,25 @@ const _pbNum = v => (typeof v === 'number' && isFinite(v)) ? v : null;
 const _pbPos = r => (r.gex_regime === 'positive' || r.gex_regime === 'all_positive');
 const _pbNeg = r => (r.gex_regime === 'negative' || r.gex_regime === 'all_negative');
 const _pbConfRank = c => ({low:0, medium:1, high:2}[c] ?? 0);
+const _pbDate = d => d ? new Date(String(d).slice(0,10)+'T00:00:00')
+  .toLocaleDateString('en-GB',{day:'2-digit',month:'short'}) : '';
+// Results-calendar cell (exposure_eod.next_results_date / near_earnings). Amber =
+// results fall before this row's expiry; muted = next results after expiry but
+// within 21 days (matters if you roll); blank otherwise / for indices.
+function eventCell(r){
+  const d = r && r.next_results_date;
+  if(!d) return '—';
+  const days = Math.round((new Date(String(d).slice(0,10)) - new Date(String(r.date).slice(0,10)))/864e5);
+  const lbl = `R ${_pbDate(d)}`;
+  if(r.near_earnings)
+    return `<span title="Results ${String(d).slice(0,10)} (${days}d) fall BEFORE expiry ${String(r.expiry||'').slice(0,10)}: `
+      + `IV includes event variance; gamma signals ignore the results gap" `
+      + `style="color:var(--amber);font-weight:600;font-family:var(--mono);font-size:10px">⚠ ${lbl}</span>`;
+  if(days <= 21)
+    return `<span title="Next results ${String(d).slice(0,10)} (${days}d), after this expiry" `
+      + `style="color:var(--muted);font-family:var(--mono);font-size:10px">${lbl}</span>`;
+  return '—';
+}
 
 // single-strike pin flag: prefer explicit column, else derive from width==1
 function _pbSingleStrike(r){
@@ -5187,6 +5209,13 @@ function pbSell(r){
        why:'single-strike shelf = fragile pin'},
     {key:'wings',    label:'wings calm',  ok: rr25==null || Math.abs(rr25)<=3.0, hard:false,
        why:'both wings bid → naked strangle risk'},
+    // Results inside the contract's life (exposure_eod.near_earnings, from the NSE
+    // results calendar since 2026-10-13). Hard: the IV is partly event variance and
+    // the gamma map says nothing about a results gap. Caps the band at WEAK, not
+    // AVOID -- selling through results can be a deliberate trade, just not this one.
+    {key:'noevent',  label:'no results',  ok: !r.near_earnings, hard:true,
+       why: r.near_earnings ? `results ${_pbDate(r.next_results_date)} before expiry → event gap, IV not comparable`
+                            : 'no results date before expiry'},
   ];
 
   // ---- disqualifier caps (override band regardless of score) ----
@@ -5249,6 +5278,8 @@ function pbManage(r){
        act:'looks-safe-isn\'t → reduce'},
     {key:'dropped',  label:'thesis expired',    on: prevSig.length>0 && !String(r.signals||'').length, sev:0.35,
        act:'signal reset → re-justify or close'},
+    {key:'results',  label:'results ahead',     on: !!r.near_earnings, sev:0.45,
+       act:`results ${_pbDate(r.next_results_date)} before expiry → close or size down before, or hold through on purpose`},
   ];
 
   let urg = 0, maxSev = 0;
@@ -6388,3 +6419,378 @@ async function _wheelPaperTrade(pid){
     card:'wheelPaperTradeCard', chart:'wheelPaperTradeChart', info:'wheelPaperTradeInfo', badge:'wheelPaperTradeBadge',
     stopMult:(meta.params||{}).stop_mult});
 }
+
+// ══════════════════════════════════════════════════════════════════
+// PREMIUM: strike richness flags · richness map · participant positioning
+// Backend: routes/premium.py. Flags describe the HISTORY of a moneyness x DTE
+// cell (hold to expiry, futures delta-hedged, net of costs, per SPAN margin),
+// not a forecast. Positioning is aggregate (all index options, all expiries).
+// ══════════════════════════════════════════════════════════════════
+const PM_FLAG_COL = {RICH:'var(--green)', GOOD:'#5ec8a0', FAIR:'var(--muted)',
+                     WEAK:'var(--amber)', AVOID:'var(--red)', RESULTS:'var(--amber)', NONE:'var(--muted)'};
+const PM_PART_COL = {Client:C.acc, FII:C.acc2, Pro:C.pur, DII:C.amber};
+let _pmChain = null;
+
+function pmFlag(f){
+  const c = PM_FLAG_COL[f] || 'var(--muted)';
+  return `<span style="font-family:var(--mono);font-size:9px;padding:1px 6px;border-radius:8px;border:1px solid ${c};color:${c}">${f||'—'}</span>`;
+}
+function pmUsual(v, pct){
+  if(!v) return '—';
+  const c = v==='RICHER'?'var(--green)':v==='CHEAPER'?'var(--red)':'var(--muted)';
+  return `<span style="color:${c}" title="today's premium vs this cell's history (percentile)">${v}${pct!=null?` <span style="opacity:.6">${fmt(pct,0)}</span>`:''}</span>`;
+}
+
+async function initPremium(){
+  try{
+    document.getElementById('pmBadge').textContent = 'loading reference…';
+    const m = await api('/api/premium/meta');
+    const all = (m.richness||[]).map(r=>r.symbol);
+    // Indices first, then stocks A-Z. '_STOCKS' is the pooled reference behind every
+    // stock's flags: offered on the richness map, never as a chain to load.
+    const PM_IDX = ['NIFTY','BANKNIFTY','FINNIFTY','MIDCPNIFTY','NIFTYNXT50','SENSEX','BANKEX'];
+    const idxs = PM_IDX.filter(s=>all.includes(s));
+    const ownStocks = all.filter(s=>!PM_IDX.includes(s) && s!=='_STOCKS');
+    // Chain view: every stock with a live chain (flags come from the pooled reference,
+    // so short-history names work too). Map view: only stocks with cells of their own.
+    const stocks = [...new Set([...ownStocks, ...(m.stocks||[])])].sort();
+    const syms = [...idxs, ...stocks];
+    const heatSyms = [...idxs, ...(all.includes('_STOCKS')?['_STOCKS']:[]), ...ownStocks.sort()];
+    if(!syms.length){
+      // Reference DB not built yet: say so where the user is looking, instead of
+      // leaving empty dropdowns and a LOAD button that silently does nothing.
+      const msg = 'Richness reference not built yet. After the close run:  python oc\\build_richness_ref.py --force  '
+                + '(creates richness.duckdb next to oc.duckdb; takes a few minutes), then reopen this page. '
+                + 'The POSITIONING tab works without it.';
+      document.getElementById('pmBadge').textContent = 'no reference';
+      document.getElementById('pmBadge').style.color = 'var(--amber)';
+      ['pmBest','pmTable','pmHeatChart'].forEach(id=>{
+        const el=document.getElementById(id); if(el) el.innerHTML = `<div class="empty err">${msg}</div>`; });
+      return;
+    }
+    populateSel('pmSymbol', syms);
+    populateSel('pmHeatSymbol', heatSyms);
+    const ref = (m.richness||[])[0];
+    if(ref) document.getElementById('pmBadge').textContent =
+      `reference ${String(ref.d0).slice(0,10)} → ${String(ref.d1).slice(0,10)} · built ${String(ref.built_at).slice(0,10)}`;
+    if(syms.length){ await loadCascade('pmSymbol','pmExpiry','pmTimestamp'); await loadPmChain(); }
+  }catch(e){
+    document.getElementById('pmTable').innerHTML = `<div class="empty err">⚠ ${e.message}</div>`;
+  }
+}
+
+async function loadPmChain(){
+  const sym = document.getElementById('pmSymbol')?.value;
+  const exp = document.getElementById('pmExpiry')?.value;
+  const ts  = document.getElementById('pmTimestamp')?.value || '';
+  const mk  = document.getElementById('pmMaxK')?.value || '2';
+  if(!sym || !exp) return;
+  document.getElementById('pmTable').innerHTML = '<div class="loading"><div class="spinner"></div>Loading…</div>';
+  document.getElementById('pmBest').innerHTML  = '<div class="loading"><div class="spinner"></div>Loading…</div>';
+  try{
+    const d = await api(`/api/premium/chain?symbol=${encodeURIComponent(sym)}&expiry=${encodeURIComponent(exp)}`
+                        + (ts?`&timestamp=${encodeURIComponent(ts)}`:'') + `&max_k=${mk}`);
+    _pmChain = d;
+    const nRich = d.rows.filter(r=>r.flag==='RICH').length, nGood = d.rows.filter(r=>r.flag==='GOOD').length;
+    document.getElementById('pmKpis').innerHTML = [
+      {label:'SPOT / FORWARD', value:fmt(d.spot,1), sub:`fwd ${fmt(d.forward,1)}`},
+      {label:'ATM STRADDLE', value:fmt(d.atm_straddle,1), sub:`${fmt(d.atm_strike,0)} · σ ${fmt(d.sigma_ann_pct,1)}%`},
+      {label:'DTE', value:d.dte, sub:d.bucket!=null?`ref bucket ${d.bucket}d${d.bucket_approx?' (approx)':''}`:'no reference bucket'},
+      {label:'RICH / GOOD', value:`${nRich} / ${nGood}`, sub:`of ${d.rows.length} strikes shown`},
+      {label:'LOT', value:d.lot??'—', sub:`as of ${d.timestamp||'—'}`},
+      ...(d.is_stock ? [{label:'REFERENCE',
+        value: d.results_in_window ? 'RESULTS' : 'ALL STOCKS',
+        sub: d.results_in_window ? 'results before expiry — history shown, no flags'
+                                 : 'pooled F&O stocks · own record in THIS STOCK'}] : []),
+    ].map(k=>`<div class="kpi"><div class="kpi-label">${k.label}</div><div class="kpi-val acc">${k.value}</div><div class="kpi-sub">${k.sub}</div></div>`).join('');
+    const cols = [
+      {key:'flag',label:'FLAG',fmt:v=>pmFlag(v),sortValue:v=>({RICH:0,GOOD:1,FAIR:2,WEAK:3,AVOID:4,RESULTS:5,NONE:6}[v]??9)},
+      {key:'type',label:'TYPE'},
+      {key:'strike',label:'STRIKE',fmt:v=>fmt(v,0)},
+      {key:'kz',label:'σ FROM FWD',fmt:v=>sspan(v,2),help:'ln(K/F) / (σ√T); negative = below the forward'},
+      {key:'ltp',label:'LTP',fmt:v=>fmt(v,2)},
+      {key:'iv',label:'IV%',fmt:v=>v!=null?fmt(v,1):'—'},
+      {key:'vs_usual',label:'VS USUAL',fmt:(v,r)=>pmUsual(v,r.pn_pct),sortValue:(v,r)=>r.pn_pct??-1,
+       help:"today's premium in σ units vs this cell's 2020-26 range (percentile)"},
+      {key:'rom_annual_pct',label:'%/YR ON MARGIN',fmt:v=>v!=null?fmt(v,1):'—',
+       help:'historical: per-trade return on SPAN+ELM margin x min(243/holding days, trades per year)'},
+      {key:'hedged_bps',label:'HEDGED BPS',fmt:v=>v!=null?sspan(v,2):'—',help:'historical mean per trade, bps of spot, net of costs'},
+      {key:'hedged_t',label:'T',fmt:v=>v!=null?fmt(v,1):'—'},
+      {key:'hedged_h1',label:'20-23',fmt:v=>v!=null?sspan(v,1):'—',help:'hedged bps, first half of the sample'},
+      {key:'hedged_h2',label:'23-26',fmt:v=>v!=null?sspan(v,1):'—',help:'hedged bps, second half of the sample'},
+      {key:'payoff_ratio',label:'PAYOFF/PREM',fmt:v=>v!=null?fmt(v,2):'—',help:'share of premium historically paid back at expiry'},
+      {key:'worst_rom_pct',label:'WORST %MGN',fmt:v=>v!=null?`<span class="down">${fmt(v,0)}</span>`:'—',help:'worst single trade in the cell, % of margin'},
+      {key:'edge_per_lot',label:'₹/LOT (HIST)',fmt:v=>v!=null?fmt(v,0):'—',help:'historical mean hedged P&L per lot at today\'s spot'},
+      {key:'oi',label:'OI',fmt:v=>fmtL(v)},
+      {key:'spread_pct',label:'SPRD%',fmt:v=>v!=null?`<span class="${v>5?'down':v>2?'neu':''}">${fmt(v,1)}</span>`:'—'},
+      {key:'n',label:'N',fmt:v=>v!=null?fmt(v,0):'—',help:'expiries in the reference cell'},
+      {key:'own_rom',label:'THIS STOCK',sortValue:v=>v??-1e9,
+       fmt:(v,r)=>r.own_n!=null?`${pmFlag(r.own_flag)} ${fmt(v,1)}%/yr · t ${fmt(r.own_t,1)} · n ${fmt(r.own_n,0)}`:'—',
+       help:"this stock's own history in the same cell (stocks only; flags come from the pooled reference)"},
+    ];
+    document.getElementById('pmBest').innerHTML = d.best.length
+      ? makeTbl(d.best, cols.filter(c=>['flag','type','strike','kz','ltp','vs_usual','rom_annual_pct','hedged_t','hedged_h1','hedged_h2','worst_rom_pct','edge_per_lot','spread_pct'].includes(c.key)))
+      : '<div class="empty">No RICH or GOOD cells in this expiry'+(d.bucket==null?' — DTE has no reference bucket':'')+'</div>';
+    _pmRenderTable(cols);
+  }catch(e){
+    document.getElementById('pmTable').innerHTML = `<div class="empty err">⚠ ${e.message}</div>`;
+    document.getElementById('pmBest').innerHTML = '';
+  }
+}
+let _pmCols = null;
+function _pmRenderTable(cols){
+  if(cols) _pmCols = cols;
+  if(!_pmChain || !_pmCols) return;
+  const show = document.getElementById('pmShow')?.value || 'all';
+  let rows = _pmChain.rows.slice();
+  if(show==='good') rows = rows.filter(r=>r.flag==='RICH'||r.flag==='GOOD');
+  else if(show==='PE'||show==='CE') rows = rows.filter(r=>r.type===show);
+  rows.sort((a,b)=>a.strike-b.strike || (a.type<b.type?-1:1));
+  document.getElementById('pmTable').innerHTML = makeTbl(rows, _pmCols);
+}
+
+async function loadPmHeat(){
+  const sym = document.getElementById('pmHeatSymbol')?.value;
+  const metric = document.getElementById('pmHeatMetric')?.value || 'rom_annual_pct';
+  if(!sym) return;
+  setLoad('pmHeatChart');
+  try{
+    const d = await api(`/api/premium/heatmap?symbol=${encodeURIComponent(sym)}&metric=${metric}`);
+    const ks = [...new Set(d.cells.map(c=>c.kz))].sort((a,b)=>a-b);
+    const ds = d.dtes.filter(t=>d.cells.some(c=>c.tdte===t));
+    const z = [], txt = [];
+    ds.forEach(t=>{
+      const zr=[], tr=[];
+      ks.forEach(k=>{
+        const cs = d.cells.filter(c=>c.tdte===t && c.kz===k);
+        if(!cs.length){ zr.push(null); tr.push(''); return; }
+        const vals = cs.map(c=>c[metric]).filter(v=>v!=null);
+        zr.push(vals.length? vals.reduce((a,b)=>a+b,0)/vals.length : null);
+        tr.push(cs.map(c=>`${c.t} ${k>0?'+':''}${k}σ · ${t}d · ${c.flag}<br>`+
+          `%/yr ${fmt(c.rom_annual_pct,1)} · hedged ${fmt(c.hedged_bps,2)}bps · t ${fmt(c.hedged_t,1)}<br>`+
+          `halves ${fmt(c.hedged_h1,1)} / ${fmt(c.hedged_h2,1)} · payoff ${fmt(c.payoff_ratio,2)} · worst ${fmt(c.worst_rom_pct,0)}% mgn · n ${c.n}`).join('<br>'));
+      });
+      z.push(zr); txt.push(tr);
+    });
+    const absMax = Math.max(...z.flat().filter(v=>v!=null).map(Math.abs), 1e-9);
+    const centred = !['payoff_ratio','capture'].includes(metric);
+    // outline RICH / GOOD cells
+    const shapes = [];
+    d.cells.forEach(c=>{
+      if(c.flag!=='RICH' && c.flag!=='GOOD') return;
+      const xi = ks.indexOf(c.kz), yi = ds.indexOf(c.tdte);
+      shapes.push({type:'rect', xref:'x', yref:'y', x0:xi-0.48, x1:xi+0.48, y0:yi-0.48, y1:yi+0.48,
+                   line:{color:c.flag==='RICH'?'#ffffff':'rgba(255,255,255,.45)', width:c.flag==='RICH'?1.6:0.8}});
+    });
+    plot('pmHeatChart', [{
+      type:'heatmap', z, text:txt, hoverinfo:'text',
+      x:ks.map(k=>(k>0?'+':'')+k), y:ds.map(t=>t+'d'),
+      colorscale: centred ? [[0,'#f43f5e'],[0.5,'#0f1a2b'],[1,'#10b981']] : 'Viridis',
+      zmid: centred ? 0 : undefined, zmin: centred ? -absMax : undefined, zmax: centred ? absMax : undefined,
+      colorbar:{thickness:10, tickfont:{size:9}},
+    }], {...LB, shapes, margin:{t:16,r:20,b:46,l:54},
+         xaxis:{...LB.xaxis, title:{text:'σ from forward  (puts ← 0 → calls)', font:{size:10}}, type:'category'},
+         yaxis:{...LB.yaxis, title:{text:'entry DTE', font:{size:10}}, type:'category'}});
+    const m = d.meta||{};
+    document.getElementById('pmHeatBadge').textContent =
+      `${String(m.d0||'').slice(0,10)} → ${String(m.d1||'').slice(0,10)} · ${m.n_trades??'—'} trades · outline = RICH (bold) / GOOD`;
+  }catch(e){ setEmpty('pmHeatChart', '⚠ '+e.message); }
+}
+
+async function loadPmPos(){
+  const metric = document.getElementById('pmPosMetric')?.value || 'put_net_pct';
+  const hist = document.getElementById('pmPosRange')?.value || '250';
+  const kind = document.getElementById('pmPosKind')?.value || 'oi';
+  setLoad('pmPosChart');
+  try{
+    const d = await api(`/api/premium/positioning?history=${hist}&kind=${kind}`);
+    const by = p => d.today.find(r=>r.participant===p) || {};
+    const fii = by('FII'), cli = by('Client'), pro = by('Pro');
+    const z = v => v!=null ? ` · z ${v>0?'+':''}${fmt(v,1)}` : '';
+    const ch = v => v!=null ? `Δ ${v>0?'+':''}${fmt(v,2)}` : '';
+    const kc = v => v==null?'acc':v>0?'up':v<0?'down':'acc';
+    document.getElementById('pmPosKpis').innerHTML = [
+      {label:'FII INDEX FUTURES NET', v:fii.fut_net_pct, sub:ch(fii.fut_net_pct_chg)+z(fii.fut_net_pct_z)},
+      {label:'FII NET PUTS', v:fii.put_net_pct, sub:ch(fii.put_net_pct_chg)+z(fii.put_net_pct_z)},
+      {label:'FII NET CALLS', v:fii.call_net_pct, sub:ch(fii.call_net_pct_chg)+z(fii.call_net_pct_z)},
+      {label:'CLIENT NET PUTS', v:cli.put_net_pct, sub:ch(cli.put_net_pct_chg)+z(cli.put_net_pct_z)},
+      {label:'PRO NET CALLS / PUTS', raw:`${fmt(pro.call_net_pct,1)} / ${fmt(pro.put_net_pct,1)}`, sub:'prop desks (the would-be hedgers)'},
+      {label:'FII PUT COVER', raw:d.fii_put_cover!=null?fmt(d.fii_put_cover,2)+'×':'—',
+       sub:'net long puts ÷ net short futures (contracts)'},
+    ].map(k=>`<div class="kpi"><div class="kpi-label">${k.label}</div>`+
+      `<div class="kpi-val ${k.raw?'acc':kc(k.v)}">${k.raw ?? (k.v!=null?fmt(k.v,1)+'%':'—')}</div>`+
+      `<div class="kpi-sub">${k.sub||''}</div></div>`).join('');
+    const parts = ['Client','FII','Pro','DII'];
+    const traces = parts.map(p=>{
+      const s = d.series.filter(r=>r.participant===p);
+      return {type:'scatter', mode:'lines', name:p, x:s.map(r=>String(r.trade_date).slice(0,10)),
+              y:s.map(r=>r[metric]), line:{width:p==='DII'?1:1.6, color:PM_PART_COL[p]}};
+    });
+    const lab = document.getElementById('pmPosMetric').selectedOptions[0].textContent;
+    plot('pmPosChart', traces, {...LB, margin:{t:16,r:14,b:40,l:54},
+      yaxis:{...LB.yaxis, title:{text:lab+' (%)', font:{size:10}}, zeroline:true},
+      legend:{...LB.legend, orientation:'h', y:1.08}, hovermode:'x unified'});
+    document.getElementById('pmPosDate').textContent =
+      `${String(d.date).slice(0,10)} · ${d.n_days} days · ${kind.toUpperCase()}`;
+    document.getElementById('pmPosBadge').textContent = `${d.n_days} days loaded`;
+    document.getElementById('pmPosTable').innerHTML = makeTbl(d.today, [
+      {key:'participant',label:'PARTICIPANT'},
+      {key:'fut_net_pct',label:'FUT NET %',fmt:v=>sspan(v,1)},
+      {key:'fut_net_pct_chg',label:'Δ',fmt:v=>sspan(v,2)},
+      {key:'call_net_pct',label:'CALLS NET %',fmt:v=>sspan(v,1)},
+      {key:'call_net_pct_chg',label:'Δ',fmt:v=>sspan(v,2)},
+      {key:'put_net_pct',label:'PUTS NET %',fmt:v=>sspan(v,1)},
+      {key:'put_net_pct_chg',label:'Δ',fmt:v=>sspan(v,2)},
+      {key:'call_short_share',label:'SHORT CALL SHARE',fmt:v=>fmt(v,1)+'%'},
+      {key:'put_short_share',label:'SHORT PUT SHARE',fmt:v=>fmt(v,1)+'%'},
+      {key:'fut_net',label:'FUT NET (CONTR.)',fmt:v=>fmtL(v)},
+      {key:'put_net',label:'PUT NET (CONTR.)',fmt:v=>fmtL(v)},
+    ]);
+  }catch(e){ setEmpty('pmPosChart', '⚠ '+e.message); }
+}
+
+// ── PREMIUM guides (one per subtab), same style as the VRP / Vol guides ──
+function _pmSec(title, body){ return `<b style="color:var(--text)">${title}</b><br>${body}<br><br>`; }
+function _pmGuideRows(rows){
+  return rows.map(([k,v])=>`<b style="color:var(--acc)">${k}:</b> ${v}`).join('<br>');
+}
+function _pmStrikesGuideHtml(){
+  return _pmSec('WHAT THIS TAB IS',
+    'Each out-of-the-money strike of the selected expiry is mapped to a historical reference cell '
+    +'(entry DTE × distance from the forward) and shown with how that cell paid a seller: sell at entry, '
+    +'hold to expiry, delta-hedge with futures at entry, net of costs, 2020-06 onward. '
+    +'The flag describes the CELL\'s history, not a forecast for this trade. Hedged returns are small '
+    +'(a few bps of spot); flags reward cells where that edge is statistically clean, which is why only '
+    +'far-OTM strikes (|σ| ≥ 1.5, delta ≈ 0.1 and lower) tend to reach RICH on indices.')
+  + _pmSec('INDICES VS STOCKS',
+    'Indices use their own reference (NIFTY, BANKNIFTY), weekly DTE grid 1-28 days. '
+    +'Stocks use the POOLED reference over all F&amp;O stocks (monthly DTE grid 3/7/10/14/21/28), because '
+    +'about 75 monthly expiries per stock rarely reach t ≥ 3; the stock\'s own record is shown beside it '
+    +'in THIS STOCK. Stock costs assume a 1.75% half-spread and 3.5% ELM. Trades spanning a split/bonus are '
+    +'excluded. When results fall before the selected expiry, every strike shows RESULTS (amber) and the '
+    +'results-window history instead of a flag: those windows behave differently (ATM legs lost money on '
+    +'average) and are never flagged.')
+  + _pmSec('FLAGS', _pmGuideRows([
+      ['RICH','t ≥ 3, ≥ 20%/yr on SPAN margin, positive in both halves (2020-23 and 2023-26).'],
+      ['GOOD','t ≥ 2, ≥ 10%/yr, positive in both halves.'],
+      ['FAIR','positive, weaker evidence.'],
+      ['WEAK','negative in one half, or t < 1.'],
+      ['AVOID','the cell lost money after costs.'],
+      ['RESULTS','stock with results before expiry: history shown, no flag.'],
+      ['NONE','no reference cell (too few trades, or DTE outside the grid).'],
+    ]))
+  + _pmSec('KPI TILES', _pmGuideRows([
+      ['SPOT / FORWARD','underlying and the forward from ATM put-call parity (K + C − P); all σ distances are from the forward.'],
+      ['ATM STRADDLE','ATM call + put and the implied annual σ backed out of it (straddle ≈ 0.8 · F · σ√T).'],
+      ['DTE','calendar days to expiry and the reference bucket used (approx = no exact bucket window, nearest used).'],
+      ['RICH / GOOD','how many shown strikes carry those flags.'],
+      ['REFERENCE','stocks only: ALL STOCKS (pooled) or RESULTS (results inside the window).'],
+    ]))
+  + _pmSec('TABLE COLUMNS (BEST ZONES and STRIKES)', _pmGuideRows([
+      ['FLAG','the cell\'s flag (above).'],
+      ['TYPE / STRIKE','CE or PE, and the strike. Only the OTM side is shown (both legs at ATM).'],
+      ['σ FROM FWD','ln(K/F) / (σ√T): distance from the forward in ATM-implied moves; negative = below. Rounded to 0.25 to pick the cell. Rough delta guide: ±1σ ≈ 0.16, ±1.5σ ≈ 0.07, ±2σ ≈ 0.02.'],
+      ['LTP / IV%','live premium and the strike\'s implied vol.'],
+      ['VS USUAL','today\'s premium in σ units vs the cell\'s 2020-26 range: RICHER ≥ 75th percentile, CHEAPER ≤ 25th; the number is the percentile. This is the only column about TODAY\'s price.'],
+      ['%/YR ON MARGIN','historical return on SPAN+ELM margin, annualised as per-trade ROM × min(243 / holding days, trades available per year). Assumes the capital is reused back to back.'],
+      ['HEDGED BPS','historical mean P&amp;L per trade, bps of spot, after costs and the futures hedge.'],
+      ['T','t-statistic of that mean. Below 2 the mean is not distinguishable from noise.'],
+      ['20-23 / 23-26','hedged bps in each half of the sample (split 2023-07-01). Both positive = the edge persisted.'],
+      ['PAYOFF/PREM','share of premium paid back at expiry on average. 0.3 = buyers recovered 30% of what they paid.'],
+      ['WORST %MGN','worst single trade in the cell, % of margin. Naked-leg tail; history starts after the March-2020 crash.'],
+      ['₹/LOT (HIST)','historical mean hedged P&amp;L per lot at today\'s spot. An expectation, not a target.'],
+      ['OI / SPRD%','live open interest and bid-ask spread as % of premium (amber > 2%, red > 5%). A wide spread can eat the whole historical edge.'],
+      ['N','trades (expiries) in the reference cell.'],
+      ['THIS STOCK','stocks only: the stock\'s own record in the same cell — its flag, %/yr, t and n. Shown when it has ≥ 24 trades; short-history names show —.'],
+    ]))
+  + _pmSec('HOW TO USE IT',
+    'Start from BEST ZONES (one strike per RICH/GOOD cell). Prefer RICH cells whose VS USUAL is RICHER '
+    +'(an historically good cell priced above its norm today) with a tight SPRD%. CHEAPER in a RICH cell '
+    +'means the edge is thinner than usual. Remember the hedge: results are for a futures-hedged leg; an '
+    +'unhedged naked leg has the same mean but far wider outcomes.');
+}
+function _pmHeatGuideHtml(){
+  return _pmSec('WHAT THE MAP SHOWS',
+    'Every reference cell for the chosen symbol on one grid. Rows = entry DTE (days to expiry when sold). '
+    +'Columns = distance from the forward in ATM-implied moves (σ): puts on the left (negative), calls on '
+    +'the right (positive), ATM in the middle (both legs averaged). Cells outlined in green are RICH, in '
+    +'teal GOOD. Hover any cell for its full statistics. Results-window cells are not drawn.')
+  + _pmSec('READING THE COLOUR',
+    'Diverging metrics (%/yr, hedged bps, t-stat) are centred on zero: green = sellers kept money, red = '
+    +'they lost, intensity = size. PAYOFF/PREMIUM and CAPTURE use a one-sided scale. Look for a band of '
+    +'colour, not a single bright cell: one isolated cell among neutral neighbours is more likely noise.')
+  + _pmSec('METRICS (dropdown)', _pmGuideRows([
+      ['%/YR ON MARGIN','annualised return on SPAN+ELM margin (see the Strike Flags guide).'],
+      ['HEDGED BPS / TRADE','mean futures-hedged P&amp;L per trade, bps of spot, after costs.'],
+      ['T-STAT','how clearly that mean differs from zero. The flag thresholds use t ≥ 2 (GOOD) and t ≥ 3 (RICH).'],
+      ['CAPTURE (OF PREMIUM)','hedged P&amp;L ÷ premium received: the share of the premium a hedged seller kept.'],
+      ['PAYOFF / PREMIUM','what buyers got back at expiry per rupee of premium. Below 1 = sellers ahead before costs.'],
+    ]))
+  + _pmSec('HOVER FIELDS', _pmGuideRows([
+      ['halves','hedged bps in 2020-23 / 2023-26.'],
+      ['payoff','payoff ÷ premium.'],
+      ['worst','worst single trade, % of margin.'],
+      ['n','trades in the cell.'],
+    ]))
+  + _pmSec('SYMBOLS',
+    'NIFTY / BANKNIFTY use their own weekly-grid reference. _STOCKS is the pooled reference behind every '
+    +'stock\'s flags. Individual stocks are listed only when they have cells of their own (≥ 24 trades); '
+    +'their maps are noisier — read them as colour, not as flags.');
+}
+function _pmPosGuideHtml(){
+  return _pmSec('WHAT THIS TAB IS',
+    'Index options and index futures open interest (or volume) by participant, from NSE\'s daily '
+    +'participant-wise file: Client (retail and HNI), FII, Pro (proprietary desks) and DII. It is aggregate '
+    +'across NIFTY, BANKNIFTY, FINNIFTY and MIDCPNIFTY and all expiries — NSE does not split it by '
+    +'underlying, expiry or strike, so it cannot re-sign per-strike GEX. Context, not a signal: it has not '
+    +'been tested against next-day range yet.')
+  + _pmSec('KPI TILES', _pmGuideRows([
+      ['FII INDEX FUTURES NET','FII long minus short index futures, % of total long futures OI. Negative = net short. Δ = change from the previous day; z = 60-day z-score.'],
+      ['FII NET PUTS / CALLS','FII long minus short index puts (calls), % of total long put (call) OI. Positive = net buyers.'],
+      ['CLIENT NET PUTS','the same for Clients. Strongly negative = Clients are the main put writers (and do not delta-hedge).'],
+      ['PRO NET CALLS / PUTS','prop desks — the participants most likely to hedge like textbook dealers.'],
+      ['FII PUT COVER','FII net long puts ÷ FII net short futures (contracts). Near or above 1 = the short futures book is largely protected by puts.'],
+    ]))
+  + _pmSec('LATEST DAY TABLE', _pmGuideRows([
+      ['FUT / CALLS / PUTS NET %','long minus short as % of total long OI in that instrument, per participant. The four participants\' nets sum to about zero.'],
+      ['Δ','change in that net % since the previous trading day.'],
+      ['SHORT CALL / PUT SHARE','that participant\'s short positions as % of all short calls (puts): who the writers are.'],
+      ['FUT NET / PUT NET (CONTR.)','the same nets in contracts, for scale.'],
+    ]))
+  + _pmSec('CHART AND DROPDOWNS',
+    'SERIES picks the measure plotted for all four participants over the RANGE. DATA = OPEN INTEREST '
+    +'(positions held) or VOLUME (that day\'s trading). Read OI for who holds the risk; volume for who was active.');
+}
+function _pmToggleGuide(btnId, boxId, builder){
+  document.getElementById(btnId)?.addEventListener('click', ()=>{
+    const g = document.getElementById(boxId);
+    if(!g) return;
+    if(!g.dataset.built){ g.innerHTML = builder(); g.dataset.built = '1'; }
+    g.style.display = g.style.display==='none' ? '' : 'none';
+  });
+}
+_pmToggleGuide('btnPmGuide', 'pmGuide', _pmStrikesGuideHtml);
+_pmToggleGuide('btnPmHeatGuide', 'pmHeatGuide', _pmHeatGuideHtml);
+_pmToggleGuide('btnPmPosGuide', 'pmPosGuide', _pmPosGuideHtml);
+
+(function wirePremium(){
+  const on = (id, ev, fn) => { const el=document.getElementById(id); if(el) el.addEventListener(ev, fn); };
+  on('pmSymbol','change',()=>loadCascade('pmSymbol','pmExpiry','pmTimestamp'));
+  on('pmExpiry','change',()=>reloadTimestamps('pmSymbol','pmExpiry','pmTimestamp'));
+  on('btnPm','click',loadPmChain);
+  on('pmMaxK','change',loadPmChain);
+  on('pmShow','change',()=>_pmRenderTable());
+  on('btnPmHeat','click',loadPmHeat);
+  on('pmHeatSymbol','change',loadPmHeat);
+  on('pmHeatMetric','change',loadPmHeat);
+  on('btnPmPos','click',loadPmPos);
+  on('pmPosMetric','change',loadPmPos);
+  on('pmPosRange','change',loadPmPos);
+  on('pmPosKind','change',loadPmPos);
+  // lazy-load the two secondary subtabs on first open
+  document.querySelectorAll('#view-premium .subtab').forEach(t=>t.addEventListener('click',()=>{
+    if(t.dataset.loaded) return; t.dataset.loaded='1';
+    if(t.dataset.stab==='pm-heat') loadPmHeat();
+    if(t.dataset.stab==='pm-pos') loadPmPos();
+  }));
+})();

@@ -32,7 +32,7 @@ from .nse import init_nse_fetcher
 from .routes import (
     meta, overview, gex, oi, iv, screener, screener_vol, shockers,
     divergence, flow, smartmoney, exposure, screener_exposure, market, icici,
-    symbol_history, market_state, rv_forecast, vrp, wheel,
+    symbol_history, market_state, rv_forecast, vrp, wheel, premium,
 )
 
 
@@ -137,6 +137,10 @@ app.include_router(vrp.router, tags=["vrp"])
 # Reads wheel_bt.duckdb (oc/wheel_bt.py + the 17:45 oc/wheel_paper.py job) and,
 # for trade drill-downs, SPAN rows from bhavcopy.duckdb; see routes/wheel.py.
 app.include_router(wheel.router, tags=["wheel"])
+# PREMIUM -- strike richness flags (richness.duckdb, oc/build_richness_ref.py, weekly),
+# richness map, and participant positioning (bhavcopy participant_oi, EOD). Flags are
+# the HISTORY of a moneyness x DTE cell, not a forecast; see routes/premium.py.
+app.include_router(premium.router, tags=["premium"])
 
 
 # ---------------------------------------------------------------------------

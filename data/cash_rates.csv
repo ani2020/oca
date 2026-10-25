@@ -1,0 +1,22 @@
+# Yield on cash parked as margin collateral (liquid fund / LiquidBeES proxy), annual, decimal.
+# Each row applies from its date until the next row. Used by wheel_bt --cash-yield-file.
+# Proxy: RBI policy repo rate, except Apr 2020 - Apr 2022 (large liquidity surplus) when
+# overnight money-market rates, and so liquid funds, tracked the 3.35% reverse repo / SDF.
+# Approximate -- replace with actual liquid-fund or 91-day T-bill yields if you have them.
+# APPEND later RBI changes (rows after 2025-06-06 are not verified here; add the recent hike).
+date,rate,note
+2019-08-07,0.0540,repo
+2019-10-04,0.0515,repo
+2020-03-27,0.0440,repo cut; money market falls toward reverse repo
+2020-04-17,0.0375,reverse repo
+2020-05-22,0.0335,reverse repo (surplus liquidity)
+2022-04-08,0.0375,SDF introduced
+2022-05-04,0.0440,repo (surplus draining; money market near repo)
+2022-06-08,0.0490,repo
+2022-08-05,0.0540,repo
+2022-09-30,0.0590,repo
+2022-12-07,0.0625,repo
+2023-02-08,0.0650,repo
+2025-02-07,0.0625,repo
+2025-04-09,0.0600,repo
+2025-06-06,0.0550,repo

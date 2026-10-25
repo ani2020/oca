@@ -103,7 +103,7 @@ def snapshot(symbol: str = Query(...)):
         WITH exps AS (
             SELECT DISTINCT CAST(expiry AS DATE) AS e
             FROM {tbl()}
-            WHERE symbol = ? AND timestamp = ?
+            WHERE symbol = ? AND STRFTIME(timestamp, '%Y-%m-%d %H:%M') = ?
               AND CAST(expiry AS DATE) >= CAST(? AS DATE)
         ),
         monthly AS (
@@ -127,7 +127,9 @@ def snapshot(symbol: str = Query(...)):
             AVG(COALESCE(pe_iv,     0)) AS avg_pe_iv,
             (SELECT COUNT(*) FROM exps)  AS num_expiries
         FROM {tbl()}
-        WHERE symbol = ? AND timestamp = ?
+        -- latest_ts() is minute precision ('YYYY-MM-DD HH:MM'); match by minute.
+        -- Exact equality missed every snapshot with non-zero seconds -> 404.
+        WHERE symbol = ? AND STRFTIME(timestamp, '%Y-%m-%d %H:%M') = ?
           AND CAST(expiry AS DATE) = (SELECT e FROM near)
         GROUP BY underlying_price, atm_strike LIMIT 1
         """,

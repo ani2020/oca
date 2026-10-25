@@ -152,6 +152,25 @@ def _cast_select(cols: List[List[str]], have: Iterable[str], src: str = "_in") -
     return f"SELECT {', '.join(parts)} FROM {src}"
 
 
+def _conform(table: str, cols: List[List[str]], df: pd.DataFrame) -> pd.DataFrame:
+    """Rename df columns to the canonical spelling, matching case-insensitively
+    (DuckDB identifiers are case-insensitive, so the legacy INSERT ... BY NAME
+    accepted 'RiskReversal' for 'riskreversal'). Then reject unknown columns.
+    Returns a renamed copy; the caller's frame is not modified."""
+    canon = {n.lower(): n for n, _ in cols}
+    seen: Dict[str, str] = {}
+    for c in df.columns:
+        k = str(c).lower()
+        if k in seen:
+            raise ValueError(f"lake[{table}]: columns {seen[k]!r} and {c!r} differ only by case")
+        seen[k] = c
+    ren = {c: canon[str(c).lower()] for c in df.columns
+           if str(c).lower() in canon and c != canon[str(c).lower()]}
+    out = df.rename(columns=ren) if ren else df
+    _check_columns(table, cols, out.columns)
+    return out
+
+
 def _check_columns(table: str, cols: List[List[str]], df_cols: Iterable[str]) -> None:
     extra = [c for c in df_cols if c not in {n for n, _ in cols}]
     if extra:
@@ -218,11 +237,15 @@ def append(table: str, df: pd.DataFrame) -> int:
     if df is None or df.empty:
         return 0
     cols = load_schema(table)
-    _check_columns(table, cols, df.columns)
+    df = _conform(table, cols, df)
     tc = SPECS[table]["time_col"]
     days = pd.to_datetime(df[tc]).dt.normalize()
     if days.isna().any():
         raise ValueError(f"lake[{table}]: {int(days.isna().sum())} rows with NULL {tc} -- refusing")
+    df = _drop_existing_keys(table, df, days)
+    if df.empty:
+        return 0
+    days = pd.to_datetime(df[tc]).dt.normalize()
     con = duckdb.connect()
     n = 0
     try:
@@ -236,6 +259,39 @@ def append(table: str, df: pd.DataFrame) -> int:
     finally:
         con.close()
     return n
+
+
+def _drop_existing_keys(table: str, df: pd.DataFrame, days: pd.Series) -> pd.DataFrame:
+    """The legacy table's PRIMARY KEY rejected a second copy of a row; Parquet
+    files enforce nothing. Drop rows whose key repeats within the batch or is
+    already stored for the days touched, so a re-pull or retry (2026-10-12: the
+    15:40 TIINDIA snapshot written at 22:15 and again at 22:21) cannot
+    duplicate rows. Reads only the key column of that day's files."""
+    key = SPECS[table]["key"]
+    n0 = len(df)
+    df = df.drop_duplicates(subset=key, keep="first")
+    files = [f for d in sorted(days.unique()) for f in _files(part_dir(table, d))]
+    if files:
+        lst = ", ".join(f"'{f.as_posix()}'" for f in files)
+        kc = ", ".join(f'"{k}"' for k in key)
+        c = duckdb.connect()
+        try:
+            seen = c.execute(f"SELECT DISTINCT {kc} FROM read_parquet([{lst}], "
+                             f"union_by_name=true)").df()
+        finally:
+            c.close()
+        if not seen.empty:
+            if len(key) == 1:
+                k = key[0]
+                mask = ~df[k].astype(str).isin(set(seen[k].astype(str)))
+            else:
+                mask = ~pd.MultiIndex.from_frame(df[key].astype(str)).isin(
+                    pd.MultiIndex.from_frame(seen[key].astype(str)))
+            df = df[mask]
+    if len(df) < n0:
+        print(f"  lake[{table}]: skipped {n0 - len(df)} row(s) whose {'/'.join(key)} "
+              f"is already stored or repeated in the batch")
+    return df
 
 
 def _rewrite_month(con, table: str, month_dir: Path, cols, keep_sql: str,
@@ -292,7 +348,7 @@ def replace_rows(table: str, df: Optional[pd.DataFrame], match: Dict) -> int:
         raise ValueError(f"lake[{table}].replace_rows: match must include {tc}")
     cols = load_schema(table)
     if df is not None and not df.empty:
-        _check_columns(table, cols, df.columns)
+        df = _conform(table, cols, df)
     con = duckdb.connect()
     try:
         tvals = match[tc] if isinstance(match[tc], (list, tuple, set)) else [match[tc]]
@@ -315,7 +371,7 @@ def merge_rows(table: str, df: pd.DataFrame) -> int:
     if df is None or df.empty:
         return 0
     cols = load_schema(table)
-    _check_columns(table, cols, df.columns)
+    df = _conform(table, cols, df)
     key = SPECS[table]["key"]
     tc = SPECS[table]["time_col"]
     con = duckdb.connect()

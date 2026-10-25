@@ -74,13 +74,18 @@ bh.execute("CREATE TABLE cash_eod (trade_date DATE, symbol VARCHAR, series VARCH
 for day, c in ((date(2026, 10, 1), 101.0), (D1, 100.0), (D2, 100.0)):
     for sym in ('AAA', 'BBB'):
         bh.execute("INSERT INTO cash_eod VALUES (?, ?, 'EQ', ?)", [day, sym, c])
-bh.execute("CREATE TABLE corporate_events (symbol VARCHAR, event_date DATE, is_results BOOLEAN)")
-bh.execute("INSERT INTO corporate_events VALUES ('BBB', ?, true)", [D1 + timedelta(days=3)])   # BBB blocked
+bh.execute("CREATE TABLE corporate_events (symbol VARCHAR, event_date DATE, is_results BOOLEAN, "
+           "event_type VARCHAR, announced_at TIMESTAMP)")
+bh.execute("INSERT INTO corporate_events VALUES ('BBB', ?, true, 'RESULTS', ?)",
+           [D1 + timedelta(days=3), datetime(2026, 9, 25, 16, 0)])                         # BBB blocked
+# both stocks need results history, or the coverage gate treats them as unknown and skips them
+bh.execute("INSERT INTO corporate_events VALUES ('AAA', '2026-07-20', true, 'RESULTS', NULL), "
+           "('BBB', '2026-07-22', true, 'RESULTS', NULL)")
 bh.execute("CREATE TABLE corporate_actions (symbol VARCHAR, ex_date DATE, ca_type VARCHAR)")
 bh.execute("CREATE TABLE cash_returns_adj (symbol VARCHAR, trade_date DATE, is_ca BOOLEAN)")
 bh.execute("CREATE TABLE options_eod (trade_date DATE, symbol VARCHAR, expiry DATE, strike DOUBLE, "
-           "opt_type VARCHAR, settle DOUBLE)")
-bh.execute("INSERT INTO options_eod VALUES (?, 'AAA', ?, 80, 'PE', 0.62)", [D1, EXP])          # settle for D1 entry
+           "opt_type VARCHAR, settle DOUBLE, close DOUBLE)")
+bh.execute("INSERT INTO options_eod VALUES (?, 'AAA', ?, 80, 'PE', 0.62, 0.60)", [D1, EXP])    # settle, close for D1 entry
 bh.close()
 
 import wheel_paper as wp  # noqa: E402
@@ -119,6 +124,9 @@ checks = {
     "reconcile: D1 sell fill matched to settle 0.62, slip = (0.62-0.57)/0.62":
         abs(con.execute("SELECT slip_vs_settle FROM paper_fills WHERE book='main' AND action='S' AND side='PE'")
             .fetchone()[0] - (0.62 - 0.57) / 0.62) < 1e-9,
+    "reconcile: D1 sell fill matched to the bhavcopy close 0.60, slip = (0.60-0.57)/0.60":
+        abs(con.execute("SELECT slip_vs_close FROM paper_fills WHERE book='main' AND action='S' AND side='PE'")
+            .fetchone()[0] - (0.60 - 0.57) / 0.60) < 1e-9,
     "one daily row per book per day": con.execute("SELECT count(*) FROM paper_daily").fetchone()[0] == 6,
     "accounting: equity = start + realised + unrealised":
         abs(con.execute("SELECT equity FROM paper_daily WHERE book='main' AND date=?", [D3]).fetchone()[0]
@@ -126,8 +134,31 @@ checks = {
                + con.execute("SELECT coalesce(sum(pnl),0) FROM paper_trades WHERE book='main'").fetchone()[0]
                + con.execute("SELECT coalesce(sum((credit-mark)*lot) - sum(entry_cost),0) FROM paper_positions "
                              "WHERE book='main'").fetchone()[0])) < 1e-6,
+    "risk layer recorded: stress and its cap on every daily row":
+        con.execute("SELECT count(*) FROM paper_daily WHERE stress IS NOT NULL AND stress_cap > 0").fetchone()[0] == 6,
 }
 con.close()
+
+# ---- liquidity gate on live quotes (plan item 0), straight through build_candidates
+import pandas as pd  # noqa: E402
+import wheel_bt as wb  # noqa: E402
+p = wb.Params(dte_lo=21, dte_hi=35, rom_target=0.01, delta_cap=0.20)
+base = dict(symbol="AAA", ts=datetime(2026, 10, 5, 15, 40), expiry=EXP, und=100.0, lot=100, opt_type="PE",
+            ltp=1.0, delta=-0.1)
+ch = pd.DataFrame([
+    dict(base, strike=80.0, bid=0.95, ask=1.05, mid=1.0, volume=50, oi=1000),   # ok: 10% spread
+    dict(base, strike=85.0, bid=0.70, ask=1.30, mid=1.0, volume=50, oi=1000),   # 60% spread
+    dict(base, strike=90.0, bid=0.95, ask=1.05, mid=1.0, volume=50, oi=20),     # OI 20 < 50
+    dict(base, strike=95.0, bid=0.95, ask=1.05, mid=1.0, volume=10, oi=1000)])  # 10 traded < 25
+span = {("AAA", "PE", EXP, float(k)): (6.0, -0.04) for k in (80, 85, 90, 95)}
+cd = wp.build_candidates(p, D1, ch, span, {"AAA": 100.0})
+checks2 = {
+    "live gate keeps only the liquid strike (spread, OI and volume filters)":
+        len(cd) == 1 and float(cd.iloc[0]["strike"]) == 80.0,
+    "ROM measured on the bid, not the mid":
+        len(cd) == 1 and abs(cd.iloc[0]["rom"] - 0.95 * 100 / (6 * 100 + 0.035 * 100 * 100)) < 1e-12,
+}
+checks.update(checks2)
 fails = [k for k, v in checks.items() if not v]
 for k, v in checks.items():
     print(("  PASS  " if v else "  FAIL  ") + k)
