@@ -508,9 +508,11 @@ check("price basis is part of the data key", wb.data_key(replace(BASE, price_bas
 
 print("\n=== 28. defective-run flags ===")
 import tempfile, os as _os, json as _json
-check("legacy params (no basis / universe keys) -> both flags", wb.run_flags({}) == "settle_fills,survivorship")
+check("legacy params (no basis / universe / pit_ca keys) -> all three flags",
+      wb.run_flags({}) == "settle_fills,survivorship,ca_lookahead")
 check("current defaults -> clean", wb.run_flags(_json.loads(_json.dumps(wb.asdict(wb.Params()), default=str))) is None)
-check("explicit settle basis is flagged", wb.run_flags({"price_basis": "settle", "universe": "pit"}) == "settle_fills")
+check("explicit settle basis is flagged", wb.run_flags({"price_basis": "settle", "universe": "pit", "pit_ca": True}) == "settle_fills")
+check("pre-28-Oct CA look-ahead is flagged", wb.run_flags({"price_basis": "close", "universe": "pit"}) == "ca_lookahead")
 tmpdb = Path(tempfile.mkdtemp()) / "w.duckdb"
 r_ok = wb.simulate(replace(BASE, price_basis="close", universe="pit"), data([cand()], {KEY: path()}))
 r_bad = wb.simulate(BASE, data([cand()], {KEY: path()}))
@@ -597,6 +599,183 @@ picks = [[(a, float(b), c, float(e)) for a, b, c, e in
 check("delta ties: furthest-OTM strike, nearest expiry, fields from one row, every time",
       all(x == picks[0] for x in picks) and picks[0] == [("CE", 80.0, date(2019, 12, 26), 0.05),
                                                        ("PE", 25.0, date(2019, 12, 26), 0.10)], str(picks[0]))
+
+print("\n=== 32. put regime gate ===")
+pg = replace(BASE, entry_mode="all", put_block_dma=50, put_block_vix=20.0)
+def mkt(vs50, vix): return {"daily": {ENTRY: {"vix": vix, "nifty_vs50": vs50}}}
+r = wb.simulate(pg, data([cand(), call], {KEY: path(), KC: path()}, market=mkt(-0.01, 15.0)))
+check("NIFTY below 50-DMA, VIX 15: no new put, call still entered", list(r.trades["side"]) == ["CE"],
+      str(list(r.trades["side"])))
+r = wb.simulate(pg, data([cand()], {KEY: path()}, market=mkt(-0.01, 26.0)))
+check("below 50-DMA but VIX 26 (fear priced): put entered", len(r.trades) == 1)
+r = wb.simulate(pg, data([cand()], {KEY: path()}, market=mkt(0.01, 15.0)))
+check("above 50-DMA: put entered", len(r.trades) == 1)
+r = wb.simulate(replace(pg, put_block_vix=None), data([cand()], {KEY: path()}, market=mkt(-0.01, 26.0)))
+check("no VIX limit: any close below the average blocks puts", len(r.trades) == 0)
+r = wb.simulate(pg, data([cand()], {KEY: path()}, market={"daily": {ENTRY: {"vix": 15.0}}}))
+check("no average yet (short history): gate stays open", len(r.trades) == 1)
+check("gate off by default", wb.Params().put_block_dma is None)
+con32 = duckdb.connect()
+con32.execute("ATTACH ':memory:' AS bc")
+con32.execute("""CREATE TABLE bc.index_eod AS SELECT DATE '2024-01-01' + i::INTEGER AS trade_date, n AS index_name,
+                 CASE WHEN n = 'Nifty 50' THEN 100.0 + i::INTEGER ELSE 15.0 END AS close
+                 FROM range(0, 60) t(i), (VALUES ('Nifty 50'), ('India VIX')) v(n)""")
+mm = wb.load_market(con32, date(2024, 1, 1), date(2024, 3, 1))["daily"]
+d59 = date(2024, 1, 1) + timedelta(days=59)
+check("load_market: 50-session average of 110..159 = 134.5", abs(mm[d59]["nifty_vs50"] - (159 / 134.5 - 1)) < 1e-12)
+check("load_market: no 50-DMA before 50 sessions", "nifty_vs50" not in mm[date(2024, 1, 1) + timedelta(days=48)])
+
+print("\n=== 33. IV / HV20 gate ===")
+hvm = {"hv20": {"XYZ": ([ENTRY - timedelta(days=3)], [0.30])}}
+pv = replace(BASE, max_iv_hv=1.0)
+r = wb.simulate(pv, data([dict(cand(), atm_iv=0.27)], {KEY: path()}, market=hvm))
+check("IV/HV 0.9 <= 1.0: entered, ratio recorded", len(r.trades) == 1 and abs(r.trades.iloc[0]["iv_hv"] - 0.9) < 1e-9,
+      str(list(r.trades.get("iv_hv", []))))
+r = wb.simulate(pv, data([dict(cand(), atm_iv=0.36)], {KEY: path()}, market=hvm))
+check("IV/HV 1.2 > 1.0: skipped", len(r.trades) == 0)
+r = wb.simulate(pv, data([cand()], {KEY: path()}, market=hvm))
+check("no ATM IV: skipped (fail closed)", len(r.trades) == 0)
+r = wb.simulate(pv, data([dict(cand(), atm_iv=0.27)], {KEY: path()}))
+check("no HV20: skipped (fail closed)", len(r.trades) == 0)
+r = wb.simulate(BASE, data([dict(cand(), atm_iv=0.36)], {KEY: path()}, market=hvm))
+check("gate off: entered", len(r.trades) == 1 and wb.Params().max_iv_hv is None)
+cq = duckdb.connect()
+cq.execute("ATTACH ':memory:' AS bc")
+d0, e0, u0 = date(2024, 1, 25), date(2024, 2, 29), 100.0
+tt = (e0 - d0).days / 365.0
+rows = [(d0, "XYZ", e0, side, k, round(wb.bs_price(side, u0, k, tt, 0.25), 2), v)
+        for side in ("CE", "PE") for k, v in ((95.0, 10), (100.0, 10), (101.0, 0), (105.0, 10))]
+cq.execute("CREATE TABLE bc.options_eod (trade_date DATE, symbol VARCHAR, expiry DATE, opt_type VARCHAR, "
+           "strike DOUBLE, close DOUBLE, volume DOUBLE)")
+cq.executemany("INSERT INTO bc.options_eod VALUES (?, ?, ?, ?, ?, ?, ?)", rows)
+ci = pd.DataFrame([dict(trade_date=d0, raw="XYZ", expiry=e0, und=100.4), dict(trade_date=d0, raw="XYZ", expiry=e0, und=100.4),
+                   dict(trade_date=d0, raw="ABC", expiry=e0, und=50.0)])
+aiv = wb.load_atm_iv(cq, ci)
+check("load_atm_iv: nearest TRADED strike (100, not untraded 101), ~25% vol", abs(aiv.iloc[0] - 0.25) < 0.01
+      and aiv.iloc[0] == aiv.iloc[1], f"{aiv.iloc[0]:.4f}")
+check("load_atm_iv: no options -> NaN", aiv.iloc[2] != aiv.iloc[2])
+
+print("\n=== 34. early profit-taking ===")
+pp = replace(BASE, profit_residual=0.5)
+pt = path()
+r = wb.simulate(pp, data([cand()], {KEY: pt}))
+t0 = r.trades.iloc[0]
+prev = max(d for d in pt if d < t0["exit_date"])
+check("closes on the first day mark <= 50% of entry premium", t0["reason"] == "profit"
+      and pt[t0["exit_date"]][2] <= 1.0 < pt[prev][2], f"{t0['reason']} {t0['exit_date']}")
+day2 = t0["exit_date"]
+r = wb.simulate(pp, data([cand(), dict(cand(day=day2), strike=85.0)], {KEY: pt, ("XYZ", "PE", EXP, 85.0): path(start=day2)}))
+check("freed slot is re-used the same session", len(r.trades) == 2 and r.trades.iloc[1]["entry_date"] == day2,
+      str(list(r.trades["entry_date"])))
+
+print("\n=== 35. strike choice ===")
+d0, e0 = date(2024, 1, 25), date(2024, 2, 29)
+def strk(k, prem, dl, rom, svol=0.25, side="PE", sym="XYZ", e=e0):
+    return dict(trade_date=d0, symbol=sym, opt_type=side, raw=sym, expiry=e, strike=k, premium=prem, lot=100,
+                margin=1e4, rom=rom, delta=dl, und=100.0, oi=1000, volume=50, svol=svol)
+tt = (e0 - d0).days / 365.0
+fair = lambda k: wb.bs_price_r("PE", 100.0, k, tt, 0.25, 0.065)
+chain = pd.DataFrame([strk(90.0, fair(90.0) * 1.3, 0.10, 0.025), strk(95.0, fair(95.0) * 1.1, 0.20, 0.040),
+                      strk(88.0, fair(88.0) * 1.3, 0.08, 0.021, svol=float("nan")),
+                      strk(85.0, 0.30, 0.05, 0.02, side="CE", e=date(2024, 3, 28)),
+                      strk(110.0, 0.30, 0.05, 0.02, side="CE")])
+pr = wb.pick_strikes(chain, replace(BASE, pick_by="rich")).set_index("opt_type")
+check("rich: highest premium / model price (90 at 1.3x; no-SPAN-vol strike ranks last)", pr.loc["PE", "strike"] == 90.0,
+      str(pr.loc["PE", "strike"]))
+po = wb.pick_strikes(chain, replace(BASE, pick_by="rom")).set_index("opt_type")
+check("ties: equal rom and delta -> furthest OTM call (110)", po.loc["CE", "strike"] == 110.0,
+      str(po.loc["CE", ["strike", "expiry"]].tolist()))
+check("rom: highest premium / margin (95)", po.loc["PE", "strike"] == 95.0)
+check("one row per day / symbol / side", len(pr) == 2 and len(po) == 2)
+check("pick_by changes the data key", wb.data_key(replace(BASE, pick_by="rich")) != wb.data_key(BASE))
+
+print("\n=== 36. richness measure, delta floor, confirmation ===")
+tt36 = (EXP - ENTRY).days / 365.0
+iv36 = wb.implied_vol_r("PE", 2.0, 100.0, 90.0, tt36, 0.065)
+check("vol ratio = strike IV / SPAN vol", abs(wb.vol_ratio("PE", 2.0, 100.0, 90.0, tt36, iv36 / 1.2) - 1.2) < 1e-6)
+pv36 = replace(BASE, rich_measure="vol", min_rich=1.1)
+r = wb.simulate(pv36, data([dict(cand(), svol=iv36 / 1.2)], {KEY: path()}))
+check("vol gate: IV 1.2x SPAN vol passes 1.1 (computed live)", len(r.trades) == 1 and abs(r.trades.iloc[0]["rich"] - 1.2) < 1e-6)
+r = wb.simulate(pv36, data([dict(cand(), svol=iv36 / 1.05)], {KEY: path()}))
+check("vol gate: 1.05x fails 1.1", len(r.trades) == 0)
+pc36 = replace(BASE, min_rich=1.1, rich_confirm_days=1)
+r = wb.simulate(pc36, data([dict(cand(), rich_px=1.3, rich_px_p1=1.0)], {KEY: path()}))
+check("confirm 1: rich today but not yesterday -> skipped", len(r.trades) == 0)
+r = wb.simulate(pc36, data([dict(cand(), rich_px=1.3, rich_px_p1=1.15)], {KEY: path()}))
+check("confirm 1: rich today and yesterday -> entered", len(r.trades) == 1)
+r = wb.simulate(pc36, data([dict(cand(), rich_px=1.3)], {KEY: path()}))
+check("confirm 1: no history -> skipped (fail closed)", len(r.trades) == 0)
+d1, d2, d4 = CAL[10], CAL[11], CAL[13]
+h = pd.DataFrame([dict(cand(day=x), svol=0.3, expiry=EXP) for x in (d1, d2, d4)])
+hh = wb.add_rich_history(h, CAL, BASE).set_index("trade_date")
+check("history: previous session's value attached", abs(hh.loc[d2, "rich_px_p1"] - hh.loc[d1, "rich_px"]) < 1e-12
+      and hh.loc[d2, "rich_px_p2"] != hh.loc[d2, "rich_px_p2"])
+check("history: a session gap gives NaN", hh.loc[d4, "rich_px_p1"] != hh.loc[d4, "rich_px_p1"]
+      and abs(hh.loc[d4, "rich_px_p2"] - hh.loc[d2, "rich_px"]) < 1e-12)
+ch36 = pd.DataFrame([dict(trade_date=ENTRY, symbol="XYZ", opt_type="PE", raw="XYZ", expiry=EXP, strike=k, premium=pr,
+                          lot=100, margin=1e4, rom=0.03, delta=dl, und=100.0, oi=1000, volume=50, svol=0.25)
+                     for k, pr, dl in ((90.0, wb.bs_price_r("PE", 100, 90, tt36, 0.30, 0.065), 0.10),
+                                       (85.0, wb.bs_price_r("PE", 100, 85, tt36, 0.28, 0.065), 0.06))])
+pk36 = wb.pick_strikes(ch36, replace(BASE, pick_by="volrich"))
+check("volrich: picks the higher IV / SPAN vol strike (90 at 1.2x over 85 at 1.12x)", float(pk36.iloc[0]["strike"]) == 90.0)
+check("min_delta changes the data key", wb.data_key(replace(BASE, min_delta=0.05)) != wb.data_key(BASE))
+
+print("\n=== 37. notional caps ===")
+n37 = 90.0 * 100                                          # one lot: strike 90 x 100 shares
+r = wb.simulate(replace(BASE, max_symbol_notional=0.003), data([cand()], {KEY: path()}))
+check("per-stock cap below one lot's notional: skipped", len(r.trades) == 0)
+r = wb.simulate(replace(BASE, max_symbol_notional=0.004), data([cand()], {KEY: path()}))
+check("per-stock cap above one lot: entered", len(r.trades) == 1)
+pp37 = replace(BASE, sizing="pct", trade_margin_pct=0.05, max_lots_per_trade=20, max_vol_frac=1.0)
+c37 = dict(cand(), volume=1000)
+r0 = wb.simulate(pp37, data([c37], {KEY: path()}))
+r1 = wb.simulate(replace(pp37, max_symbol_notional=10.5 * n37 / BASE.cash), data([c37], {KEY: path()}))
+check("pct sizing shrinks lots to the per-stock notional cap", int(r0.trades.iloc[0]["lots"]) > 10
+      and int(r1.trades.iloc[0]["lots"]) == 10, f"{int(r0.trades.iloc[0]['lots'])} -> {int(r1.trades.iloc[0]['lots'])}")
+r = wb.simulate(replace(pp37, max_put_notional=3.5 * n37 / (BASE.cash + BASE.collateral)), data([c37], {KEY: path()}))
+check("put notional cap: 3 lots", int(r.trades.iloc[0]["lots"]) == 3, str(int(r.trades.iloc[0]["lots"])))
+r = wb.simulate(replace(BASE, max_put_notional=0.0001), data([cand(), call], {KEY: path(), KC: path()}))
+check("put notional cap does not touch calls", list(r.trades["side"]) == ["CE"], str(list(r.trades["side"])))
+check("caps off by default", wb.Params().max_symbol_notional is None and wb.Params().max_put_notional is None)
+
+print("\n=== 38. CA blackout scope + knowability, weekend results, window end, SPAN gaps ===")
+ex38 = ENTRY + timedelta(days=14)                          # ex-date inside the contract's life
+ann38 = ENTRY + timedelta(days=7)                          # announced a week after entry
+def d38(adj, known, ca_all=None):
+    dd = data([cand()], {KEY: path()}, ca=ca_all if ca_all is not None else {"XYZ": [ex38]})
+    dd.ca_adj, dd.ca_known = adj, known
+    return dd
+r = wb.simulate(BASE, d38({"XYZ": [ex38]}, {("XYZ", ex38): ann38}))
+t38 = r.trades.iloc[0] if len(r.trades) else None
+check("adjusting CA not yet announced at entry: entered", t38 is not None)
+prev38 = max(x for x in CAL if x < ex38)
+check("once announced, closed the session before the ex-date", t38 is not None and t38["reason"] == "corp_action"
+      and t38["exit_date"] == prev38, f"{None if t38 is None else (t38['reason'], t38['exit_date'])}")
+r = wb.simulate(BASE, d38({"XYZ": [ex38]}, {("XYZ", ex38): ENTRY - timedelta(days=3)}))
+check("adjusting CA already announced: entry skipped", len(r.trades) == 0)
+r = wb.simulate(BASE, d38({}, {("XYZ", ex38): ENTRY - timedelta(days=3)}))
+check("ordinary dividend (not in the adjusting set): ignored by default", len(r.trades) == 1
+      and r.trades.iloc[0]["reason"] != "corp_action")
+r = wb.simulate(replace(BASE, ca_scope="all"), d38({}, {("XYZ", ex38): ENTRY - timedelta(days=3)}))
+check("ca_scope 'all': the same dividend blocks entry", len(r.trades) == 0)
+r = wb.simulate(replace(BASE, pit_ca=False), d38({"XYZ": [ex38]}, {("XYZ", ex38): ann38}))
+check("pit_ca off: unannounced ex-date blocks entry (old look-ahead)", len(r.trades) == 0)
+check("defaults: adjusting scope, point-in-time", wb.Params().ca_scope == "adjusting" and wb.Params().pit_ca)
+sat = date(2024, 2, 10)                                    # Saturday results
+r = wb.simulate(BASE, data([cand()], {KEY: path()}, results={"XYZ": [sat]}))
+check("Saturday results: exit Friday (last session before), not Thursday",
+      r.trades.iloc[0]["reason"] == "results" and r.trades.iloc[0]["exit_date"] == date(2024, 2, 9),
+      str(r.trades.iloc[0]["exit_date"]))
+r = wb.simulate(replace(BASE, end=EXP - timedelta(days=12)), data([cand()], {KEY: path()}))
+check("window ends before expiry: no false final exit, closed as window_end",
+      r.trades.iloc[0]["reason"] == "window_end", r.trades.iloc[0]["reason"])
+pg = path()
+dg = sorted(pg)[5]
+pg[dg] = (7.0, 10.0, wb.NAN, wb.NAN, wb.NAN, wb.NAN, wb.NAN, wb.NAN)         # traded at 7.0, no SPAN row
+r = wb.simulate(replace(BASE, stop_mult=3.0, price_basis="close"), data([cand()], {KEY: pg}))
+check("SPAN gap day: marked at the traded close, 3x stop fires at 7.0",
+      r.trades.iloc[0]["reason"] == "stop_mult" and abs(r.trades.iloc[0]["exit_px"] - 7.0) < 1e-9
+      and r.trades.iloc[0]["exit_date"] == dg, f"{r.trades.iloc[0]['reason']} {r.trades.iloc[0]['exit_px']}")
 
 print("\n" + "=" * 62)
 print(f"  {'ALL PASSED' if not fails else str(len(fails)) + ' FAILED: ' + ', '.join(fails)}")

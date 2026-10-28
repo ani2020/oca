@@ -5080,34 +5080,38 @@ function renderGexTable(gex){
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// PLAYBOOK — codified §2/§3 checklists as a scored screen over exposure_eod.
+// PLAYBOOK — gate-based screen over exposure_eod, rebuilt 2026-10-26 from a backtest.
 //
-// DESIGN CONTRACT (read before editing weights):
-//   * PURE functions over the SAME row objects the exposure screener already
-//     fetches (window._esData / the /api/exposure_screener payload). No new
-//     endpoint, no query. If a column is missing the axis abstains (returns
-//     null) rather than scoring 0 — abstain ≠ fail.
-//   * The hold-probability axis REUSES _defenseHoldProb(r) verbatim. That model
-//     was rebuilt 2026-07 onto iv_band × expiry_week × gamma_regime after
-//     transition_width_norm was shown to be a grid-density confound. DO NOT add
-//     transition_width_norm back as a strength axis here — it would contradict
-//     the validated model. Grid-normalised width may return later as its own
-//     axis once ~3 more months of data land (per exposure_narrative_design).
-//   * Two layers per row per checklist:
-//       - GATES: literal pass/fail booleans (the checklist as written). Shown as
-//         a marker strip. A hard-disqualifier gate failing caps the band.
-//       - SCORE: weighted 0..100 over soft axes, for ranking within a band.
-//     Rendered together: band from score, but capped by disqualifier gates, with
-//     the gate strip visible so a tester sees WHY.
+// DESIGN CONTRACT (read before editing):
+//   * Backtest: exposure_hist front month, 2021-01 → 2026-10, short ATM straddle
+//     entered at the EOD close, exit at 50% of credit or DTE-5 (146k trades), plus
+//     next-day hold (|Δfut| ≤ em_1d). Stock-level tests compare names against each
+//     other ON THE SAME DAY, t-stats clustered by month.
+//   * The old 0–100 weighted SELL score was dropped as a stock ranking: among
+//     passing names its top third earned ~3 pts LESS of credit than its bottom
+//     third (t −3.2), and it had no same-day skill on next-day hold. Lopsided γ,
+//     γ POS depth, days-in-regime: negative; concentration, wings: null; "not ◆ pin"
+//     was backwards (pins do better, t +2.2). What the score DOES measure is market
+//     fragility, so its universe average is kept as a WEATHER input (server side).
+//   * Gates that earned their place (vs same day): results before expiry −6.8 pts,
+//     negative regime −3.4, regime_flip_to_neg −6.8 (2026 live).
+//   * Ranking: ATM IV ÷ NSE SPAN vol (row.span_rich, joined by the endpoint).
+//     Top vs bottom third +8.0 pts of credit (t 5.8), +8.4 out of sample 2024-26;
+//     holds within IV-level and IV/HV20 terciles. < 0.65 THIN (−5 pts), ≥ 0.85 RICH.
+//     History covers only ~70 wheel-universe names → thresholds provisional.
+//   * Not used (tested, no out-of-sample value): richness_ref, NIFTY VRP z, stock
+//     IV/HV20 ranking, RV next-day forecast (49 days only), instability_widening /
+//     instab_score, compression thesis, deep-short-γ long straddles (3 months only).
 // ═══════════════════════════════════════════════════════════════════
 
-// ---- small helpers (self-contained; fall back if globals absent) ----
+// ---- small helpers ----
 const _pbNum = v => (typeof v === 'number' && isFinite(v)) ? v : null;
 const _pbPos = r => (r.gex_regime === 'positive' || r.gex_regime === 'all_positive');
 const _pbNeg = r => (r.gex_regime === 'negative' || r.gex_regime === 'all_negative');
 const _pbConfRank = c => ({low:0, medium:1, high:2}[c] ?? 0);
 const _pbDate = d => d ? new Date(String(d).slice(0,10)+'T00:00:00')
   .toLocaleDateString('en-GB',{day:'2-digit',month:'short'}) : '';
+const PB_SPAN_THIN = 0.65, PB_SPAN_RICH = 0.85;
 // Results-calendar cell (exposure_eod.next_results_date / near_earnings). Amber =
 // results fall before this row's expiry; muted = next results after expiry but
 // within 21 days (matters if you roll); blank otherwise / for indices.
@@ -5125,254 +5129,118 @@ function eventCell(r){
       + `style="color:var(--muted);font-family:var(--mono);font-size:10px">${lbl}</span>`;
   return '—';
 }
-
-// single-strike pin flag: prefer explicit column, else derive from width==1
 function _pbSingleStrike(r){
   if (typeof r.gamma_shelf_single_strike === 'boolean') return r.gamma_shelf_single_strike;
   return r.gamma_shelf_width === 1;
 }
-// signals is a comma string; membership test
 function _pbHasSignal(r, key){
   return String(r.signals || '').split(',').map(s=>s.trim()).includes(key);
 }
-// COM distance from price in EM units (mirrors _comDistEM if present)
-function _pbComDistEM(r){
-  if (typeof _comDistEM === 'function') return _comDistEM(r);
-  if (r.gamma_shelf_center==null || r.fut_price==null || !r.expected_move) return null;
-  return (r.gamma_shelf_center - r.fut_price) / r.expected_move;
-}
-// hold prob {p,bucket,...} — reuse the screener's validated model
+// hold prob {p,bucket,...} — market fragility (see _defenseHoldProb), not a stock edge
 function _pbHold(r){
   if (typeof _defenseHoldProb === 'function') return _defenseHoldProb(r);
   return null;
 }
 
-// A weighted-axis result: {score 0..1 | null, label}. null = abstain (missing data).
-// Combine ignores nulls and renormalises over present weights.
-function _pbCombine(axes){
-  let wsum = 0, acc = 0, present = 0, total = 0;
-  for (const a of axes){
-    total += a.w;
-    if (a.s == null) continue;
-    wsum += a.w; acc += a.w * a.s; present++;
-  }
-  if (wsum === 0) return {score:null, coverage:0};
-  return {score: acc / wsum, coverage: present / axes.length,
-          weightCoverage: wsum / total};
-}
-
-// Band from a 0..100 score, optionally capped by a disqualifier.
-function _pbBand(score100, cap){
-  let b;
-  if (score100 == null) b = 'n/a';
-  else if (score100 >= 70) b = 'strong';
-  else if (score100 >= 45) b = 'moderate';
-  else b = 'weak';
-  if (cap){
-    const order = ['n/a','avoid','weak','moderate','strong'];
-    if (order.indexOf(b) > order.indexOf(cap)) b = cap;
-  }
-  return b;
-}
-
 // ═══════════════════════════════════════════════════════════════════
-// CHECKLIST 1 — NEW SHORT-PREMIUM SETUP  (guide §2 sell checklist + §3 ladder)
-// Gates are the literal 8-point checklist. Score ranks within the passing set.
+// SELL — new short-premium setup. Verdict from gates; rank by ATM IV ÷ SPAN vol.
+//   AVOID   negative dealer-gamma regime
+//   CAUTION any caution gate fails (✕)
+//   PASS    otherwise
 // ═══════════════════════════════════════════════════════════════════
 function pbSell(r){
-  const hold = _pbHold(r);
-  const flipDist = _pbNum(r.flip_norm_distance);
-  const lop = _pbNum(r.net_gex_norm);
-  const conc = _pbNum(r.concentration);
+  const sr = _pbNum(r.span_rich);
   const turn = _pbNum(r.oi_turnover_ratio);
-  const rr25 = _pbNum(r.rr25);
-  // Dealer gamma position (profile): how deep in long gamma price sits. Replaces
-  // the old flip-distance terms, which were tuned on the per-strike flip
-  // (2026-10-04). Positive-regime quartiles: 0.38 / 0.56 / 0.72.
-  const gpos = _pbNum(r.gamma_position);
-
-  // ---- literal gates (checklist as written) ----
   const gates = [
-    {key:'regime',   label:'REGIME +γ',   ok: _pbPos(r), hard:true,
-       why:'dealers long gamma → hedging dampens moves'},
-    {key:'conf',     label:'CONF ≥ med',  ok: _pbConfRank(r.confidence) >= 1, hard:true,
-       why:'sparse chains mislead flip/width'},
-    {key:'turn',     label:'live book',   ok: turn!=null && turn>=0.05 && turn<=2.0, hard:true,
-       why:'stale/thin OI → distrust the row'},
-    {key:'gposdeep', label:'γ POS ≥ 0.4', ok: gpos!=null && gpos>=0.4, hard:false,
-       why:'price well inside dealer long gamma, not near the flip'},
-    {key:'lop',      label:'LOPSIDED +',  ok: lop!=null && lop>0.29, hard:false,
-       why:'positive gamma dominant, not marginal'},
-    {key:'defend',   label:'DEFEND ≥Mod', ok: !!hold && hold.bucket!=='Low', hard:false,
-       why:'empirical next-day hold ≥ moderate (market fragility, γ POS)'},
-    {key:'notpin',   label:'not ◆ pin',   ok: !_pbSingleStrike(r), hard:false,
-       why:'single-strike shelf = fragile pin'},
-    {key:'wings',    label:'wings calm',  ok: rr25==null || Math.abs(rr25)<=3.0, hard:false,
-       why:'both wings bid → naked strangle risk'},
-    // Results inside the contract's life (exposure_eod.near_earnings, from the NSE
-    // results calendar since 2026-10-13). Hard: the IV is partly event variance and
-    // the gamma map says nothing about a results gap. Caps the band at WEAK, not
-    // AVOID -- selling through results can be a deliberate trade, just not this one.
-    {key:'noevent',  label:'no results',  ok: !r.near_earnings, hard:true,
-       why: r.near_earnings ? `results ${_pbDate(r.next_results_date)} before expiry → event gap, IV not comparable`
+    {key:'regime', label:'REGIME +γ', ok:_pbPos(r), hard:true,
+       why:_pbNeg(r) ? 'negative regime: −3.4 pts of credit vs same day (2021-26)'
+                     : 'dealers long gamma; mixed/negative regimes earned 3% vs 9% of credit'},
+    {key:'conf',   label:'CONF ≥ med', ok:_pbConfRank(r.confidence) >= 1, hard:true,
+       why:'sparse chains mislead the gamma map'},
+    {key:'noevent',label:'no results', ok:!r.near_earnings, hard:true,
+       why: r.near_earnings ? `results ${_pbDate(r.next_results_date)} before expiry: −6.8 pts of credit vs same day`
                             : 'no results date before expiry'},
+    {key:'recon',  label:'OI recon',   ok:r.oi_recon_ok !== false, hard:true,
+       why:'snapshot OI disagrees with bhavcopy (−1.7 pts vs same day, 2026)'},
+    {key:'span',   label:'not THIN',   ok:sr==null || sr>=PB_SPAN_THIN, hard:true,
+       why: sr==null ? 'no SPAN vol for this expiry (abstains)'
+                     : `ATM IV ÷ SPAN vol ${sr.toFixed(2)}; below ${PB_SPAN_THIN}: −5 pts of credit vs same day`},
+    // soft / informational
+    {key:'rich',   label:'RICH',       ok:sr!=null && sr>=PB_SPAN_RICH, hard:false,
+       why:`ATM IV ÷ SPAN vol ≥ ${PB_SPAN_RICH}: +3.5–4 pts vs same day, in and out of sample`},
+    {key:'pin',    label:'◆ pin',      ok:_pbSingleStrike(r), hard:false,
+       why:'single-strike gamma shelf: pins did better for short straddles (+1.6 pts, t 2.2)'},
+    {key:'turn',   label:'live book',  ok:turn!=null && turn>=0.05 && turn<=2.0, hard:false,
+       why:'OI turnover outside 0.05–2 (data-quality note only; no outcome effect found)'},
   ];
-
-  // ---- disqualifier caps (override band regardless of score) ----
-  let cap = null;
-  if (_pbNeg(r)) cap = 'avoid';                          // wrong regime outright
-  if (_pbHasSignal(r,'compression_release')) cap = 'avoid'; // spring sprang
-  const hardFail = gates.some(g=>g.hard && !g.ok);
-  if (hardFail && cap==null) cap = 'weak';               // failed a hard gate
-
-  // ---- soft weighted score (ranking within band) ----
-  // Weights favour the SURVIVING axes of the validated hold model + relevance.
-  // DEFEND is keyed on gamma_position since 2026-10-04, so the separate γ POS
-  // depth term was removed (it would have counted the same variable twice, 52%
-  // of the score). holdS spans the rebuilt table's 69-76% range; the old 40-80
-  // scale left every row between 0.72 and 0.90.
-  const holdS = hold ? Math.max(0, Math.min(1, (hold.p - 69) / 7)) : null;  // 69→0, 76→1
-  const lopS  = lop==null ? null : Math.max(0, Math.min(1, lop));            // 0→0,1→1 (only + helps)
-  const concS = conc==null ? null : (1 - Math.max(0, Math.min(1, (conc-0.20)/0.30))); // diffuse better: .20→1,.50→0
-  const strS  = _pbNum(r.strength_cumulative)==null ? null
-                  : Math.max(0, Math.min(1, (r.strength_cumulative+5)/10));  // -5→0,+5→1 (five axes)
-  const daysS = _pbNum(r.days_in_regime)==null ? null
-                  : Math.max(0, Math.min(1, r.days_in_regime/8));            // 0→0,8+→1 (context only, low w)
-
-  const combo = _pbCombine([
-    {w:30, s:holdS},   // hold model (gamma_position bands, 2021-26)
-    {w:18, s:lopS},    // dominance of positive gamma
-    {w:14, s:concS},   // distributed > concentrated (fragility)
-    {w:12, s:strS},    // multi-day building vs noisy
-    {w:4,  s:daysS},   // persistence — deliberately small (no predictive signal)
-  ]);
-  const score100 = combo.score==null ? null : Math.round(combo.score*100);
-  const band = _pbBand(score100, cap);
-  return {score:score100, band, gates, cap, coverage:combo.coverage, hold};
+  let band;
+  if (_pbNeg(r)) band = 'avoid';
+  else if (gates.some(g=>g.hard && !g.ok)) band = 'caution';
+  else band = 'pass';
+  // sort key: verdict first, then richness (null richness sorts last within band)
+  const bandRank = {pass:2, caution:1, avoid:0}[band];
+  return {band, gates, score: sr, sortKey: bandRank*10 + (sr==null ? 0 : Math.min(sr, 5)),
+          hold:_pbHold(r)};
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// CHECKLIST 2 — EXISTING-POSITION ADJUSTMENT TRIGGERS (guide §2 decision tree)
-// Here "score" = urgency to act. HIGH score = ADJUST NOW. Gates = the triggers.
-// Meant to be read against a position you already hold, so it flags triggers
-// rather than endorsing entry.
+// MANAGE — triggers for a position already held. Only triggers that showed an
+// outcome effect are kept. Removed 2026-10-26: instability_widening (no effect on
+// breach or P&L), γ POS < 0.25 (no effect), tight+◆ pin (no effect), "thesis
+// expired" (needed prev_signals, never present in view=all).
 // ═══════════════════════════════════════════════════════════════════
 function pbManage(r){
-  const flipDist = _pbNum(r.flip_norm_distance);
-  const gpos = _pbNum(r.gamma_position);
-  const prevSig = String(r.prev_signals || '');   // present in DROPPED view rows
-
-  // Each trigger: fired? + severity weight. Sum → urgency.
   const triggers = [
-    {key:'release',  label:'compression_release',on:_pbHasSignal(r,'compression_release'),  sev:0.85,
-       act:'spring sprang → exit/flip short premium'},
-    {key:'flip2neg', label:'regime→neg',        on:_pbHasSignal(r,'regime_flip_to_neg')||_pbNeg(r), sev:0.80,
-       act:'hedging now amplifies → reduce/roll/protect'},
-    {key:'instab',   label:'neg-γ strikes up', on:_pbHasSignal(r,'instability_widening'),  sev:0.55,
-       act:'more strikes in short gamma → tighten'},
-    // Was "FLIP DIST <1": under the profile flip that holds on 88% of positive
-    // rows, so it no longer discriminates. Shallow gamma position does.
-    {key:'flipnear', label:'γ POS < 0.25',      on:gpos!=null && gpos>=0 && gpos<0.25, sev:0.45,
-       act:'price near the zero-gamma level → pre-plan adj at flip'},
-    {key:'fragile',  label:'tight+◆ pin',       on:_pbSingleStrike(r) && _pbNum(r.concentration)!=null && r.concentration>0.37, sev:0.40,
-       act:'looks-safe-isn\'t → reduce'},
-    {key:'dropped',  label:'thesis expired',    on: prevSig.length>0 && !String(r.signals||'').length, sev:0.35,
-       act:'signal reset → re-justify or close'},
-    {key:'results',  label:'results ahead',     on: !!r.near_earnings, sev:0.45,
-       act:`results ${_pbDate(r.next_results_date)} before expiry → close or size down before, or hold through on purpose`},
+    {key:'results', label:'results ahead', on: !!r.near_earnings, sev:0.90,
+       act:`results ${_pbDate(r.next_results_date)} before expiry → close or size down before, or hold through on purpose (−6.8 pts vs same day)`},
+    {key:'flip2neg',label:'regime→neg',    on:_pbHasSignal(r,'regime_flip_to_neg'), sev:0.85,
+       act:'flipped to dealer short gamma today → reduce/roll/protect (−6.8 pts vs same day)'},
+    {key:'neg',     label:'neg regime',    on:_pbNeg(r) && !_pbHasSignal(r,'regime_flip_to_neg'), sev:0.80,
+       act:'dealer short gamma → hedging amplifies moves (−3.4 pts vs same day)'},
+    // Boolean column, not a signals token (the old check never fired). Note the
+    // compression logic itself has essentially never produced a release.
+    {key:'release', label:'compression released', on: r.compression_release === true, sev:0.80,
+       act:'coil released → exit/flip short premium'},
+    {key:'thin',    label:'premium THIN',  on: _pbNum(r.span_rich)!=null && r.span_rich < PB_SPAN_THIN, sev:0.40,
+       act:'ATM IV now well below SPAN vol → little premium left to earn; consider closing early'},
   ];
-
-  let urg = 0, maxSev = 0;
-  const fired = [];
-  for (const t of triggers){
-    if (t.on){ urg += t.sev; maxSev = Math.max(maxSev, t.sev); fired.push(t); }
-  }
-  const score100 = Math.min(100, Math.round(urg*70));  // additive, capped
-  let band;
-  if (maxSev >= 0.80) band = 'act-now';                // any hard trigger
-  else if (maxSev >= 0.45) band = 'watch';
-  else if (fired.length) band = 'note';
-  else band = 'hold';
-  return {score:score100, band, triggers, fired, maxSev};
+  const fired = triggers.filter(t=>t.on);
+  const maxSev = fired.reduce((m,t)=>Math.max(m,t.sev), 0);
+  const score100 = Math.min(100, Math.round(fired.reduce((a,t)=>a+t.sev,0)*70));
+  const band = maxSev >= 0.80 ? 'act-now' : (fired.length ? 'note' : 'hold');
+  return {score:score100, band, triggers, fired, maxSev, sortKey:score100};
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// CHECKLIST 3 — BUY / LONG-PREMIUM SETUP  (guide §2 buy section)
-// The highest-value setup is a MULTI-DAY compression about to release.
-// Alternative thesis: price inside dealer SHORT gamma (amplification), scored by
-// depth (gamma_position). Replaced the retired crash_risk / bear_trend_reinforce
-// legs on 2026-10-04.
+// BUY — no validated long-premium setup. Listed for information only.
+//   compression thesis: long straddle −9% vs about 0 same day (n=1,295)
+//   deep short γ: +8% mean but −19% median; all of it from 3 months (Jan-25,
+//   Jun-25, Feb-26), month-clustered t −0.25, −7% without them.
 // ═══════════════════════════════════════════════════════════════════
 function pbBuy(r){
-  const ivchg = _pbNum(r.iv_change) ?? _pbNum(r.iv_delta);
-  const cdays = _pbNum(r.compression_days) ?? 0;
   const gpos = _pbNum(r.gamma_position);
-  const negfrac = _pbNum(r.neg_gamma_fraction);
-
-  const gates = [
-    {key:'compress', label:'compressing',   ok: !!r.regime_compression, hard:false,
-       why:'coiled spring — leading long-vol setup'},
-    {key:'multiday', label:'≥2 coil days',  ok: cdays>=2, hard:false,
-       why:'sustained tightening, not a 1-day blip'},
-    {key:'ivcheap',  label:'IV flat/down',  ok: ivchg==null || ivchg<=0, hard:false,
-       why:'vol cheap while it coils'},
-    {key:'notreleased',label:'not released', ok: !_pbHasSignal(r,'compression_release'), hard:true,
-       why:'if already released, the move is gone'},
-  ];
-
-  // Alternative long thesis: price inside dealer short gamma (amplification).
   const amp = _pbNeg(r) && gpos!=null && gpos<0;
-  const instab = _pbHasSignal(r,'instability_widening');
-
-  // ---- soft score: reward sustained coil + cheap vol; OR directional amp ----
-  const coilS = Math.max(0, Math.min(1, cdays/5));                       // 0→0,5+→1
-  const ivS   = ivchg==null ? null : Math.max(0, Math.min(1, (0 - ivchg + 1)/2)); // falling better
-  const negS  = negfrac==null ? null : Math.max(0, Math.min(1, negfrac)); // more neg = more amp fuel
-  const releasedPenalty = _pbHasSignal(r,'compression_release') ? 0 : 1;
-
-  let combo;
-  let thesis;
-  if (r.regime_compression){
-    thesis = 'compression → expansion';
-    combo = _pbCombine([
-      {w:45, s: coilS},
-      {w:30, s: ivS},
-      {w:15, s: negS},
-      {w:10, s: 1},           // base for being in a compression state at all
-    ]);
-  } else if (amp || instab){
-    thesis = amp ? 'negative gamma / amplification' : 'neg-γ strikes rising';
-    // Depth in short gamma: gamma_position 0 → 0, -0.5 or below → 1
-    // (negative-regime median is -0.23, 10th percentile -0.55).
-    const depthS = gpos==null ? null : Math.max(0, Math.min(1, -gpos/0.5));
-    combo = _pbCombine([
-      {w:50, s: depthS},
-      {w:30, s: negS},
-      {w:20, s: instab?1:0},
-    ]);
-  } else {
-    thesis = 'no long setup';
-    combo = {score:null, coverage:0};
-  }
-
-  let score100 = combo.score==null ? null : Math.round(combo.score*100*releasedPenalty);
-  let cap = null;
-  if (_pbHasSignal(r,'compression_release') && r.regime_compression) cap='weak'; // released mid-coil
-  const band = score100==null ? 'n/a' : _pbBand(score100, cap);
-  return {score:score100, band, gates, thesis, cap};
+  let thesis = null;
+  if (amp) thesis = 'dealer short γ (amplification)';
+  else if (r.regime_compression) thesis = `compressing (${r.compression_days||0}d)`;
+  const depth = gpos==null ? null : Math.max(0, Math.min(1, -gpos/0.5));
+  return {band: thesis ? 'info' : 'n/a', thesis: thesis || 'no setup', score: depth,
+          sortKey: depth ?? -1, gates: []};
 }
 
 // ═══════════════════════════════════════════════════════════════════
 // RENDER
 // ═══════════════════════════════════════════════════════════════════
 const _PB_BANDCOL = {
-  strong:'var(--green)', moderate:'var(--amber)', weak:'var(--muted)',
-  avoid:'var(--red)', 'act-now':'var(--red)', watch:'var(--amber)',
-  note:'var(--acc)', hold:'var(--muted)', 'n/a':'var(--muted)',
+  pass:'var(--green)', caution:'var(--amber)', avoid:'var(--red)',
+  'act-now':'var(--red)', note:'var(--acc)', hold:'var(--muted)',
+  info:'var(--muted)', 'n/a':'var(--muted)',
 };
 
 function _pbGateStrip(gates){
   return gates.map(g=>{
+    if (!g.hard && !g.ok && g.key!=='turn') return '';      // soft positives: show only when present
+    if (g.key==='turn' && g.ok) return '';                    // data-quality note: show only when failing
     const col = g.ok ? 'var(--green)' : (g.hard ? 'var(--red)' : 'var(--muted)');
     const mark = g.ok ? '✓' : (g.hard ? '✕' : '·');
     const ttl = `${g.label}: ${g.why}`.replace(/"/g,'&quot;');
@@ -5382,28 +5250,56 @@ function _pbGateStrip(gates){
   }).join('');
 }
 
-function _pbBandPill(band, score){
+function _pbBandPill(band, txt){
   const col = _PB_BANDCOL[band] || 'var(--muted)';
-  const sc = score==null ? '' : ` <span style="opacity:.7">${score}</span>`;
+  const sc = txt==null ? '' : ` <span style="opacity:.7">${txt}</span>`;
   return `<span style="font-family:var(--mono);font-size:10px;font-weight:600;color:${col};
     border:1px solid ${col};border-radius:4px;padding:1px 7px;white-space:nowrap">
     ${band.toUpperCase()}${sc}</span>`;
 }
 
+function _pbSpanCell(r){
+  const v = _pbNum(r.span_rich);
+  if (v==null) return '<span style="color:var(--muted)" title="no SPAN vol for this expiry">—</span>';
+  const col = v>=PB_SPAN_RICH ? 'var(--green)' : (v<PB_SPAN_THIN ? 'var(--red)' : 'var(--text)');
+  const tag = v>=PB_SPAN_RICH ? ' RICH' : (v<PB_SPAN_THIN ? ' THIN' : '');
+  return `<span style="font-family:var(--mono);color:${col}" title="ATM IV ${r.atm_iv?.toFixed?.(1)} ÷ SPAN vol ${(r.span_vol*100).toFixed(1)}">${v.toFixed(2)}${tag}</span>`;
+}
+
 let _pbData = [];
+let _pbWeather = null;
 let _pbTab = 'sell';   // sell | manage | buy
 
+// Market weather: whether to sell premium at all today (market-level, from the server).
+function _pbRenderWeather(){
+  const el = document.getElementById('pbWeather');
+  if (!el) return;
+  const w = _pbWeather;
+  if (!w || w.univ_score==null || w.univ_ivhv==null){ el.innerHTML=''; el.style.display='none'; return; }
+  const lows = (w.univ_score_low?1:0) + (w.univ_ivhv_low?1:0);
+  const st = lows===2 ? {t:'STAND ASIDE', c:'var(--red)', x:'both low: −7.1% of credit per short straddle (47 weeks, 2021-26)'}
+           : lows===1 ? {t:'CAUTION',     c:'var(--amber)', x:'one low: +7–11% of credit (vs +12.6% when clear)'}
+           :            {t:'CLEAR',       c:'var(--green)', x:'neither low: +12.6% of credit per short straddle'};
+  const th = w.thresholds||{};
+  const sf = w.span_file ? `SPAN file ${w.span_file[0]} (${w.span_file[1]}), ${w.span_coverage} rows matched` : 'no SPAN file';
+  el.style.display='block';
+  el.innerHTML = `<span style="font-weight:700;color:${st.c}">SHORT-PREMIUM WEATHER: ${st.t}</span>
+    <span style="margin-left:10px">γ-score avg <b style="color:${w.univ_score_low?'var(--red)':'var(--text)'}">${w.univ_score.toFixed(0)}</b>
+    <span style="opacity:.7">(low &lt; ${th.score})</span></span>
+    <span style="margin-left:10px">median IV/HV20 <b style="color:${w.univ_ivhv_low?'var(--red)':'var(--text)'}">${w.univ_ivhv.toFixed(2)}</b>
+    <span style="opacity:.7">(thin &lt; ${th.ivhv})</span></span>
+    <span style="margin-left:10px;opacity:.8">→ ${st.x}</span>
+    <span style="margin-left:10px;opacity:.6">· ${w.n_stocks} stocks · ${sf}</span>`;
+}
+
 function loadPlaybook(){
-  // Reuse the screener's fetch so filters/date stay in one place. If the user has
-  // already loaded the exposure screener, _esData is populated; otherwise fetch.
   const host = document.getElementById('pbTable');
   if (!host) return;
   host.innerHTML = '<div class="loading"><div class="spinner"></div>Scoring…</div>';
 
   const date = document.getElementById('pbDate')?.value || '';
   const rank = document.getElementById('pbExpiryRank')?.value || '0';
-  // Always pull the FULL universe for the playbook (view=all): the whole point is
-  // to score every name, not just today's signal-firers.
+  // Always pull the FULL universe (view=all): score every name, not just signal-firers.
   const qs = new URLSearchParams({view:'all', expiry_rank:rank, min_confidence:'low', limit:'500'});
   if (date) qs.set('screen_date', date);
 
@@ -5411,7 +5307,9 @@ function loadPlaybook(){
     .then(r=>r.json())
     .then(d=>{
       _pbData = d.rows || [];
+      _pbWeather = d.weather || null;
       document.getElementById('pbDateBadge').textContent = d.date || '';
+      _pbRenderWeather();
       renderPlaybook();
     })
     .catch(e=>{ host.innerHTML = `<div class="empty err">⚠ ${e.message}</div>`; });
@@ -5423,11 +5321,11 @@ function _pbScoreFor(r){
   return pbBuy(r);
 }
 
-// which bands are "worth showing" per tab (hide the noise floor by default)
+// which bands are shown by default per tab
 const _PB_KEEP = {
-  sell:   new Set(['strong','moderate']),
-  manage: new Set(['act-now','watch','note']),
-  buy:    new Set(['strong','moderate']),
+  sell:   new Set(['pass']),
+  manage: new Set(['act-now','note']),
+  buy:    new Set(['info']),
 };
 
 function renderPlaybook(){
@@ -5435,64 +5333,75 @@ function renderPlaybook(){
   if (!_pbData.length){ host.innerHTML='<div class="empty">Load a date first</div>'; return; }
   const showAll = document.getElementById('pbShowAll')?.checked;
 
-  // score every row, attach, filter, sort by score desc
   let scored = _pbData.map((r,i)=>{ r._pbi=i; return {r, v:_pbScoreFor(r)}; });
   if (!showAll){
     const keep = _PB_KEEP[_pbTab];
     scored = scored.filter(x=> keep.has(x.v.band));
   }
-  scored.sort((a,b)=> (b.v.score??-1) - (a.v.score??-1));
+  scored.sort((a,b)=> (b.v.sortKey??-1) - (a.v.sortKey??-1));
 
   if (!scored.length){
-    host.innerHTML = `<div class="empty">No ${_pbTab.toUpperCase()} candidates at this cut.
+    host.innerHTML = `<div class="empty">No ${_pbTab.toUpperCase()} rows at this cut.
       <label style="margin-left:8px;cursor:pointer"><input type="checkbox" id="pbShowAllInline"
       onchange="document.getElementById('pbShowAll').checked=true;renderPlaybook()"> show all</label></div>`;
     return;
   }
 
+  const holdCell = x=>{ const h=_pbHold(x.r); return h?`<span title="next-day hold for this γ position band — market fragility, not a stock edge" style="color:${
+      h.bucket==='High'?'var(--green)':(h.bucket==='Low'?'var(--red)':'var(--amber)')}">${h.p}%</span>`:'—'; };
   const cols = [
     {key:'symbol', label:'SYMBOL', fmt:(v,x)=>`<span style="cursor:pointer;color:var(--acc);font-weight:600"
         onclick="jumpHistory('${x.r.symbol}')" title="open history">${x.r.symbol}</span>`},
     {key:'verdict', label:_pbTab==='manage'?'URGENCY':'VERDICT',
-        fmt:(v,x)=>_pbBandPill(x.v.band, x.v.score)},
+        sortValue:(v,x)=>x.v.sortKey,
+        fmt:(v,x)=>_pbBandPill(x.v.band, _pbTab==='manage' ? x.v.score : null)},
     {key:'regime', label:'REGIME',
         fmt:(v,x)=> typeof regimePillWithDays==='function'
             ? regimePillWithDays(x.r.gex_regime, x.r) : (x.r.gex_regime||'—')},
-    {key:'flip', label:'FLIP DIST',
-        fmt:(v,x)=> x.r.flip_norm_distance!=null
-            ? (typeof sspan==='function'?sspan(x.r.flip_norm_distance,2):x.r.flip_norm_distance.toFixed(2)) : '—'},
-    {key:'defend', label:'HOLD%',
-        fmt:(v,x)=>{ const h=_pbHold(x.r); return h?`<span style="color:${
-            h.bucket==='High'?'var(--green)':(h.bucket==='Low'?'var(--red)':'var(--amber)')}">${h.p}%</span>`:'—'; }},
-    {key:_pbTab==='manage'?'fired':'gates',
-        label:_pbTab==='manage'?'TRIGGERS FIRED':'CHECKLIST',
-        fmt:(v,x)=> _pbTab==='manage'
-            ? (x.v.fired.length
-                ? x.v.fired.map(t=>`<span title="${t.act.replace(/"/g,'&quot;')}"
-                    style="font-family:var(--mono);font-size:9px;color:var(--red);
-                    border:1px solid var(--red);border-radius:3px;padding:0 3px;margin:0 2px 2px 0;
-                    display:inline-block">${t.label}</span>`).join('')
-                : '<span style="color:var(--muted);font-size:10px">— none —</span>')
-            : _pbGateStrip(x.v.gates)},
   ];
-
-  // manage tab: add the single most-urgent recommended action inline
-  if (_pbTab==='manage'){
-    cols.push({key:'action', label:'DO', fmt:(v,x)=>{
-      if(!x.v.fired.length) return '<span style="color:var(--muted)">hold</span>';
-      const top = x.v.fired.slice().sort((a,b)=>b.sev-a.sev)[0];
-      return `<span style="font-size:10px">${top.act}</span>`;
-    }});
+  if (_pbTab==='sell'){
+    cols.push(
+      {key:'span_rich', label:'IV/SPAN', help:'ATM IV ÷ NSE SPAN vol — the ranking. ≥0.85 RICH, <0.65 THIN',
+         sortValue:(v,x)=>_pbNum(x.r.span_rich)??-1, fmt:(v,x)=>_pbSpanCell(x.r),
+         exportValue:(v,x)=>_pbNum(x.r.span_rich)??''},
+      {key:'atm_iv', label:'ATM IV', sortValue:(v,x)=>_pbNum(x.r.atm_iv)??-1,
+         fmt:(v,x)=>_pbNum(x.r.atm_iv)!=null?x.r.atm_iv.toFixed(1):'—'},
+      {key:'iv_rank', label:'IV RANK', help:'information only — its edge came almost entirely from 2025-26',
+         sortValue:(v,x)=>_pbNum(x.r.iv_rank)??-1, fmt:(v,x)=>_pbNum(x.r.iv_rank)!=null?x.r.iv_rank.toFixed(0):'—'},
+      {key:'results', label:'RESULTS', fmt:(v,x)=>eventCell(x.r)},
+      {key:'defend', label:'HOLD%', help:'market fragility (γ position band), not a stock-specific edge', fmt:(v,x)=>holdCell(x)},
+      {key:'gates', label:'CHECKLIST', fmt:(v,x)=>_pbGateStrip(x.v.gates)},
+    );
+  } else if (_pbTab==='manage'){
+    cols.push(
+      {key:'defend', label:'HOLD%', fmt:(v,x)=>holdCell(x)},
+      {key:'span_rich', label:'IV/SPAN', fmt:(v,x)=>_pbSpanCell(x.r), sortValue:(v,x)=>_pbNum(x.r.span_rich)??-1},
+      {key:'fired', label:'TRIGGERS FIRED', fmt:(v,x)=> x.v.fired.length
+          ? x.v.fired.map(t=>`<span title="${t.act.replace(/"/g,'&quot;')}"
+              style="font-family:var(--mono);font-size:9px;color:var(--red);
+              border:1px solid var(--red);border-radius:3px;padding:0 3px;margin:0 2px 2px 0;
+              display:inline-block">${t.label}</span>`).join('')
+          : '<span style="color:var(--muted);font-size:10px">— none —</span>'},
+      {key:'action', label:'DO', fmt:(v,x)=>{
+          if(!x.v.fired.length) return '<span style="color:var(--muted)">hold</span>';
+          const top = x.v.fired.slice().sort((a,b)=>b.sev-a.sev)[0];
+          return `<span style="font-size:10px">${top.act}</span>`; }},
+    );
+  } else {
+    cols.push(
+      {key:'gpos', label:'γ POS', sortValue:(v,x)=>_pbNum(x.r.gamma_position)??9,
+         fmt:(v,x)=>_pbNum(x.r.gamma_position)!=null?x.r.gamma_position.toFixed(2):'—'},
+      {key:'ngf', label:'NEG γ FRAC', fmt:(v,x)=>_pbNum(x.r.neg_gamma_fraction)!=null?x.r.neg_gamma_fraction.toFixed(2):'—'},
+      {key:'thesis', label:'THESIS', fmt:(v,x)=>`<span style="font-size:10px;color:var(--muted)">${x.v.thesis}</span>`},
+    );
   }
-  if (_pbTab==='buy'){
-    cols.push({key:'thesis', label:'THESIS', fmt:(v,x)=>
-      `<span style="font-size:10px;color:var(--muted)">${x.v.thesis||'—'}</span>`});
-  }
 
-  // makeTbl expects row objects keyed by col.key; wrap so fmt sees {r,v}
   const wrapped = scored.map(x=>({ ...x, symbol:x.r.symbol }));
   host.innerHTML = (typeof makeTbl==='function')
-    ? makeTbl(wrapped, cols.map(c=>({...c, fmt:(v,row)=>c.fmt(v,row)})))
+    ? makeTbl(wrapped, cols.map(c=>({...c,
+        fmt:(v,row)=>c.fmt(v,row),
+        sortValue: c.sortValue ? (v,row)=>c.sortValue(v,row) : undefined,
+        exportValue: c.exportValue ? (v,row)=>c.exportValue(v,row) : undefined})))
     : '<div class="empty err">makeTbl missing</div>';
 }
 
@@ -5513,31 +5422,32 @@ async function initPlaybook(){
 }
 
 function _pbGuideHtml(){
-  return `<b style="color:var(--acc)">PLAYBOOK</b> — the §2/§3 checklists, scored.
-  Each row gets a <b>VERDICT</b> = band from a 0–100 weighted score, then
-  <b>capped</b> by hard gates (✕). The <b>CHECKLIST</b> strip shows every literal
-  gate: <span style="color:var(--green)">✓ pass</span>,
-  <span style="color:var(--red)">✕ hard-fail (caps the band)</span>,
-  <span style="color:var(--muted)">· soft-fail (only lowers score)</span>. Hover any chip for why.
+  return `<b style="color:var(--acc)">PLAYBOOK</b> — rebuilt 2026-10-26 from a backtest
+  (front month 2021-01 → 2026-10; short ATM straddle at the EOD close, exit at 50% of credit
+  or DTE−5, 146k trades; names compared against each other on the same day).
   <br><br>
-  <b>SELL</b> — new short-premium setup. Score weights the hold model (30: depth in dealer long
-  gamma, γ POS bands fitted 2021-26 — market fragility, not a stock-specific edge),
-  positive-gamma dominance (18), shelf diffuseness (14),
-  multi-day strength (12), regime persistence (4, deliberately small — no predictive signal).
-  Negative regime / release ⇒ AVOID.
+  <b>WEATHER</b> (banner) — whether to sell premium at all today. Two market-level inputs:
+  the universe-average γ-score (the old Playbook score — it measures market fragility, not which
+  stock is safer) and the universe median ATM IV ÷ HV20. Both low ⇒ <span style="color:var(--red)">STAND ASIDE</span>
+  (−7.1% of credit, 47 weeks); one low ⇒ CAUTION (+7–11%); neither ⇒ CLEAR (+12.6%).
   <br>
-  <b>MANAGE</b> — adjustment triggers for a position you already hold. Score = urgency.
-  Any hard trigger (release, regime→neg) ⇒ ACT-NOW. γ POS < 0.25 flags price near the
-  zero-gamma level. Read the DO column.
+  <b>SELL</b> — verdict from gates: <span style="color:var(--red)">AVOID</span> = negative regime;
+  <span style="color:var(--amber)">CAUTION</span> = any ✕ (not positive regime, low confidence, results before
+  expiry, OI reconciliation failed, premium THIN); otherwise <span style="color:var(--green)">PASS</span>.
+  Ranked by <b>IV/SPAN</b> = ATM IV ÷ NSE SPAN vol: top third beat bottom third by +8 pts of credit
+  (t 5.8), out of sample too. ≥ 0.85 RICH, &lt; 0.65 THIN. ◆ pin is a mild plus. IV RANK is shown
+  for information only. HOLD% is market fragility, not a stock edge.
   <br>
-  <b>BUY</b> — long-premium. Multi-day <b>compression</b> (coiled, IV cheap) is the headline
-  setup; depth in dealer short gamma (negative γ POS) scores as directional long-vol.
-  Already-released ⇒ capped.
+  <b>MANAGE</b> — triggers for a held position: results ahead, regime→neg, negative regime,
+  compression released ⇒ ACT-NOW; premium THIN ⇒ note.
+  <br>
+  <b>BUY</b> — no validated long-premium setup. Deep dealer-short-γ and compressing names are
+  listed for information only (deep short γ: +8% mean but −19% median, all from three months).
   <br><br>
-  <span style="color:var(--amber)">NOTE:</span> width (TRANS W) is deliberately <b>not</b> a
-  score axis — the rebuilt hold model dropped it as a grid-density confound. Fragility is read
-  via single-strike ◆ pin + concentration instead. An axis abstains (doesn't fail) when its
-  column is missing, so thin rows aren't unfairly punished — check CONF.`;
+  <span style="color:var(--amber)">CAVEATS:</span> SPAN history covers only ~70 wheel-universe names, so
+  the 0.65 / 0.85 cutoffs are provisional; costs/slippage excluded (affects levels, not the comparisons);
+  dropped as not validated: weighted stock score, lopsided γ, γ POS depth, concentration, wings, not-pin,
+  instability, richness_ref, NIFTY VRP z, RV next-day forecast.`;
 }
 
 // tab + control wiring

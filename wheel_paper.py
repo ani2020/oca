@@ -22,6 +22,13 @@ after --snap-after (15:30) for the day, so decisions are made on the 15:30-
 15:40 state -- the window the strategy is meant to trade in -- even though
 the job itself runs ~17:45. It refuses to trade if fewer than --min-coverage
 (90%) of the universe has a closing snapshot (pull still running / failed).
+Each book stores a snapshot rank (init --snap-rank N, default 0): N = each
+symbol's (N+1)-th latest snapshot, so 1 = the one before the closing pull, i.e.
+the last pre-close quotes that could actually have been traded. Counted per
+symbol because NSE response times vary. One run serves every book, loading the
+chain once per rank; run --snap-rank overrides all books. The live SPAN pull is
+skipped when the final file for the day is already stored, and every step
+prints its elapsed time.
 
 Validation the backtest cannot give
 -----------------------------------
@@ -60,6 +67,7 @@ import json
 import os
 import subprocess
 import sys
+import time as _clock
 from dataclasses import asdict
 from datetime import date, datetime, time, timedelta
 from pathlib import Path
@@ -115,6 +123,7 @@ def out_con(db: Path = wb.WHEEL_DB):
         con.execute(f"ALTER TABLE paper_daily ADD COLUMN IF NOT EXISTS {col} {typ}")
     for col in ("close_px", "slip_vs_close"):                                                   # 23 Oct: close basis
         con.execute(f"ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS {col} DOUBLE")
+    con.execute("ALTER TABLE paper_books ADD COLUMN IF NOT EXISTS snap_rank INTEGER")           # 28 Oct
     return con
 
 
@@ -174,19 +183,26 @@ def build_calendar(con, d: date, hol: set, ahead_days: int = 120) -> list:
 # live data
 # ---------------------------------------------------------------------------
 
-def load_chain(con, d: date, snap_after: time, max_stale_min: int = 30) -> tuple[pd.DataFrame, Optional[datetime]]:
-    """Latest closing snapshot per universe symbol for day d, both sides stacked long."""
+def load_chain(con, d: date, snap_after: time, max_stale_min: int = 30,
+               snap_rank: int = 0) -> tuple[pd.DataFrame, Optional[datetime]]:
+    """One chain snapshot per universe symbol for day d, both sides stacked long.
+
+    snap_rank 0 = each symbol's latest snapshot at/after snap_after (the ~15:40 closing
+    pull); N = its (N+1)-th latest, counted per symbol, so 1 = the one before the closing
+    pull (the last pre-close quotes) whatever time NSE answered."""
     lo = datetime.combine(d, snap_after)
     hi = datetime.combine(d, time(23, 59))
     df = con.execute("""
         WITH u AS (SELECT DISTINCT symbol FROM index_constituents),
-        last AS (SELECT symbol, max(timestamp) ts FROM ocdata
-                 WHERE timestamp BETWEEN ? AND ? AND symbol IN (SELECT symbol FROM u) GROUP BY 1)
+        s AS (SELECT DISTINCT symbol, timestamp ts FROM ocdata
+              WHERE timestamp BETWEEN ? AND ? AND symbol IN (SELECT symbol FROM u)),
+        last AS (SELECT symbol, ts FROM s
+                 QUALIFY row_number() OVER (PARTITION BY symbol ORDER BY ts DESC) = ? + 1)
         SELECT o.symbol, o.timestamp ts, o.expiry, o.strike_price strike, o.underlying_price und,
                o.lotsize lot, o.ce_ltp, o.ce_bid, o.ce_ask, o.ce_volume, o.ce_oi, o.ce_delta,
                o.pe_ltp, o.pe_bid, o.pe_ask, o.pe_volume, o.pe_oi, o.pe_delta
         FROM ocdata o JOIN last l ON o.symbol = l.symbol AND o.timestamp = l.ts
-    """, [lo, hi]).df()
+    """, [lo, hi, max(int(snap_rank), 0)]).df()
     if df.empty:
         return df, None
     parts = []
@@ -497,38 +513,82 @@ def run_book(oc, book: str, d: date, *, force: bool, ch: pd.DataFrame, snap: dat
 # commands
 # ---------------------------------------------------------------------------
 
+def _step(msg: str, t0: list) -> None:
+    """Progress line with elapsed seconds since the previous one (never a silent wait)."""
+    now = _clock.perf_counter()
+    print(f"  [{now - t0[0]:6.1f}s] {msg}", flush=True)
+    t0[0] = now
+
+
+def span_final_stored(d: date) -> bool:
+    """True when the final ('s') SPAN file for d is already stored: no live pull needed."""
+    try:
+        con = in_con()
+        try:
+            lf = sp.latest_file(con, d, prefix="bc.")
+        finally:
+            con.close()
+        return lf is not None and lf[0] == d and lf[1] == "s"
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def cmd_run(a) -> int:
     d = a.date or date.today()
+    t0 = [_clock.perf_counter()]
     hol = holidays()
     if d.weekday() >= 5 or d in hol:
         print(f"  {d} is not a trading day; nothing to do")
         return 0
     oc = out_con()
     try:
-        books = [a.book] if a.book else [r[0] for r in oc.execute("SELECT book FROM paper_books ORDER BY 1").fetchall()]
+        rows = oc.execute("SELECT book, coalesce(snap_rank, 0) FROM paper_books ORDER BY 1").fetchall()
+        ranks = {b: int(r) for b, r in rows}
+        books = [a.book] if a.book else list(ranks)
         if not books:
             print("  no paper books; create one with: wheel_paper.py init --book NAME ...")
             return 1
+        if a.snap_rank is not None:                       # CLI overrides every book's stored rank
+            ranks.update({b: int(a.snap_rank) for b in books})
+        _step("reconciling earlier fills", t0)
         n = reconcile(oc)
         if n:
             print(f"  reconciled {n} fill(s) against the bhavcopy close")
     finally:
         oc.close()
 
-    if not a.no_span:
+    if a.no_span:
+        pass
+    elif span_final_stored(d):
+        _step(f"final SPAN file for {d} already stored; skipping the live pull", t0)
+    else:
+        _step(f"pulling the latest intraday SPAN file for {d} (nse_span_eod live, up to 10 min)", t0)
         refresh_span(d)
+    by_rank: dict = {}
+    for b in books:
+        by_rank.setdefault(ranks.get(b, 0), []).append(b)
     ic = in_con()
     try:
-        ch, snap = load_chain(ic, d, a.snap_after)
-        if snap is None:
-            print(f"  no chain snapshot at/after {a.snap_after} on {d}; has the closing pull run? Not trading.")
+        chains = {}
+        for rk in sorted(by_rank):
+            snap_after = a.snap_after or (time(15, 30) if not rk else time(14, 30))
+            _step(f"loading chain snapshots, rank {rk} (at/after {snap_after:%H:%M}) for {', '.join(by_rank[rk])}", t0)
+            ch, snap = load_chain(ic, d, snap_after, snap_rank=rk)
+            if snap is None:
+                print(f"  no chain snapshot (rank {rk}) at/after {snap_after} on {d}; "
+                      f"has the closing pull run? Not trading {', '.join(by_rank[rk])}.")
+                continue
+            syms = set(ch["symbol"])
+            n_univ = ic.execute("SELECT count(DISTINCT symbol) FROM index_constituents").fetchone()[0]
+            if n_univ and len(syms) / n_univ < a.min_coverage:
+                print(f"  only {len(syms)}/{n_univ} universe symbols have a snapshot at rank {rk} "
+                      f"(< {a.min_coverage:.0%}); chain pull still running or failed. Not trading {', '.join(by_rank[rk])}.")
+                continue
+            chains[rk] = (ch, snap)
+        if not chains:
             return 2
-        syms = set(ch["symbol"])
-        n_univ = ic.execute("SELECT count(DISTINCT symbol) FROM index_constituents").fetchone()[0]
-        if n_univ and len(syms) / n_univ < a.min_coverage:
-            print(f"  only {len(syms)}/{n_univ} universe symbols have a closing snapshot "
-                  f"(< {a.min_coverage:.0%}); chain pull still running or failed. Not trading.")
-            return 3
+        syms = set().union(*(set(ch["symbol"]) for ch, _ in chains.values()))
+        _step("SPAN margins, previous closes, events, market series", t0)
         span, _, span_file = span_lookup(ic, d, syms)
         if span_file is None or not span_file.startswith(str(d)):
             print(f"  warn: margin from SPAN file {span_file} (none stored for {d} yet)")
@@ -537,18 +597,23 @@ def cmd_run(a) -> int:
         # VIX / NIFTY / betas / trend as of the latest stored close (today's index and cash
         # files land in the 19:30 batch, after this 17:45 run, so the brake uses yesterday)
         mkt = wb.load_market(ic, d - timedelta(days=30), d)
+        # CA blackout: contract-adjusting set as in the backtest; no knowability filter here --
+        # anything already in the DB has been announced (ca_known left empty)
         ctx = wb.Ctx(build_calendar(ic, d, hol), ev["results"], ev["ca"], dict(wb.SECTOR),
-                     ev["board"], ev["known"], ev["coverage"], mkt)
+                     ev["board"], ev["known"], ev["coverage"], mkt, ca_adj=ev.get("ca_adj"))
     finally:
         ic.close()
 
     oc = out_con()
     try:
-        for b in books:
-            run_book(oc, b, d, force=a.force, ch=ch, snap=snap, span=span, span_file=span_file,
-                     pclose=pclose, ctx=ctx)
+        for rk, (ch, snap) in chains.items():
+            for b in by_rank[rk]:
+                _step(f"running book {b} on snapshot rank {rk}", t0)
+                run_book(oc, b, d, force=a.force, ch=ch, snap=snap, span=span, span_file=span_file,
+                         pclose=pclose, ctx=ctx)
     finally:
         oc.close()
+    _step("done", t0)
     return 0
 
 
@@ -556,14 +621,18 @@ def cmd_init(a) -> int:
     p = wb.params_from_args(a)
     oc = out_con()
     try:
-        if oc.execute("SELECT 1 FROM paper_books WHERE book = ?", [a.book]).fetchone() and not a.replace:
+        old = oc.execute("SELECT coalesce(snap_rank, 0) FROM paper_books WHERE book = ?", [a.book]).fetchone()
+        if old and not a.replace:
             print(f"  book {a.book!r} exists; --replace to overwrite its params (positions/history are kept)")
             return 1
+        if a.snap_rank is None and old:
+            a.snap_rank = old[0]                          # --replace without --snap-rank keeps the book's rank
         oc.execute("DELETE FROM paper_books WHERE book = ?", [a.book])
-        oc.execute("INSERT INTO paper_books VALUES (?, ?, now(), ?)", [a.book, wb.params_to_json(p), a.note or ""])
+        oc.execute("INSERT INTO paper_books (book, params, created, note, snap_rank) VALUES (?, ?, now(), ?, ?)",
+                   [a.book, wb.params_to_json(p), a.note or "", int(a.snap_rank or 0)])
     finally:
         oc.close()
-    print(f"  book {a.book!r} saved:")
+    print(f"  book {a.book!r} saved (snapshot rank {int(a.snap_rank or 0)}):")
     for k, v in asdict(p).items():
         if v != getattr(wb.Params(), k):
             print(f"    {k} = {v}")
@@ -619,10 +688,11 @@ def cmd_reconcile(a) -> int:
 def cmd_books(a) -> int:
     oc = out_con()
     try:
-        for book, params, created, note in oc.execute("SELECT * FROM paper_books ORDER BY 1").fetchall():
+        for book, params, created, note, rk in oc.execute(
+                "SELECT book, params, created, note, coalesce(snap_rank, 0) FROM paper_books ORDER BY 1").fetchall():
             p = wb.params_from_json(params)
             diff = {k: v for k, v in asdict(p).items() if v != getattr(wb.Params(), k)}
-            print(f"  {book}  (created {created:%Y-%m-%d})  {note or ''}\n    {diff}")
+            print(f"  {book}  (created {created:%Y-%m-%d}, snapshot rank {rk})  {note or ''}\n    {diff}")
     finally:
         oc.close()
     return 0
@@ -633,8 +703,12 @@ def main(argv=None) -> int:
     ap.add_argument("mode", choices=["init", "run", "status", "reconcile", "books"])
     ap.add_argument("--book")
     ap.add_argument("--date", type=lambda s: datetime.strptime(s, "%Y-%m-%d").date())
-    ap.add_argument("--snap-after", type=lambda s: datetime.strptime(s, "%H:%M").time(), default=time(15, 30),
-                    help="use the latest chain snapshot at/after this time (default 15:30)")
+    ap.add_argument("--snap-after", type=lambda s: datetime.strptime(s, "%H:%M").time(), default=None,
+                    help="only consider chain snapshots at/after this time (default 15:30; 14:30 with --snap-rank)")
+    ap.add_argument("--snap-rank", type=int, default=None,
+                    help="init: the book's snapshot rank (stored; default 0). run: override every book's rank. "
+                         "0 = each symbol's latest snapshot (closing pull, ~15:40); 1 = the one before it "
+                         "(last pre-close quotes); 2 = two before; counted per symbol, not by clock time")
     ap.add_argument("--no-span", action="store_true", help="skip pulling the latest intraday SPAN file")
     ap.add_argument("--min-coverage", type=float, default=0.90,
                     help="refuse to trade if fewer than this share of the universe has a closing snapshot")

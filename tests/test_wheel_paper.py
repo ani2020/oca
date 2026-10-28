@@ -159,6 +159,38 @@ checks2 = {
         len(cd) == 1 and abs(cd.iloc[0]["rom"] - 0.95 * 100 / (6 * 100 + 0.035 * 100 * 100)) < 1e-12,
 }
 checks.update(checks2)
+
+# ---- per-book snapshot rank: a 'pre' book stored with rank 1 trades the 14:00 snapshot in the same run
+assert wp.main(['init', '--book', 'pre', '--snap-rank', '1', '--entry-mode', 'all', '--stop-mult', '3', '--dte-lo', '21',
+                '--rom', '0.015', '--delta-cap', '0.20', '--max-new', '4']) == 0
+assert wp.main(['run', '--date', D1.isoformat(), '--no-span', '--snap-after', '13:00']) == 0
+_c = duckdb.connect(os.environ['WHEEL_DB'])
+checks.update({
+    "book stored with snapshot rank 1": _c.execute("SELECT snap_rank FROM paper_books WHERE book='pre'").fetchone()[0] == 1,
+    "rank-1 book filled on the earlier (14:00) snapshot, same run as rank-0 books":
+        _c.execute("SELECT hour(snapshot_ts) FROM paper_fills WHERE book='pre' AND action='S' LIMIT 1").fetchone()[0] == 14,
+    "rank-0 books untouched by the D1 re-run": _c.execute("SELECT count(*) FROM paper_daily WHERE book='main'").fetchone()[0] == 3,
+})
+_c.close()
+assert wp.main(['init', '--book', 'pre', '--replace', '--entry-mode', 'all']) == 0
+_c = duckdb.connect(os.environ['WHEEL_DB'])
+checks["--replace without --snap-rank keeps the book's rank"] = \
+    _c.execute("SELECT snap_rank FROM paper_books WHERE book='pre'").fetchone()[0] == 1
+_c.close()
+
+# ---- snapshot choice by rank per symbol (--snap-rank)
+from datetime import time as _t  # noqa: E402
+_c = duckdb.connect(os.environ['OC_DB'], read_only=True)
+c0, s0 = wp.load_chain(_c, D1, _t(15, 30))
+c1, s1 = wp.load_chain(_c, D1, _t(13, 0), snap_rank=1)
+c2, s2 = wp.load_chain(_c, D1, _t(13, 0), snap_rank=2)
+_c.close()
+px = lambda ch: float(ch[(ch.symbol == "AAA") & (ch.opt_type == "PE") & (ch.strike == 80)]["ltp"].iloc[0])
+checks.update({
+    "snap rank 0: latest (15:40) snapshot": s0.hour == 15 and px(c0) == 0.6,
+    "snap rank 1: the snapshot before it, per symbol (14:00)": s1.hour == 14 and px(c1) == 9.9,
+    "snap rank past the last snapshot: nothing": s2 is None,
+})
 fails = [k for k, v in checks.items() if not v]
 for k, v in checks.items():
     print(("  PASS  " if v else "  FAIL  ") + k)

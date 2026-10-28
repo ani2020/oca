@@ -189,14 +189,17 @@ def load_day(con, d: date, symbols: list | None):
 def hv20_map(con, d: date) -> dict:
     """Trailing 20-trading-day close-to-close vol, annualised on 243.
 
-    CA-adjusted via close/prevclose. Point-in-time -- only data up to `d`.
+    CA-adjusted: reads bhav.cash_returns_adj (built by nse_ca). The previous
+    version used ln(close/prevclose) from cash_eod, whose PREVCLOSE is NOT
+    corporate-action adjusted, so every split/bonus leaked a ln(1/n) return into
+    20 days of hv20 (fixed 2026-10-26). Point-in-time -- only data up to `d`.
     """
     df = con.execute("""
         WITH r AS (
-            SELECT symbol, ln(close / prevclose) AS lr,
+            SELECT symbol, log_ret AS lr,
                    row_number() OVER (PARTITION BY symbol ORDER BY trade_date DESC) rn
-            FROM bhav.cash_eod
-            WHERE series = 'EQ' AND trade_date <= ? AND close > 0 AND prevclose > 0
+            FROM bhav.cash_returns_adj
+            WHERE trade_date <= ? AND log_ret IS NOT NULL
         )
         SELECT symbol, stddev_samp(lr) * sqrt(243) * 100 AS hv20
         FROM r WHERE rn <= 20 GROUP BY symbol HAVING count(*) >= 15

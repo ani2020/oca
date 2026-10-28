@@ -1358,12 +1358,12 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     </div>
     <label class="chk-label" style="margin-left:6px">
       <input type="checkbox" id="pbShowAll"> SHOW ALL
-      <span style="color:var(--muted);font-size:9px">(incl. weak/hold)</span>
+      <span style="color:var(--muted);font-size:9px">(incl. caution/avoid/hold)</span>
     </label>
     <input type="text" id="pbSearch" placeholder="filter ticker…" style="width:120px"
            oninput="filterTableBySymbol('pbTable',this.value)">
     <button class="btn" id="btnPbLoad">LOAD</button>
-    <button class="btn sec" style="font-size:9px" id="btnPbGuide" title="How the score works">ⓘ GUIDE</button>
+    <button class="btn sec" style="font-size:9px" id="btnPbGuide" title="How the verdicts work">ⓘ GUIDE</button>
     <button class="btn sec" style="font-size:9px" id="btnPbCsv" title="Download current tab as CSV">⬇ CSV</button>
   </div>
 
@@ -1371,10 +1371,13 @@ td:first-child{text-align:left;color:var(--acc);font-weight:500}
     background:var(--card);border:1px solid var(--border);font-family:var(--mono);
     font-size:10px;color:var(--muted);line-height:1.7"></div>
 
+  <div id="pbWeather" style="display:none;margin-bottom:8px;padding:8px 14px;border-radius:4px;
+    background:var(--card);border:1px solid var(--border);font-family:var(--mono);font-size:10px;color:var(--muted)"></div>
+
   <div class="card">
     <div class="card-title">PLAYBOOK
       <span class="badge" id="pbDateBadge"></span>
-      <span class="badge" style="margin-left:4px">VERDICT = band(score), capped by ✕ hard gates · click symbol → HISTORY</span>
+      <span class="badge" style="margin-left:4px">VERDICT from gates (✕ = caution) · SELL ranked by IV/SPAN · click symbol → HISTORY</span>
     </div>
     <div class="tw" id="pbTable"><div class="empty">Pick a date and click LOAD</div></div>
   </div>

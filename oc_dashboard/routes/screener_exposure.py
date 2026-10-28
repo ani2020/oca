@@ -28,6 +28,78 @@ def _exposure_table_exists() -> bool:
         return False
 
 
+# ── Playbook inputs (2026-10-26) ─────────────────────────────────────────────
+# Backtested 2020-26 on short ATM straddles (exit 50% of credit or DTE-5); see
+# the Playbook guide in app.js. Thresholds are provisional until a few months of
+# full-universe live SPAN data exist (history only covers ~70 wheel-universe names).
+#
+#   span_rich = ATM IV / NSE SPAN vol for the row's expiry. Same-day ranking among
+#     passing names: top third beat bottom third by +8.0 pts of credit (t 5.8),
+#     +8.4 out of sample 2024-26 (t 3.6); not explained by IV level or IV/HV20.
+#     < 0.65 -> -5 pts vs same day (THIN); >= 0.85 -> +3.5..4 pts (RICH).
+#   weather: market-level, NOT per stock.
+#     univ_score = mean legacy Playbook SELL score over single stocks. Bottom
+#       tercile weeks (< 63) earned ~0.7% of credit vs ~12% otherwise.
+#     univ_ivhv  = median ATM IV / HV20 (CA-adjusted) over single stocks.
+#       < 1.07 earned ~2.1% vs ~11%. Both low together: -7.1% (47 weeks).
+PB_SPAN_THIN, PB_SPAN_RICH = 0.65, 0.85
+PB_W_SCORE_LOW, PB_W_IVHV_LOW = 63.0, 1.07
+
+
+def _legacy_sell_score(r) -> Optional[float]:
+    """The pre-2026-10-26 Playbook SELL score -- kept ONLY as a market-level input."""
+    import math
+    def ok(v):
+        return v is not None and not (isinstance(v, float) and math.isnan(v))
+    g, lop, conc, days = (r.get("gamma_position"), r.get("net_gex_norm"),
+                          r.get("concentration"), r.get("days_in_regime"))
+    if not all(ok(v) for v in (g, lop, conc, days)):
+        return None
+    p = 69 if g <= -0.25 else 71 if g <= 0 else 72 if g <= 0.4 else 74 if g <= 0.7 else 76
+    clip = lambda x: max(0.0, min(1.0, x))
+    return 100 * (30 * clip((p - 69) / 7) + 18 * clip(lop) + 14 * (1 - clip((conc - 0.2) / 0.3))
+                  + 4 * clip(days / 8)) / 66
+
+
+def _attach_playbook_inputs(df, d):
+    """Adds span_vol / span_rich per row; returns (df, weather dict)."""
+    import numpy as np
+    from .. import margin as _margin
+    sd = None
+    try:
+        sd = _margin.span_data(as_of=d)
+    except Exception:
+        sd = None
+    vol = getattr(sd, "vol", {}) if sd is not None else {}
+    def _sv(r):
+        e = r["expiry"]
+        if e is None or e != e:
+            return None
+        import pandas as pd
+        return vol.get((str(r["symbol"]).upper(), pd.Timestamp(e).date()))
+    df = df.copy()
+    df["span_vol"] = df.apply(_sv, axis=1).astype(float) if len(df) else []
+    df["span_rich"] = (df["atm_iv"] / 100.0) / df["span_vol"]
+    df.loc[~np.isfinite(df["span_rich"]), "span_rich"] = np.nan
+
+    stocks = df[~df["symbol"].isin(config.NSE_INDICES)]
+    sc = [x for x in (_legacy_sell_score(r) for r in stocks.to_dict("records")) if x is not None]
+    ivhv = (stocks["atm_iv"] / stocks["hv20"]).replace([np.inf, -np.inf], np.nan).dropna()
+    us = float(np.mean(sc)) if sc else None
+    ui = float(ivhv.median()) if len(ivhv) else None
+    key = getattr(sd, "key", None) if sd is not None else None
+    weather = {
+        "univ_score": us, "univ_score_low": (us is not None and us < PB_W_SCORE_LOW),
+        "univ_ivhv": ui, "univ_ivhv_low": (ui is not None and ui < PB_W_IVHV_LOW),
+        "n_stocks": int(len(stocks)),
+        "thresholds": {"score": PB_W_SCORE_LOW, "ivhv": PB_W_IVHV_LOW,
+                       "span_thin": PB_SPAN_THIN, "span_rich": PB_SPAN_RICH},
+        "span_file": [str(key[0]), key[1]] if key else None,
+        "span_coverage": int(df["span_vol"].notna().sum()),
+    }
+    return df, weather
+
+
 @router.get("/api/exposure_screener/dates")
 def exposure_screener_dates():
     """Available EOD dates in exposure_eod (most recent first)."""
@@ -107,6 +179,10 @@ def exposure_screener(
 
     if df.empty:
         return safe_response({"date": d, "view": view, "rows": [], "counts": {}})
+
+    # Playbook inputs: SPAN richness per row + market weather over the full universe
+    # (computed before any confidence/view filtering so weather is universe-wide).
+    df, weather = _attach_playbook_inputs(df, d)
 
     # Confidence filter
     df = df[df["confidence"].map(lambda c: conf_rank.get(c, 0) >= min_rank)]
@@ -206,5 +282,6 @@ def exposure_screener(
         "rows":   to_records(df),
         "counts": counts,
         "indicator_counts": indicator_counts,
+        "weather": weather,
         "total":  int(len(df)),
     })

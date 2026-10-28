@@ -172,11 +172,17 @@ class _SpanData:
     scan : {(symbol, instr, expiry, strike): short_scan} -- always available,
            enough for an exact single-leg short margin on any stored day.
     und  : {symbol: underlying price} for the ELM leg.
+    vol  : {(symbol, expiry): SPAN vol (fraction)} -- NSE's one risk vol per
+           underlying x expiry (identical across strikes and CE/PE). Used by the
+           Playbook's ATM IV / SPAN vol richness flag (added 2026-10-26).
+    key  : (trade_date, tag) of the stored file.
     """
-    __slots__ = ("book", "scan", "und")
+    __slots__ = ("book", "scan", "und", "vol", "key")
 
-    def __init__(self, book, scan, und):
+    def __init__(self, book, scan, und, vol=None, key=None):
         self.book, self.scan, self.und = book, scan, und
+        self.vol = vol or {}
+        self.key = key
 
 
 def _span_con():
@@ -190,6 +196,10 @@ def _load_file(con, key) -> "_SpanData":
     if book is not None:
         scan = {k: c.short_scan for k, c in book._con.items() if k[1] in ("CE", "PE")}
         und = {s: u.price for s, u in book._und.items()}
+        vol = {}
+        for k, c in book._con.items():
+            if k[1] in ("CE", "PE") and c.vol == c.vol and c.vol > 0:
+                vol.setdefault((k[0], k[2]), c.vol)
     else:
         scan = {}
         for s, ins, exp, k, sc in con.execute(
@@ -198,7 +208,11 @@ def _load_file(con, key) -> "_SpanData":
             scan[_sp.contract_key(s, ins, _as_date(exp), k)] = sc
         und = dict(con.execute("SELECT symbol, price FROM span_und WHERE trade_date = ? AND tag = ?",
                                [fd, tag]).fetchall())
-    return _SpanData(book, scan, und)
+        vol = {(s, _as_date(exp)): v for s, exp, v in con.execute(
+                "SELECT symbol, expiry, median(vol) FROM span_contract "
+                "WHERE trade_date = ? AND tag = ? AND instr IN ('CE', 'PE') AND vol > 0 "
+                "GROUP BY 1, 2", [fd, tag]).fetchall()}
+    return _SpanData(book, scan, und, vol, key)
 
 
 def span_data(as_of=None) -> Optional["_SpanData"]:

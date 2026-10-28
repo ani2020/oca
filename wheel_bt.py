@@ -25,13 +25,14 @@ Two SQL passes, then a pure-python day loop:
      (an exchange price for every contract every day, traded or not), with
      the bhavcopy close/volume joined where it traded.
 
-Prices: NSE's official SETTLE price everywhere (= the SPAN file price;
-last-30-minute VWAP when traded, theoretical otherwise), never bhavcopy
-`close`. `close` is the last trade, and on thin strikes it is routinely
-off-market: RELIANCE Feb-25 1060 PE printed 1.95 on a 1-contract trade
-against a settle of 0.40. Using it inflated entry ROM and fired spurious
-stops. Settle also matches the spec's entry window (last 30 minutes).
-Entry additionally needs min_entry_volume contracts traded that day.
+Prices (price_basis='close', since 22 Oct 2026): fills use the bhavcopy CLOSE
+(ClsPric: traded, last-30-minute VWAP, always inside the day's range); exits on
+untraded days use the SPAN price plus untraded_slip. The earlier SETTLE basis
+equals the SPAN theoretical price when a contract did not trade late -- 11% of
+the strategy's entries, ~2x the day high -- and ROM / ranking picked exactly
+those; runs on it carry the 'settle_fills' flag. Entry needs min_entry_volume
+contracts traded that day. Spec and results log: the "Wheel / Premium-Selling
+Backtest Spec" doc (tabs: Spec (26 Oct), Results log, Seasonality and IV events).
 
 Events (results blackout): by default EVERY board meeting except AGM/EGM is
 treated as a results-type event (event_scope='board'), because NSE labels
@@ -200,6 +201,14 @@ class Params:
     earn_entry_days: int = 5            # no entry if results within N trading days
     event_scope: str = "board"          # 'board' (all board meetings bar AGM/EGM) | 'results'
     pit_events: bool = True             # only events already announced on the day
+    # corporate-action blackout (28 Oct fix). 'adjusting' = only events NSE adjusts F&O contracts
+    # for: split, bonus, rights, demerger, and dividends >= 5% (to 28-Jun-2022) / 2% (from
+    # 29-Jun-2022) of the share price. 'all' = the pre-28-Oct set (every ex-date: ordinary
+    # dividends, AGM / interest record dates ...). pit_ca: an ex-date counts only from the
+    # session after the board meeting that announced it (latest meeting <= 120 days before);
+    # without a matched meeting, from 7 calendar days before the ex-date.
+    ca_scope: str = "adjusting"
+    pit_ca: bool = True
     require_event_coverage: bool = True # no entry before a symbol's event history starts
     # exits (first to fire wins, checked in this order)
     earn_exit_lead: int = 1             # close N trading days before results date
@@ -273,6 +282,33 @@ class Params:
     brake_vix_jump: Optional[float] = None    # ... or VIX more than this above its 5-session low
     brake_nifty_dd: Optional[float] = None    # ... or NIFTY more than this below its 10-session high
     brake_sides: tuple = ("PE",)
+    # put regime gate (item 6, 26 Oct): no new puts while NIFTY is below its put_block_dma-day
+    # average AND India VIX is below put_block_vix (None = any VIX) -- the early part of a fall,
+    # before IV pays for it. Candidate study: puts there -0.14% (IS) / -1.31% (OOS) P&L/margin,
+    # stops 14% / 23%, vs +1.30% / +0.72% in uptrends; after deep falls (VIX>=25) puts are best.
+    put_block_dma: Optional[int] = None      # 50 or 200
+    put_block_vix: Optional[float] = None
+    # IV / HV gate (item 10): enter only if ATM IV (nearest-strike traded call + put, same
+    # expiry, traded close) / HV20 (20-session close-to-close, CA-adjusted) <= max_iv_hv.
+    # Candidate study: IV/HV <= 0.8 earned ~1.1% (IS) / 0.65% (OOS) P&L/margin vs ~0.45 / 0.15
+    # above it. No ATM IV or HV -> skipped (fail closed).
+    max_iv_hv: Optional[float] = None
+    # strike choice (item 11) among strikes passing rom_target / delta_cap / DTE / liquidity:
+    # 'delta' = lowest |delta| (furthest OTM; the default), 'rich' = highest premium / model
+    # price at SPAN vol, 'rom' = highest premium / margin. Backtest only for now.
+    pick_by: str = "delta"
+    # richness refinements (27 Oct). Price ratio explodes in the far wings (below ~0.05 delta
+    # 93% of candidates read rich, uninformative); the vol ratio does not.
+    rich_measure: str = "price"         # gate/pick on 'price' = premium / model price at SPAN vol,
+                                        # or 'vol' = strike IV (from the premium) / SPAN vol
+    min_delta: Optional[float] = None   # qualifying strikes need |delta| >= this (delta band floor)
+    rich_confirm_days: int = 0          # gate must also have passed on the previous N sessions
+                                        # (same symbol / side, that day's pick); backtest only
+    # notional caps (27 Oct): margin sizing leaves the underlying exposure free -- open notional
+    # ran 6x cash (median), single stocks up to 6.5x, puts 1.4-3.2x. Notional = qty x strike,
+    # i.e. what physical delivery would cost if a position could not be closed.
+    max_symbol_notional: Optional[float] = None   # per stock, both sides: <= this x cash equity
+    max_put_notional: Optional[float] = None      # all open puts: <= this x (cash equity + collateral)
     dd_halve_at: Optional[float] = None # pct sizing halves while drawdown from peak > this x cash
     # index put hedge (backtest only): long NIFTY put sized to the beta-weighted
     # short-put notional, rolled before expiry
@@ -317,7 +353,8 @@ def params_from_json(text: str) -> Params:
 def data_key(p: Params) -> tuple:
     """Fields that change the SQL pull; everything else is replayed on one load."""
     return (p.start, p.end, p.dte_lo, p.dte_hi, p.rom_target, p.delta_cap, p.elm, p.broker_mult,
-            p.min_entry_volume, p.min_entry_oi, p.hedge, p.hedge_dte_lo, p.hedge_dte_hi, p.universe, p.price_basis)
+            p.min_entry_volume, p.min_entry_oi, p.hedge, p.hedge_dte_lo, p.hedge_dte_hi, p.universe, p.price_basis,
+            p.pick_by, p.min_delta)
 
 
 def half_spread(p: Params, volume: float) -> float:
@@ -505,6 +542,8 @@ class Data:
     coverage: dict = field(default_factory=dict)  # canon symbol -> first results date on record
     market: dict = field(default_factory=dict)    # see load_market()
     hedge: dict = field(default_factory=dict)     # see load_hedge_chain()
+    ca_adj: Optional[dict] = None                 # canon symbol -> contract-adjusting CA ex-dates
+    ca_known: dict = field(default_factory=dict)  # (canon, ex_date) -> first date it was knowable
 
 
 def _alias_sql() -> str:
@@ -522,6 +561,89 @@ PICK_SQL = """pk AS (SELECT trade_date, symbol, opt_type, raw, expiry, strike, c
                    QUALIFY row_number() OVER (PARTITION BY trade_date, symbol, opt_type
                        ORDER BY abs(delta), CASE WHEN opt_type = 'PE' THEN strike ELSE -strike END,
                                 expiry, raw) = 1)"""
+
+
+# every qualifying strike (pick_by != 'delta'; pick_strikes chooses in python)
+ALL_SQL = """pk AS (SELECT trade_date, symbol, opt_type, raw, expiry, strike, close AS premium, lot, margin, rom,
+                          abs(delta) AS delta, und, oi, volume, svol
+                   FROM r WHERE rom >= ?)"""
+
+
+def implied_vol_r(side: str, price: float, s: float, k: float, t: float, r: float) -> float:
+    """Implied vol with a rate (same model as richness()); NaN when not solvable."""
+    if not (price == price and price > 0 and s > 0 and k > 0 and t > 0):
+        return NAN
+    if price <= bs_price_r(side, s, k, t, 0.005, r) + 1e-9:
+        return NAN
+    lo, hi = 0.005, 5.0
+    if bs_price_r(side, s, k, t, hi, r) < price:
+        return NAN
+    for _ in range(40):
+        mid = 0.5 * (lo + hi)
+        if bs_price_r(side, s, k, t, mid, r) < price:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def vol_ratio(side: str, premium: float, s: float, k: float, t: float, span_vol: float, r: float = 0.065) -> float:
+    """Strike IV backed out of the premium / SPAN vol. NaN without a usable SPAN vol or IV."""
+    if not (span_vol == span_vol and IV_BOUNDS[0] <= span_vol <= IV_BOUNDS[1]):
+        return NAN
+    iv = implied_vol_r(side, premium, s, k, t, r)
+    return iv / span_vol if iv == iv else NAN
+
+
+def vol_ratio_col(rows: pd.DataFrame, r: float) -> list:
+    return [vol_ratio(s_, float(pr), float(u), float(k), max((_d(e) - _d(d)).days, 1) / 365.0, float(v), r)
+            for s_, pr, u, k, e, d, v in zip(rows["opt_type"], rows["premium"], rows["und"], rows["strike"],
+                                               rows["expiry"], rows["trade_date"], rows["svol"])]
+
+
+def price_ratio_col(rows: pd.DataFrame, r: float) -> list:
+    return [richness(s_, float(pr), float(u), float(k), max((_d(e) - _d(d)).days, 1) / 365.0, float(v), r)
+            for s_, pr, u, k, e, d, v in zip(rows["opt_type"], rows["premium"], rows["und"], rows["strike"],
+                                               rows["expiry"], rows["trade_date"], rows["svol"])]
+
+
+def add_rich_history(cands: pd.DataFrame, cal: list, p: "Params", n: int = 2) -> pd.DataFrame:
+    """rich_px / rich_vol per candidate, plus the same symbol-side's values on each of the
+    previous n sessions (NaN when it had no candidate that session) for rich_confirm_days."""
+    if not len(cands):
+        return cands
+    cands = cands.copy()
+    cands["rich_px"] = price_ratio_col(cands, p.rich_rate)
+    cands["rich_vol"] = vol_ratio_col(cands, p.rich_rate)
+    idx = {dd: i for i, dd in enumerate(cal)}
+    cands["_ti"] = [idx.get(_d(x), -10**6) for x in cands["trade_date"]]
+    base = cands[["symbol", "opt_type", "_ti", "rich_px", "rich_vol"]]
+    for k in range(1, n + 1):
+        prev = base.assign(_ti=base["_ti"] + k).rename(columns={"rich_px": f"rich_px_p{k}", "rich_vol": f"rich_vol_p{k}"})
+        cands = cands.merge(prev, on=["symbol", "opt_type", "_ti"], how="left")
+    return cands.drop(columns=["_ti"])
+
+
+def pick_strikes(rows: pd.DataFrame, p: "Params") -> pd.DataFrame:
+    """One strike per (day, symbol, side): highest 'rich' or 'rom'; NaN scores rank last.
+    Ties as PICK_SQL: lowest |delta|, furthest OTM, nearest expiry, raw."""
+    if not len(rows):
+        return rows
+    if p.pick_by == "rich":
+        score = [richness(s_, float(pr), float(u), float(k), max((e - d).days, 1) / 365.0, float(v), p.rich_rate)
+                 for s_, pr, u, k, e, d, v in zip(rows["opt_type"], rows["premium"], rows["und"], rows["strike"],
+                                                    rows["expiry"], rows["trade_date"], rows["svol"])]
+    elif p.pick_by == "volrich":
+        score = vol_ratio_col(rows, p.rich_rate)
+    elif p.pick_by == "rom":
+        score = rows["rom"].astype(float).tolist()
+    else:
+        raise ValueError(f"pick_by {p.pick_by!r}")
+    x = rows.assign(_s=pd.Series(score, index=rows.index).fillna(-1e18),
+                    _otm=[k if s_ == "PE" else -k for s_, k in zip(rows["opt_type"], rows["strike"].astype(float))])
+    x = x.sort_values(["trade_date", "symbol", "opt_type", "_s", "delta", "_otm", "expiry", "raw"],
+                      ascending=[True, True, True, False, True, True, True, True], kind="mergesort")
+    return x.drop_duplicates(["trade_date", "symbol", "opt_type"]).drop(columns=["_s", "_otm"]).reset_index(drop=True)
 
 
 BEST_TAG = """
@@ -584,10 +706,44 @@ def load_events_full(con, start: date, end: date) -> dict:
             UNION SELECT symbol, trade_date FROM bc.cash_returns_adj
             WHERE is_ca AND trade_date BETWEEN ? AND ?""", [start, end, start, end]).fetchall():
         ca.setdefault(RENAMES.get(sym, sym), []).append(_d(d))
-    for dct in (results, board, ca):
+    # contract-adjusting subset + knowability (28 Oct). Board meetings come from corporate_events
+    # (any purpose); the dividend threshold uses the SPAN underlying price on/before the meeting.
+    ca_adj: dict = {}
+    ca_known: dict = {}
+    try:
+        rows = con.execute(f"""
+            WITH ev AS (SELECT symbol, ex_date, upper(coalesce(ca_type, '')) AS t, div_amount
+                        FROM bc.corporate_actions WHERE ex_date BETWEEN ? AND ?
+                        UNION ALL
+                        SELECT symbol, trade_date, upper(coalesce(ca_type, 'OTHER')), NULL
+                        FROM bc.cash_returns_adj WHERE is_ca AND trade_date BETWEEN ? AND ?),
+            m AS (SELECT DISTINCT symbol, event_date FROM bc.corporate_events),
+            j AS (SELECT ev.*, (SELECT max(m.event_date) FROM m WHERE m.symbol = ev.symbol
+                                AND m.event_date <= ev.ex_date AND m.event_date >= ev.ex_date - 120) AS meet
+                  FROM ev),
+            u AS (SELECT symbol, trade_date, avg(price) AS px FROM bc.span_und WHERE price > 0 GROUP BY 1, 2)
+            SELECT j.symbol, j.ex_date, j.t, j.div_amount, j.meet,
+                   CASE WHEN coalesce(j.meet, j.ex_date - 7) - u.trade_date <= 30 THEN u.px END
+            FROM j ASOF LEFT JOIN u ON u.symbol = j.symbol AND coalesce(j.meet, j.ex_date - 7) >= u.trade_date
+        """, [start, end, start, end]).fetchall()
+    except Exception as exc:  # noqa: BLE001  (old DBs without the tables: keep the legacy behaviour)
+        print(f"  note: CA knowability not loaded ({exc}); using every ex-date as always known")
+        rows = []
+    for sym, ex, t, amt, meet, px in rows:
+        c, ex = RENAMES.get(sym, sym), _d(ex)
+        kn = (_d(meet) + timedelta(days=1)) if meet is not None else ex - timedelta(days=7)
+        ca_known[(c, ex)] = min(ca_known.get((c, ex), kn), kn)
+        adjusting = any(x in t for x in ("SPLIT", "BONUS", "RIGHTS", "DEMERGER"))
+        if not adjusting and "DIVIDEND" in t and amt is not None:
+            thr = 0.05 if ex < date(2022, 6, 29) else 0.02
+            adjusting = not (px and px > 0) or float(amt) / float(px) >= thr     # no recent price: assume adjusting
+        if adjusting:
+            ca_adj.setdefault(c, []).append(ex)
+    for dct in (results, board, ca, ca_adj):
         for k in dct:
             dct[k] = sorted(set(dct[k]))
-    return dict(results=results, board=board, known=known, coverage=coverage, ca=ca)
+    return dict(results=results, board=board, known=known, coverage=coverage, ca=ca,
+                ca_adj=ca_adj if rows else None, ca_known=ca_known)
 
 
 def _has_table(con, catalog: str, table: str) -> bool:
@@ -652,7 +808,7 @@ def load_market(con, start: date, end: date) -> dict:
     asof() so a caller running before that day's data is loaded (the paper
     trader at 17:45) gets the latest earlier value. Missing tables -> {}.
     """
-    out: dict = {"daily": {}, "beta": {}, "trend": {}}
+    out: dict = {"daily": {}, "beta": {}, "trend": {}, "hv20": {}}
     if not _has_table(con, "bc", "index_eod"):
         return out
     lo = start - timedelta(days=420)
@@ -667,10 +823,16 @@ def load_market(con, start: date, end: date) -> dict:
         lo5 = min(vix[x] for x in vd[max(0, i - 4):i + 1])
         out["daily"].setdefault(d, {})["vix"] = vix[d]
         out["daily"][d]["vix_jump"] = vix[d] / lo5 - 1 if lo5 > 0 else 0.0
+    csum = [0.0]
+    for d in nd:
+        csum.append(csum[-1] + nifty[d])
     for i, d in enumerate(nd):
         hi10 = max(nifty[x] for x in nd[max(0, i - 9):i + 1])
         out["daily"].setdefault(d, {})["nifty_dd"] = nifty[d] / hi10 - 1
         out["daily"][d]["nifty"] = nifty[d]
+        for w in (50, 200):                                   # close vs w-session average (full window only)
+            if i + 1 >= w:
+                out["daily"][d][f"nifty_vs{w}"] = nifty[d] / ((csum[i + 1] - csum[i + 1 - w]) / w) - 1
     if not _has_table(con, "bc", "cash_returns_adj"):
         return out
     rows = con.execute(f"""
@@ -682,19 +844,26 @@ def load_market(con, start: date, end: date) -> dict:
         n AS (SELECT trade_date AS d, ln(close / lag(close) OVER (ORDER BY trade_date)) AS nr
               FROM bc.index_eod WHERE index_name = 'Nifty 50' AND close > 0 AND trade_date BETWEEN ? AND ?),
         j AS (SELECT r.sym, r.d, r.lr, n.nr FROM r JOIN n USING (d)),
-        b AS (SELECT sym, d, regr_slope(lr, nr) OVER w AS beta, count(nr) OVER w AS nb,
+        b AS (SELECT sym, d, lr, regr_slope(lr, nr) OVER w AS beta, count(nr) OVER w AS nb,
                      sum(lr) OVER (PARTITION BY sym ORDER BY d) AS lp
               FROM j WINDOW w AS (PARTITION BY sym ORDER BY d ROWS BETWEEN 249 PRECEDING AND CURRENT ROW)),
         t AS (SELECT sym, d, beta, nb,
                      exp(lp) / avg(exp(lp)) OVER (PARTITION BY sym ORDER BY d ROWS BETWEEN 49 PRECEDING AND CURRENT ROW)
                          - 1 AS dist50,
                      count(*) OVER (PARTITION BY sym ORDER BY d ROWS BETWEEN 49 PRECEDING AND CURRENT ROW) AS n50,
-                     exp(lp - lag(lp, 20) OVER (PARTITION BY sym ORDER BY d)) - 1 AS r20
-              FROM b)
-        SELECT sym, d, CASE WHEN nb >= 60 THEN beta END, CASE WHEN n50 = 50 THEN dist50 END, r20
+                     exp(lp - lag(lp, 20) OVER (PARTITION BY sym ORDER BY d)) - 1 AS r20,
+                     stddev_samp(lr) OVER w20 * sqrt(252) AS hv20, count(lr) OVER w20 AS n20
+              FROM b
+              WINDOW w20 AS (PARTITION BY sym ORDER BY d ROWS BETWEEN 19 PRECEDING AND CURRENT ROW))
+        SELECT sym, d, CASE WHEN nb >= 60 THEN beta END, CASE WHEN n50 = 50 THEN dist50 END, r20,
+               CASE WHEN n20 >= 15 THEN hv20 END
         FROM t WHERE d >= ? ORDER BY sym, d""", [lo, end, lo, end, start - timedelta(days=10)]).fetchall()
-    for sym, d, beta, dist50, r20 in rows:
+    for sym, d, beta, dist50, r20, hv20 in rows:
         d = _d(d)
+        if hv20 is not None:
+            hd = out["hv20"].setdefault(sym, ([], []))
+            hd[0].append(d)
+            hd[1].append(float(hv20))
         if beta is not None:
             bd = out["beta"].setdefault(sym, ([], []))
             bd[0].append(d)
@@ -740,13 +909,45 @@ def load_hedge_chain(con, start: date, end: date, p: Params) -> dict:
     return out
 
 
+def load_atm_iv(con, cands: pd.DataFrame) -> pd.Series:
+    """ATM IV for each candidate row: mean implied vol (traded close) of the strike nearest the
+    underlying, call and put, same symbol / expiry / day. NaN when neither side traded."""
+    if not len(cands):
+        return pd.Series(dtype=float)
+    keys = cands[["trade_date", "raw", "expiry", "und"]].drop_duplicates(["trade_date", "raw", "expiry"])
+    con.register("_ak", keys)
+    a = con.execute("""
+        SELECT k.trade_date, k.raw, k.expiry, k.und, o.opt_type, o.strike, o.close
+        FROM _ak k JOIN bc.options_eod o ON o.trade_date = k.trade_date AND o.symbol = k.raw AND o.expiry = k.expiry
+        WHERE o.close > 0 AND o.volume > 0
+        QUALIFY row_number() OVER (PARTITION BY k.trade_date, k.raw, k.expiry, o.opt_type
+                                   ORDER BY abs(o.strike / k.und - 1), o.strike) = 1""").fetchall()
+    con.unregister("_ak")
+    acc: dict = {}
+    for d, raw, e, und, side, k, px in a:
+        d, e = _d(d), _d(e)
+        iv = implied_vol(side, float(px), float(und), float(k), max((e - d).days, 1) / 365.0, fallback=NAN)
+        if iv == iv and IV_BOUNDS[0] < iv < 5.0 - 1e-6:
+            acc.setdefault((d, raw, e), []).append(iv)
+    m = {k: sum(v) / len(v) for k, v in acc.items()}
+    return pd.Series([m.get((d, r, e), NAN) for d, r, e in zip(cands["trade_date"], cands["raw"], cands["expiry"])],
+                     index=cands.index, dtype=float)
+
+
 def load_data(p: Params, con=None) -> Data:
     own = con is None
     con = con or connect()
     try:
-        cal = [r[0] for r in con.execute(
+        cal = [_d(r[0]) for r in con.execute(
             "SELECT DISTINCT trade_date FROM bc.span_ingest_log WHERE trade_date BETWEEN ? AND ? ORDER BY 1",
-            [p.start, p.end]).fetchall()]
+            [p.start, p.end + timedelta(days=75)]).fetchall()]
+        # the step's calendar must run past every open expiry (simulate still stops at p.end):
+        # sessions on record after `end`, then weekdays (holidays unknown) up to end + 75 days
+        x = (cal[-1] if cal else p.end) + timedelta(days=1)
+        while x <= p.end + timedelta(days=75):
+            if x.weekday() < 5:
+                cal.append(x)
+            x += timedelta(days=1)
 
         u_ctes, member = universe_ctes(con, p.universe)
         px_sql = "o.close" if p.price_basis == "close" else "coalesce(nullif(o.settle, 0), o.close)"
@@ -767,8 +968,8 @@ def load_data(p: Params, con=None) -> Data:
                   JOIN bc.span_und su ON su.trade_date = o.trade_date AND su.tag = bt.tag AND su.symbol = o.raw
                   WHERE (o.opt_type = 'PE' AND o.strike < su.price) OR (o.opt_type = 'CE' AND o.strike > su.price)),
             m AS (SELECT *, short_scan * lot * ? + ? * und * lot AS margin FROM j),
-            r AS (SELECT *, close * lot / margin AS rom FROM m WHERE margin > 0),
-            {PICK_SQL}
+            r AS (SELECT *, close * lot / margin AS rom FROM m WHERE margin > 0 AND abs(delta) >= {float(p.min_delta or 0.0)!r}),
+            {PICK_SQL if p.pick_by == "delta" else ALL_SQL}
             SELECT pk.*, exp(ra.log_ret) - 1 AS move
             FROM pk LEFT JOIN bc.cash_returns_adj ra ON ra.symbol = pk.raw AND ra.trade_date = pk.trade_date
             WHERE pk.delta <= ?
@@ -777,6 +978,12 @@ def load_data(p: Params, con=None) -> Data:
               p.broker_mult, p.elm, p.rom_target, p.delta_cap]).df()
         for c in ("trade_date", "expiry"):
             cands[c] = pd.to_datetime(cands[c]).dt.date
+        if p.pick_by != "delta":
+            n_all = len(cands)
+            cands = pick_strikes(cands, p)
+            print(f"  strike pick by {p.pick_by}: {n_all:,} qualifying strikes -> {len(cands):,} candidates")
+        cands = add_rich_history(cands, cal, p)
+        cands["atm_iv"] = load_atm_iv(con, cands)
 
         keys = cands[["raw", "opt_type", "expiry", "strike"]].drop_duplicates()
         first = cands.groupby(["raw", "opt_type", "expiry", "strike"], as_index=False)["trade_date"].min()
@@ -795,6 +1002,14 @@ def load_data(p: Params, con=None) -> Data:
             LEFT JOIN bc.options_eod o ON o.trade_date = s.trade_date AND o.symbol = s.symbol
                  AND o.expiry = s.expiry AND o.strike = s.strike AND o.opt_type = s.instr
         """).df()
+        # days the contract TRADED but has no SPAN row (rare file gaps, e.g. TATAMOTORS 12-Jun-2020):
+        # keep a row with the traded close so the position is marked and exits at that price
+        gap = con.execute(f"""
+            SELECT o.symbol AS raw, o.opt_type, o.expiry, o.strike, o.trade_date, o.close, o.volume
+            FROM _k k JOIN bc.options_eod o ON o.symbol = k.raw AND o.opt_type = k.opt_type
+                 AND o.expiry = k.expiry AND o.strike = k.strike
+                 AND o.trade_date >= k.trade_date AND o.trade_date < k.expiry
+            WHERE o.volume > 0 AND o.close > 0""").fetchall()       # expiry day: SPAN drops expiring series
         con.unregister("_k")
         paths: dict = {}
         for r in pth.itertuples(index=False):
@@ -802,6 +1017,14 @@ def load_data(p: Params, con=None) -> Data:
             paths.setdefault(k, {})[_d(r.trade_date)] = (
                 _f(r.close), float(r.volume), _f(r.sprice), _f(r.sdelta), _f(r.short_scan), _f(r.und), NAN,
                 _f(r.svol))
+        n_gap = 0
+        for raw, ot, e, k_, td, cl, vo in gap:
+            pk = paths.get((raw, ot, _d(e), float(k_)))
+            if pk is not None and _d(td) not in pk:
+                pk[_d(td)] = (float(cl), float(vo), NAN, NAN, NAN, NAN, NAN, NAN)
+                n_gap += 1
+        if n_gap:
+            print(f"  {n_gap} path day(s) with a trade but no SPAN row: marked at the traded close")
 
         ev = load_events_full(con, p.start, p.end + timedelta(days=60))
         mkt = load_market(con, p.start, p.end)
@@ -818,7 +1041,7 @@ def load_data(p: Params, con=None) -> Data:
           f"{sum(map(len, paths.values())):,} path rows; market: {len(mkt['daily'])} days, "
           f"{len(mkt['beta'])} betas")
     return Data(cal, cands, paths, ev["results"], ev["ca"], dict(SECTOR),
-                ev["board"], ev["known"], ev["coverage"], mkt, hedge)
+                ev["board"], ev["known"], ev["coverage"], mkt, hedge, ev.get("ca_adj"), ev.get("ca_known", {}))
 
 
 def _d(v) -> date:
@@ -858,6 +1081,7 @@ class Pos:
     lots: int = 1
     entry_vol: float = 0.0   # contracts traded on the entry day (liquidity class for exit costs)
     rich: float = float("nan")   # entry premium / model price at SPAN vol (see richness)
+    iv_hv: float = float("nan")  # ATM IV / HV20 at entry
     svol: float = float("nan")   # NSE SPAN implied vol for this contract, latest day it was published
     iv: float = float("nan")     # last IV the stress test used (fallback when today's is unusable)
 
@@ -917,6 +1141,8 @@ class Ctx:
     coverage: dict = field(default_factory=dict)
     market: dict = field(default_factory=dict)    # load_market()
     hedge: dict = field(default_factory=dict)     # load_hedge_chain()
+    ca_adj: Optional[dict] = None                 # see Data
+    ca_known: dict = field(default_factory=dict)
 
 
 def event_dates(p: Params, ctx: Ctx, sym: str, d: date) -> list:
@@ -935,6 +1161,18 @@ def event_dates(p: Params, ctx: Ctx, sym: str, d: date) -> list:
     return ev
 
 
+def ca_dates(p: Params, ctx: Ctx, sym: str, d: date) -> list:
+    """CA ex-dates the blackout may use for sym on day d (sorted): the scope's set, and with
+    pit_ca only those already knowable on d. Contexts without the new maps (tests, old callers)
+    fall back to ctx.ca with no knowledge filter."""
+    src = ctx.ca_adj if (p.ca_scope == "adjusting" and ctx.ca_adj is not None) else ctx.ca
+    ev = src.get(sym, [])
+    if p.pit_ca and ctx.ca_known:
+        kn = ctx.ca_known
+        ev = [e for e in ev if kn.get((sym, e), e - timedelta(days=7)) <= d]
+    return ev
+
+
 def market_on(ctx: Ctx, d: date) -> dict:
     """Latest market row (vix, vix_jump, nifty_dd) on or before d; {} if none."""
     daily = (ctx.market or {}).get("daily") or {}
@@ -945,6 +1183,17 @@ def market_on(ctx: Ctx, d: date) -> dict:
         keys = ctx.market["_dates"] = sorted(daily)
     i = bisect_right(keys, d)
     return daily[keys[i - 1]] if i else {}
+
+
+def put_blocked(p: Params, ctx: Ctx, d: date) -> bool:
+    """Put regime gate: NIFTY below its put_block_dma average and VIX below put_block_vix."""
+    if not p.put_block_dma:
+        return False
+    m = market_on(ctx, d)
+    dist, v = m.get(f"nifty_vs{p.put_block_dma}"), m.get("vix")
+    if dist is None or dist >= 0:
+        return False
+    return p.put_block_vix is None or (v is not None and v < p.put_block_vix)
 
 
 def brake_on(p: Params, ctx: Ctx, d: date) -> bool:
@@ -979,6 +1228,12 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
     def td_between(a: date, b: date) -> int:
         """Trading days strictly after a up to and including b."""
         return bisect_right(cal, b) - bisect_right(cal, a)
+
+    def session_of(e: date) -> date:
+        """An event on a weekend / holiday happens before the NEXT session opens, so it counts
+        as that session: results on Saturday -> exit on Friday, not Thursday."""
+        i = bisect_left(cal, e)
+        return cal[i] if i < len(cal) else e
 
     def beta_of(sym: str) -> float:
         b = asof(mk.get("beta", {}).get(sym), d)
@@ -1022,7 +1277,7 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
             entry_px=ps.entry_px, credit=ps.credit, exit_px=px, exit_fill=fill,
             costs=ps.entry_cost + cost, pnl=pnl, margin=ps.margin,
             rom=pnl / ps.margin if ps.margin else NAN,
-            days=(d - ps.entry_date).days, reason=reason, traded_exit=traded, rich=ps.rich))
+            days=(d - ps.entry_date).days, reason=reason, traded_exit=traded, rich=ps.rich, iv_hv=ps.iv_hv))
 
     def rem_yield(ps: Pos) -> float:
         """Annualised premium still to earn, on current margin."""
@@ -1046,12 +1301,12 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
         reason = None
         left = td_between(d, ps.expiry)
         res = _next_on_or_after(event_dates(p, ctx, ps.symbol, d), d)
-        cax = _next_on_or_after(ctx.ca.get(ps.symbol, []), d)
+        cax = _next_on_or_after(ca_dates(p, ctx, ps.symbol, d), d)
         if d >= ps.expiry:
             reason = "expiry"
-        elif res is not None and res <= ps.expiry and td_between(d, res) <= p.earn_exit_lead:
+        elif res is not None and res <= ps.expiry and td_between(d, session_of(res)) <= p.earn_exit_lead:
             reason = "results"          # close the session before results (or today if missed)
-        elif cax is not None and cax <= ps.expiry and td_between(d, cax) <= 1:
+        elif cax is not None and cax <= ps.expiry and td_between(d, session_of(cax)) <= 1:
             reason = "corp_action"      # close the session before the ex-date
         elif (p.stop_mult and row is not None and ps.mark == ps.mark
               and (row[1] > 0 or not p.stop_requires_trade)
@@ -1188,6 +1443,7 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
     # ---- 4. entries -------------------------------------------------------
     n_new = 0
     braked = brake_on(p, ctx, d)
+    puts_off = put_blocked(p, ctx, d)
     blocked: list = []                       # entries refused only for lack of room (soft hurdle)
     cand_vecs: dict = {}                     # (symbol, side) -> (1-lot stress vec, idio vec, iv) from ranking
     if cands is not None and len(cands):
@@ -1195,11 +1451,28 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
         if p.symbols:
             rows = rows[rows["symbol"].isin(p.symbols)]
         if len(rows):
-            rows["rich"] = [richness(c.opt_type, float(c.premium), float(c.und), float(c.strike),
-                                     max((_d(c.expiry) - d).days, 1) / 365.0, float(getattr(c, "svol", NAN)),
-                                     p.rich_rate) for c in rows.itertuples(index=False)]
+            col = "rich_vol" if p.rich_measure == "vol" else "rich_px"
+            if col in rows.columns:
+                rows["rich"] = rows[col].astype(float)
+            elif p.rich_measure == "vol":                         # paper trader: computed live
+                rows["rich"] = [vol_ratio(c.opt_type, float(c.premium), float(c.und), float(c.strike),
+                                          max((_d(c.expiry) - d).days, 1) / 365.0, float(getattr(c, "svol", NAN)),
+                                          p.rich_rate) for c in rows.itertuples(index=False)]
+            else:
+                rows["rich"] = [richness(c.opt_type, float(c.premium), float(c.und), float(c.strike),
+                                         max((_d(c.expiry) - d).days, 1) / 365.0, float(getattr(c, "svol", NAN)),
+                                         p.rich_rate) for c in rows.itertuples(index=False)]
             if p.min_rich is not None:
                 rows = rows[rows["rich"] >= p.min_rich]          # NaN (no SPAN vol) fails: skipped
+                for k in range(1, p.rich_confirm_days + 1):      # missing history fails: skipped
+                    pc = f"{col}_p{k}"
+                    rows = rows[rows[pc] >= p.min_rich] if pc in rows.columns else rows.iloc[:0]
+            hvs = mk.get("hv20", {})
+            atm = rows["atm_iv"] if "atm_iv" in rows.columns else pd.Series(NAN, index=rows.index)
+            rows["iv_hv"] = [a / h if (h is not None and h > 0) else NAN
+                             for a, h in zip(atm, (asof(hvs.get(s_), d) for s_ in rows["symbol"]))]
+            if p.max_iv_hv is not None:
+                rows = rows[rows["iv_hv"] <= p.max_iv_hv]        # NaN (no ATM IV / HV) fails: skipped
         if p.entry_mode == "rank_move":
             mv = rows["move"]
             rows = rows[((rows["opt_type"] == "PE") & (mv < 0)) | ((rows["opt_type"] == "CE") & (mv > 0))]
@@ -1231,6 +1504,8 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
             sym, side, exp = c.symbol, c.opt_type, _d(c.expiry)
             if braked and side in p.brake_sides:
                 return "skip"
+            if puts_off and side == "PE":
+                return "skip"
             mine = [ps for ps in st.book if ps.symbol == sym and ps.side == side]
             if len(mine) >= max(p.max_lots_per_symbol_side, p.ladder_entries):
                 return "skip"
@@ -1250,9 +1525,9 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
                 if cov is None or d < cov - timedelta(days=100):
                     return "skip"                        # no event history yet: unknown, not event-free
             nxt = _next_on_or_after(event_dates(p, ctx, sym, d), d)
-            if nxt is not None and td_between(d, nxt) <= p.earn_entry_days:
+            if nxt is not None and td_between(d, session_of(nxt)) <= p.earn_entry_days:
                 return "skip"
-            cax = _next_on_or_after(ctx.ca.get(sym, []), d)
+            cax = _next_on_or_after(ca_dates(p, ctx, sym, d), d)
             if cax is not None and cax <= exp:
                 return "skip"
             m1 = float(c.margin)                         # margin for ONE lot
@@ -1274,6 +1549,15 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
                 lots = min(lots, int(room // m1) if m1 > 0 else 0)  # shrink to fit caps
             if lots < 1 or lots * m1 > room:
                 return "room"
+            n1 = float(c.lot) * float(c.strike)             # notional of ONE lot
+            if p.max_symbol_notional is not None and n1 > 0:
+                cur = sum(ps.lot * ps.strike for ps in st.book if ps.symbol == sym)
+                lots = min(lots, int((p.max_symbol_notional * max(cash_base, 0.0) - cur) // n1))
+            if p.max_put_notional is not None and side == "PE" and n1 > 0:
+                cur = sum(ps.lot * ps.strike for ps in st.book if ps.side == "PE")
+                lots = min(lots, int((p.max_put_notional * (max(cash_base, 0.0) + p.collateral) - cur) // n1))
+            if lots < 1:
+                return "skip"                            # one lot would breach a notional cap
             cvec = ivec = None
             if need_stress:
                 if (sym, side) in cand_vecs:
@@ -1308,7 +1592,7 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
             ps = Pos(st.pid, sym, c.raw, side, exp, float(c.strike), lot, d, float(c.premium),
                      credit, ecost, m, sec, mark=float(c.premium), delta=float(c.delta), und=float(c.und),
                      lots=lots, entry_vol=vol, svol=float(getattr(c, "svol", NAN)),
-                     rich=float(getattr(c, "rich", NAN)),
+                     rich=float(getattr(c, "rich", NAN)), iv_hv=float(getattr(c, "iv_hv", NAN)),
                      iv=civ if cvec is not None else NAN)
             st.book.append(ps)
             opened.append(ps)
@@ -1424,7 +1708,7 @@ def _hedge_step(p: Params, st: State, d: date, hc: dict, td_between, beta_of, cl
 def simulate(p: Params, data: Data) -> Result:
     cal = [d for d in data.calendar if p.start <= d <= p.end]
     ctx = Ctx(data.calendar, data.results, data.ca, data.sector, data.board, data.known, data.coverage,
-              data.market, data.hedge)
+              data.market, data.hedge, data.ca_adj, data.ca_known)
     cand_by_day = ({d: g for d, g in data.cands.groupby("trade_date")}
                    if len(data.cands) and "trade_date" in data.cands else {})
     st = State(cash=p.cash)
@@ -1455,7 +1739,7 @@ def simulate(p: Params, data: Data) -> Result:
                 entry_px=ps.entry_px, credit=ps.credit, exit_px=ref, exit_fill=fill,
                 costs=ps.entry_cost + cost, pnl=pnl, margin=ps.margin,
                 rom=pnl / ps.margin if ps.margin else NAN, days=(last - ps.entry_date).days,
-                reason="window_end", traded_exit=traded, rich=ps.rich))
+                reason="window_end", traded_exit=traded, rich=ps.rich, iv_hv=ps.iv_hv))
         for h in st.hedges:
             fill = h.mark * (1 - p.hedge_slip)
             cost = order_costs(last, fill * h.qty, "S", p.brokerage)
@@ -1689,12 +1973,16 @@ def run_flags(params: dict) -> Optional[str]:
                   22 Oct 2026, or price_basis='settle'.
     survivorship  universe = today's index list applied to every date (runs before the
                   point-in-time universe of 22 Oct 2026, or universe='current').
+    ca_lookahead  corporate-action blackout used ex-dates not yet announced (runs before
+                  28 Oct 2026, or pit_ca=False); those runs also blocked every ex-date.
     """
     f = []
     if params.get("price_basis", "settle") != "close":
         f.append("settle_fills")
     if params.get("universe", "current") != "pit":
         f.append("survivorship")
+    if not params.get("pit_ca", False):
+        f.append("ca_lookahead")
     return ",".join(f) or None
 
 
@@ -1722,6 +2010,7 @@ def save(res: Result, label: str = "", db: Path = WHEEL_DB) -> str:
         con.execute(SCHEMA)
         con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS lots INTEGER")   # pre-sizing DBs
         con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS rich DOUBLE")    # pre-23-Oct DBs
+        con.execute("ALTER TABLE trades ADD COLUMN IF NOT EXISTS iv_hv DOUBLE")   # pre-26-Oct DBs
         for col, typ in EQUITY_ADDED:                                             # pre-risk-layer DBs
             con.execute(f"ALTER TABLE equity ADD COLUMN IF NOT EXISTS {col} {typ}")
         con.execute("ALTER TABLE runs ADD COLUMN IF NOT EXISTS flags VARCHAR")
@@ -1758,8 +2047,9 @@ GRIDS = {
     "pace": [dict(max_new_per_day=n) for n in (2, 4, 6, 8)],
     "sizing": [dict(sizing="fixed"), dict(sizing="pct", trade_margin_pct=0.05),
                dict(sizing="pct", trade_margin_pct=0.075), dict(sizing="pct", trade_margin_pct=0.10)],
-    "profit": [dict(profit_residual=None), dict(profit_residual=0.10), dict(profit_residual=0.20),
-               dict(profit_residual=0.35)],
+    # item 12: take profit once the mark falls to this fraction of the entry premium (0.5 = 50% kept)
+    "profit": [dict(profit_residual=None), dict(profit_residual=0.50), dict(profit_residual=0.35),
+               dict(profit_residual=0.20), dict(profit_residual=0.10)],
     "entry": [dict(entry_mode="rank_move"), dict(entry_mode="all"),
               dict(entry_mode="rank_move", move_cap=None), dict(entry_mode="all", max_new_per_day=4)],
     "util": [dict(util_cap=u) for u in (0.3, 0.4, 0.5, 0.6)],
@@ -1787,6 +2077,34 @@ GRIDS = {
              dict(stress_idio=((0.20, 1.3),), stress_idio_cap=0.08),
              dict(stress_idio=((0.20, 1.3),), stress_idio_cap=0.05),
              dict(stress_idio=((0.20, 1.3), (-0.20, 1.3)), stress_idio_cap=0.08)],
+    # item 6: put regime gate (no new puts in an early decline)
+    "putregime": [dict(put_block_dma=None), dict(put_block_dma=50), dict(put_block_dma=50, put_block_vix=20.0),
+                  dict(put_block_dma=200, put_block_vix=20.0)],
+    # item 10: ATM IV / HV20 entry gate
+    # item 5: overfitting check -- every combination of the settings tuned so far (24 runs, two
+    # data loads); daily equity feeds the CSCV / walk-forward / bootstrap analysis
+    "overfit": [dict(dte_lo=21, dte_hi=dh, min_rich=mr, stop_mult=sm)
+                for dh in (35, 45) for mr in (None, 1.0, 1.1, 1.25) for sm in (2.0, 3.0, None)],
+    # item 11: which qualifying strike to sell
+    "pick": [dict(pick_by="delta"), dict(pick_by="rich"), dict(pick_by="rom")],    # reloads data per value
+    # 27 Oct: richness measure, delta band + richest strike with a ROM floor, confirmation
+    # (run on the gate-1.1 base: --min-rich 1.1; reloads data per min_delta / pick_by)
+    "richsel": [dict(rich_measure="price", min_rich=1.1),
+                dict(rich_measure="vol", min_rich=1.0), dict(rich_measure="vol", min_rich=1.1),
+                dict(rich_measure="vol", min_rich=1.1, min_delta=0.05),
+                dict(rich_measure="vol", min_rich=1.1, min_delta=0.05, pick_by="volrich"),
+                dict(rich_measure="vol", min_rich=1.1, min_delta=0.08, pick_by="volrich"),
+                dict(rich_measure="vol", min_rich=1.1, min_delta=0.05, pick_by="volrich", rom_target=0.015),
+                dict(rich_measure="vol", min_rich=1.1, min_delta=0.05, pick_by="volrich", rom_target=0.025)],
+    # 27 Oct: notional caps (physical-delivery exposure), on the gate-1.1 base
+    "notional": [dict(max_symbol_notional=None, max_put_notional=None),
+                 dict(max_symbol_notional=2.0), dict(max_symbol_notional=1.0), dict(max_symbol_notional=0.5),
+                 dict(max_put_notional=1.5), dict(max_put_notional=1.0),
+                 dict(max_symbol_notional=1.0, max_put_notional=1.0)],
+    # 28 Oct: corporate-action blackout fix. Row 1 = the pre-fix rule (every ex-date, known ahead)
+    "ca": [dict(ca_scope="all", pit_ca=False), dict(ca_scope="all", pit_ca=True), dict(ca_scope="adjusting", pit_ca=True)],
+    "confirm": [dict(rich_confirm_days=0), dict(rich_confirm_days=1), dict(rich_confirm_days=2)],
+    "ivhv": [dict(max_iv_hv=None), dict(max_iv_hv=1.25), dict(max_iv_hv=1.0), dict(max_iv_hv=0.8)],
     "hedge": [dict(hedge=False), dict(hedge=True, hedge_ratio=0.25), dict(hedge=True, hedge_ratio=0.5),
               dict(hedge=True, hedge_ratio=1.0)],
     "ddsize": [dict(dd_halve_at=None), dict(dd_halve_at=0.05), dict(dd_halve_at=0.10)],
@@ -1813,6 +2131,7 @@ def run_grid(base: Params, variants: list, label: str, data: Optional[Data] = No
         p = replace(base, **v)
         k = data_key(p)
         if k not in cache:
+            cache.clear()                    # one data set in memory at a time (a revisited key reloads)
             cache[k] = data if (data is not None and k == data_key(base)) else load_data(p)
         r = simulate(p, cache[k])
         rid = save(r, label=f"{label} {v}")
@@ -1878,6 +2197,19 @@ def add_param_args(ap) -> None:
     ap.add_argument("--idio", help="single-stock shocks 'move:ivmult,...', e.g. 0.20:1.3 or 0.20:1.3,-0.20:1.3")
     ap.add_argument("--idio-cap", type=float, help="worst single-name shock loss cap, fraction of cash "
                                                     "(default: the stress cap)")
+    ap.add_argument("--put-block-dma", type=int, choices=[50, 200],
+                    help="no new puts while NIFTY is below this day average (and VIX below --put-block-vix)")
+    ap.add_argument("--put-block-vix", type=float, help="put gate applies only while India VIX is below this")
+    ap.add_argument("--max-iv-hv", type=float, help="enter only if ATM IV / HV20 <= this")
+    ap.add_argument("--pick-by", choices=["delta", "rich", "volrich", "rom"], help="strike choice among qualifying strikes")
+    ap.add_argument("--rich-measure", choices=["price", "vol"], help="richness: premium/model price or strike IV/SPAN vol")
+    ap.add_argument("--min-delta", type=float, help="qualifying strikes need |delta| >= this")
+    ap.add_argument("--rich-confirm", type=int, help="gate must also pass on the previous N sessions")
+    ap.add_argument("--ca-scope", choices=["adjusting", "all"], help="CA blackout: contract-adjusting events only, "
+                    "or every ex-date (pre-28-Oct behaviour)")
+    ap.add_argument("--no-pit-ca", action="store_true", help="CA ex-dates known in advance (pre-28-Oct look-ahead)")
+    ap.add_argument("--max-symbol-notional", type=float, help="per-stock open notional <= this x cash")
+    ap.add_argument("--max-put-notional", type=float, help="open put notional <= this x (cash + collateral)")
     ap.add_argument("--hedge", action="store_true", help="long NIFTY put hedge (backtest only)")
     ap.add_argument("--hedge-ratio", type=float)
     ap.add_argument("--dd-halve", type=float, help="halve pct sizing while drawdown > this x cash")
@@ -1906,7 +2238,11 @@ def params_from_args(a, base: Optional[Params] = None) -> Params:
                  ("universe", "universe"), ("iv_source", "iv_source"),
                  ("price_basis", "price_basis"), ("min_rich", "min_rich"), ("rich_rate", "rich_rate"),
                  ("cash_yield", "cash_yield"), ("cash_haircut", "cash_haircut"),
-                 ("cash_yield_file", "cash_yield_file")):
+                 ("cash_yield_file", "cash_yield_file"), ("put_block_dma", "put_block_dma"),
+                 ("put_block_vix", "put_block_vix"), ("max_iv_hv", "max_iv_hv"), ("pick_by", "pick_by"),
+                 ("rich_measure", "rich_measure"), ("min_delta", "min_delta"), ("rich_confirm", "rich_confirm_days"),
+                 ("max_symbol_notional", "max_symbol_notional"), ("max_put_notional", "max_put_notional"),
+                 ("ca_scope", "ca_scope")):
         v = getattr(a, f, None)
         if v is not None:
             kw[k] = v
@@ -1914,6 +2250,8 @@ def params_from_args(a, base: Optional[Params] = None) -> Params:
         kw["stress_cap"] = a.stress_cap if a.stress_cap > 0 else None
     if getattr(a, "idio", None):
         kw["stress_idio"] = tuple(tuple(float(x) for x in s.split(":")) for s in a.idio.split(",") if s.strip())
+    if getattr(a, "no_pit_ca", False):
+        kw["pit_ca"] = False
     if getattr(a, "no_brake", False):
         kw.update(brake_vix_level=None, brake_vix_jump=None, brake_nifty_dd=None)
     if getattr(a, "brake", False):
