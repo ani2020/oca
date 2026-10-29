@@ -178,6 +178,26 @@ checks["--replace without --snap-rank keeps the book's rank"] = \
     _c.execute("SELECT snap_rank FROM paper_books WHERE book='pre'").fetchone()[0] == 1
 _c.close()
 
+# ---- 28 Oct review: persisted state, interest across runs, unsupported settings, delta floor
+_c = duckdb.connect(os.environ['WHEEL_DB'])
+pr = _c.execute("SELECT entry_vol, iv, exit_pending FROM paper_positions WHERE book='pre'").fetchall()
+_c.close()
+checks["every Pos field step() needs is persisted (entry_vol, stress IV, pending exit)"] = \
+    len(pr) > 0 and all(r[0] == 50 and r[1] is not None and r[2] == "" for r in pr)
+assert wp.main(['init', '--book', 'yield', '--cash-yield', '0.10', '--entry-mode', 'all', '--dte-lo', '21',
+                '--rom', '0.015', '--delta-cap', '0.20']) == 0
+assert wp.main(['run', '--book', 'yield', '--date', D2.isoformat(), '--no-span']) == 0
+assert wp.main(['run', '--book', 'yield', '--date', D3.isoformat(), '--no-span']) == 0
+_c = duckdb.connect(os.environ['WHEEL_DB'])
+iy = _c.execute("SELECT interest, last_run FROM paper_state WHERE book='yield'").fetchone()
+_c.close()
+checks["cash interest accrues across separate runs (last_day restored, interest persisted)"] = \
+    iy[0] is not None and iy[0] > 0 and str(iy[1]) == D3.isoformat()
+checks["init refuses settings paper cannot apply (IV/HV gate)"] = \
+    wp.main(['init', '--book', 'ivhv', '--max-iv-hv', '1.0']) == 1
+cd2 = wp.build_candidates(wb.replace(p, min_delta=0.05), D1, ch, span, {"AAA": 100.0})
+checks["delta floor applied in paper candidates"] = len(cd2) == 0
+
 # ---- snapshot choice by rank per symbol (--snap-rank)
 from datetime import time as _t  # noqa: E402
 _c = duckdb.connect(os.environ['OC_DB'], read_only=True)

@@ -76,7 +76,8 @@ def data(cands, paths, results=None, ca=None, board=None, known=None, coverage=N
 BASE = wb.Params(start=CAL[0], end=CAL[-1], stop_mult=None, earn_entry_days=5, slippage=0.0,
                  brokerage=0.0, max_new_per_day=4, cost_model="flat", multi_lot_min_volume=0,
                  stress_cap=None, brake_vix_level=None, brake_vix_jump=None, brake_nifty_dd=None,
-                 price_basis="settle", iv_source="implied")
+                 price_basis="settle", iv_source="implied", ca_scope="all", pit_ca=False,
+                 exit_cost_vol="max", untraded_exit="slip")
 KEY = ("XYZ", "PE", EXP, 90.0)
 
 print("\n=== 1. calm decay ===")
@@ -514,7 +515,7 @@ check("current defaults -> clean", wb.run_flags(_json.loads(_json.dumps(wb.asdic
 check("explicit settle basis is flagged", wb.run_flags({"price_basis": "settle", "universe": "pit", "pit_ca": True}) == "settle_fills")
 check("pre-28-Oct CA look-ahead is flagged", wb.run_flags({"price_basis": "close", "universe": "pit"}) == "ca_lookahead")
 tmpdb = Path(tempfile.mkdtemp()) / "w.duckdb"
-r_ok = wb.simulate(replace(BASE, price_basis="close", universe="pit"), data([cand()], {KEY: path()}))
+r_ok = wb.simulate(replace(BASE, price_basis="close", universe="pit", pit_ca=True), data([cand()], {KEY: path()}))
 r_bad = wb.simulate(BASE, data([cand()], {KEY: path()}))
 id_ok, id_bad = wb.save(r_ok, "ok", tmpdb), wb.save(r_bad, "bad", tmpdb)
 fx = duckdb.connect(str(tmpdb))
@@ -523,7 +524,7 @@ fx.close()
 wb.flag_runs(tmpdb)
 fx = duckdb.connect(str(tmpdb), read_only=True)
 got = dict(fx.execute("SELECT run_id, flags FROM runs").fetchall()); fx.close()
-check("flag mode marks the old-basis run and leaves the clean one", got[id_ok] is None and got[id_bad] == "settle_fills",
+check("flag mode marks the old-basis run and leaves the clean one", got[id_ok] is None and got[id_bad] == "settle_fills,ca_lookahead",
       str(got))
 check("report labels a flagged run", "FLAGGED" in wb.load_run(id_bad, tmpdb)[1] and "FLAGGED" not in wb.load_run(id_ok, tmpdb)[1])
 
@@ -745,20 +746,21 @@ def d38(adj, known, ca_all=None):
     dd = data([cand()], {KEY: path()}, ca=ca_all if ca_all is not None else {"XYZ": [ex38]})
     dd.ca_adj, dd.ca_known = adj, known
     return dd
-r = wb.simulate(BASE, d38({"XYZ": [ex38]}, {("XYZ", ex38): ann38}))
+P38 = replace(BASE, ca_scope="adjusting", pit_ca=True)
+r = wb.simulate(P38, d38({"XYZ": [ex38]}, {("XYZ", ex38): ann38}))
 t38 = r.trades.iloc[0] if len(r.trades) else None
 check("adjusting CA not yet announced at entry: entered", t38 is not None)
 prev38 = max(x for x in CAL if x < ex38)
 check("once announced, closed the session before the ex-date", t38 is not None and t38["reason"] == "corp_action"
       and t38["exit_date"] == prev38, f"{None if t38 is None else (t38['reason'], t38['exit_date'])}")
-r = wb.simulate(BASE, d38({"XYZ": [ex38]}, {("XYZ", ex38): ENTRY - timedelta(days=3)}))
+r = wb.simulate(P38, d38({"XYZ": [ex38]}, {("XYZ", ex38): ENTRY - timedelta(days=3)}))
 check("adjusting CA already announced: entry skipped", len(r.trades) == 0)
-r = wb.simulate(BASE, d38({}, {("XYZ", ex38): ENTRY - timedelta(days=3)}))
+r = wb.simulate(P38, d38({}, {("XYZ", ex38): ENTRY - timedelta(days=3)}))
 check("ordinary dividend (not in the adjusting set): ignored by default", len(r.trades) == 1
       and r.trades.iloc[0]["reason"] != "corp_action")
-r = wb.simulate(replace(BASE, ca_scope="all"), d38({}, {("XYZ", ex38): ENTRY - timedelta(days=3)}))
+r = wb.simulate(replace(P38, ca_scope="all"), d38({}, {("XYZ", ex38): ENTRY - timedelta(days=3)}))
 check("ca_scope 'all': the same dividend blocks entry", len(r.trades) == 0)
-r = wb.simulate(replace(BASE, pit_ca=False), d38({"XYZ": [ex38]}, {("XYZ", ex38): ann38}))
+r = wb.simulate(replace(P38, pit_ca=False), d38({"XYZ": [ex38]}, {("XYZ", ex38): ann38}))
 check("pit_ca off: unannounced ex-date blocks entry (old look-ahead)", len(r.trades) == 0)
 check("defaults: adjusting scope, point-in-time", wb.Params().ca_scope == "adjusting" and wb.Params().pit_ca)
 sat = date(2024, 2, 10)                                    # Saturday results
@@ -776,6 +778,48 @@ r = wb.simulate(replace(BASE, stop_mult=3.0, price_basis="close"), data([cand()]
 check("SPAN gap day: marked at the traded close, 3x stop fires at 7.0",
       r.trades.iloc[0]["reason"] == "stop_mult" and abs(r.trades.iloc[0]["exit_px"] - 7.0) < 1e-9
       and r.trades.iloc[0]["exit_date"] == dg, f"{r.trades.iloc[0]['reason']} {r.trades.iloc[0]['exit_px']}")
+
+print("\n=== 39. exit liquidity, deferral, delivery, CA loader without columns ===")
+P39 = replace(BASE, exit_cost_vol="exit", untraded_exit="defer", cost_model="spread", stop_mult=3.0)
+sp39 = lambda i, n: 7.0 if i == 5 else 2.0 * (1 - i / n) + 0.05
+p39 = path(px=sp39, vol=lambda i: 0 if i == 5 else 10)       # stop day has no trade
+r = wb.simulate(P39, data([dict(cand(), volume=1000)], {KEY: p39}))
+t39 = r.trades.iloc[0]
+d5, d6 = sorted(p39)[5], sorted(p39)[6]
+check("stop on an untraded day: deferred to the next tradable session, reason kept",
+      t39["reason"] == "stop_mult" and t39["exit_date"] == d6, f"{t39['reason']} {t39['exit_date']}")
+check("exit spread from the EXIT day's volume (10 -> 17%), not the entry day's 1000",
+      abs(t39["exit_fill"] / t39["exit_px"] - 1 - 0.17) < 1e-9, f"{t39['exit_fill'] / t39['exit_px'] - 1:.4f}")
+r = wb.simulate(replace(P39, untraded_exit="slip"), data([dict(cand(), volume=1000)], {KEY: p39}))
+check("'slip' keeps the old same-day exit", r.trades.iloc[0]["exit_date"] == d5)
+dead = path(vol=lambda i: 0)                                    # never trades after entry
+r = wb.simulate(replace(P39, stop_mult=None), data([cand()], {KEY: dead}))
+check("never tradable: held to expiry and settled at intrinsic (OTM -> 0, no delivery cost)",
+      r.trades.iloc[0]["reason"] == "expiry" and r.trades.iloc[0]["exit_fill"] == 0.0)
+itm = path(vol=lambda i: 0, und=lambda i: 80.0)                 # put 90 deep ITM, untradable
+r = wb.simulate(replace(P39, stop_mult=None), data([cand()], {KEY: itm}))
+t39 = r.trades.iloc[0]
+check("ITM at expiry: intrinsic + delivery cost (0.1% x strike x qty)",
+      t39["reason"] == "expiry" and abs(t39["exit_fill"] - 10.0) < 1e-9
+      and t39["costs"] >= 0.001 * 90 * 100 - 1e-9, f"{t39['costs']:.2f}")
+check("new exit defaults", wb.Params().exit_cost_vol == "exit" and wb.Params().untraded_exit == "defer")
+cx = duckdb.connect()
+cx.execute("ATTACH ':memory:' AS bc")
+cx.execute("CREATE TABLE bc.corporate_events (symbol VARCHAR, event_date DATE, is_results BOOLEAN, event_type VARCHAR, "
+           "announced_at TIMESTAMP)")
+cx.execute("INSERT INTO bc.corporate_events VALUES ('XYZ', '2024-01-10', false, 'DIVIDEND', NULL)")
+cx.execute("CREATE TABLE bc.corporate_actions (symbol VARCHAR, ex_date DATE, ca_type VARCHAR)")   # no div_amount
+cx.execute("INSERT INTO bc.corporate_actions VALUES ('XYZ', '2024-02-05', 'DIVIDEND'), ('XYZ', '2024-02-20', 'OTHER')")
+cx.execute("CREATE TABLE bc.cash_returns_adj (symbol VARCHAR, trade_date DATE, is_ca BOOLEAN)")  # no ca_type
+ev39 = wb.load_events_full(cx, date(2024, 1, 1), date(2024, 3, 31))
+check("loader without div_amount: dividend counts as adjusting (blocks), AGM-type does not",
+      ev39["ca_adj"].get("XYZ") == [date(2024, 2, 5)], str(ev39["ca_adj"]))
+check("loader still point-in-time: known the day after the board meeting",
+      ev39["ca_known"].get(("XYZ", date(2024, 2, 5))) == date(2024, 1, 11))
+
+r = wb.simulate(replace(P39, stop_mult=None, end=EXP - timedelta(days=12)), data([dict(cand(), volume=1000)], {KEY: path()}))
+check("window-end close also prices the spread from the exit day's volume (10 -> 17%)",
+      r.trades.iloc[0]["reason"] == "window_end" and abs(r.trades.iloc[0]["exit_fill"] / r.trades.iloc[0]["exit_px"] - 1.17) < 1e-9)
 
 print("\n" + "=" * 62)
 print(f"  {'ALL PASSED' if not fails else str(len(fails)) + ' FAILED: ' + ', '.join(fails)}")

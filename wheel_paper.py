@@ -124,7 +124,15 @@ def out_con(db: Path = wb.WHEEL_DB):
     for col in ("close_px", "slip_vs_close"):                                                   # 23 Oct: close basis
         con.execute(f"ALTER TABLE paper_fills ADD COLUMN IF NOT EXISTS {col} DOUBLE")
     con.execute("ALTER TABLE paper_books ADD COLUMN IF NOT EXISTS snap_rank INTEGER")           # 28 Oct
+    for col, typ in POS_EXTRA:                                                                  # 28 Oct review
+        con.execute(f"ALTER TABLE paper_positions ADD COLUMN IF NOT EXISTS {col} {typ}")
+    con.execute("ALTER TABLE paper_state ADD COLUMN IF NOT EXISTS interest DOUBLE")
     return con
+
+
+def _num_or(v):
+    """NaN -> NULL for DuckDB; anything else unchanged."""
+    return None if isinstance(v, float) and v != v else v
 
 
 def _num(v) -> Optional[float]:
@@ -289,11 +297,20 @@ def build_candidates(p: wb.Params, d: date, ch: pd.DataFrame, span: dict, pclose
     x["margin"] = x["short_scan"] * x["lot"] * p.broker_mult + p.elm * x["und"] * x["lot"]
     x["rom"] = x["bid"] * x["lot"] / x["margin"]          # ROM on what a sell actually gets
     x = x[(x["rom"] >= p.rom_target) & (x["delta"] <= p.delta_cap)]
+    if p.min_delta is not None:
+        x = x[x["delta"] >= p.min_delta]                   # delta band floor, as wheel_bt's SQL
     if x.empty:
         return x
-    # same pick as wheel_bt.PICK_SQL: lowest |delta|, ties -> furthest OTM, then nearest expiry
-    x = x.assign(_otm=np.where(x["opt_type"] == "PE", x["strike"], -x["strike"]))
-    x = x.sort_values(["delta", "_otm", "expiry"], kind="mergesort").groupby(["symbol", "opt_type"], as_index=False).first()
+    if p.pick_by == "delta":
+        # same pick as wheel_bt.PICK_SQL: lowest |delta|, ties -> furthest OTM, then nearest expiry
+        x = x.assign(_otm=np.where(x["opt_type"] == "PE", x["strike"], -x["strike"]))
+        x = x.sort_values(["delta", "_otm", "expiry"], kind="mergesort").groupby(["symbol", "opt_type"],
+                                                                                 as_index=False).first()
+    else:
+        # rich / volrich / rom: wheel_bt.pick_strikes on the same columns the backtest uses
+        y = x.assign(trade_date=d, raw=x["symbol"], premium=x["mid"])
+        picked = wb.pick_strikes(y, p)[["symbol", "opt_type", "expiry", "strike"]]
+        x = x.merge(picked, on=["symbol", "opt_type", "expiry", "strike"])
     x["move"] = [(u / pclose[s] - 1) if pclose.get(s) else NAN for s, u in zip(x["symbol"], x["und"])]
     return pd.DataFrame({
         "trade_date": d, "symbol": x["symbol"], "opt_type": x["opt_type"], "raw": x["symbol"],
@@ -307,8 +324,19 @@ def build_candidates(p: wb.Params, d: date, ch: pd.DataFrame, span: dict, pclose
 # state persistence
 # ---------------------------------------------------------------------------
 
+# every Pos field step() reads is persisted: the script exits after each run
+POS_EXTRA = [("entry_vol", "DOUBLE"), ("svol", "DOUBLE"), ("iv", "DOUBLE"), ("rich", "DOUBLE"),
+             ("iv_hv", "DOUBLE"), ("exit_pending", "VARCHAR")]
 POS_COLS = ["pid", "symbol", "raw", "side", "expiry", "strike", "lot", "lots", "entry_date", "entry_px",
-            "credit", "entry_cost", "margin", "sector", "mark", "delta", "und"]
+            "credit", "entry_cost", "margin", "sector", "mark", "delta", "und"] + [c for c, _ in POS_EXTRA]
+_POS_DEFAULT = {"entry_vol": 0.0, "svol": NAN, "iv": NAN, "rich": NAN, "iv_hv": NAN, "exit_pending": ""}
+
+
+def _pos_value(v, col):
+    """NULL / NaN from the DB -> the Pos default for that field."""
+    if v is None or (isinstance(v, float) and v != v):
+        return _POS_DEFAULT.get(col, v)
+    return v
 
 
 def load_book(oc, book: str) -> tuple[wb.Params, wb.State, Optional[date]]:
@@ -316,16 +344,21 @@ def load_book(oc, book: str) -> tuple[wb.Params, wb.State, Optional[date]]:
     if row is None:
         raise SystemExit(f"no paper book {book!r}; create it with: wheel_paper.py init --book {book} ...")
     p = wb.params_from_json(row[0])
-    srow = oc.execute("SELECT cash, pid, last_run FROM paper_state WHERE book = ?", [book]).fetchone()
+    srow = oc.execute("SELECT cash, pid, last_run, coalesce(interest, 0) FROM paper_state WHERE book = ?",
+                      [book]).fetchone()
     st = wb.State(cash=p.cash) if srow is None else wb.State(cash=srow[0], pid=srow[1])
+    if srow is not None:
+        st.last_day = wb._d(srow[2]) if srow[2] is not None else None   # interest accrues from here
+        st.interest = float(srow[3])
     st.peak = oc.execute("SELECT coalesce(max(equity), 0) FROM paper_daily WHERE book = ?", [book]).fetchone()[0]
     for r in oc.execute(f"SELECT {', '.join(POS_COLS)} FROM paper_positions WHERE book = ? ORDER BY pid",
                         [book]).fetchall():
-        d = dict(zip(POS_COLS, r))
+        d = {c: _pos_value(v, c) for c, v in zip(POS_COLS, r)}
         st.book.append(wb.Pos(d["pid"], d["symbol"], d["raw"], d["side"], wb._d(d["expiry"]), d["strike"],
                               d["lot"], wb._d(d["entry_date"]), d["entry_px"], d["credit"], d["entry_cost"],
                               d["margin"], d["sector"], mark=d["mark"], delta=d["delta"], und=d["und"],
-                              lots=d["lots"]))
+                              lots=d["lots"], entry_vol=float(d["entry_vol"]), svol=d["svol"], iv=d["iv"],
+                              rich=d["rich"], iv_hv=d["iv_hv"], exit_pending=d["exit_pending"] or ""))
     return p, st, (srow[2] if srow else None)
 
 
@@ -333,11 +366,12 @@ def snapshot_state(oc, book: str, d: date) -> None:
     """Store the book's state as it was BEFORE day d's run (once per day)."""
     if oc.execute("SELECT 1 FROM paper_snapshots WHERE book = ? AND date = ?", [book, d]).fetchone():
         return
-    srow = oc.execute("SELECT cash, pid, last_run FROM paper_state WHERE book = ?", [book]).fetchone()
+    srow = oc.execute("SELECT cash, pid, last_run, interest FROM paper_state WHERE book = ?", [book]).fetchone()
     pos = oc.execute(f"SELECT {', '.join(POS_COLS)} FROM paper_positions WHERE book = ? ORDER BY pid", [book]).df()
     oc.execute("INSERT INTO paper_snapshots VALUES (?, ?, ?, ?, ?, ?, now())",
                [book, d, srow[0] if srow else None, srow[1] if srow else None, srow[2] if srow else None,
-                pos.to_json(orient="records", date_format="iso")])
+                json.dumps({"positions": json.loads(pos.to_json(orient="records", date_format="iso")),
+                            "interest": srow[3] if srow else None})])
 
 
 def restore_state(oc, book: str, d: date) -> bool:
@@ -347,20 +381,27 @@ def restore_state(oc, book: str, d: date) -> bool:
     if row is None:
         return False
     cash, pid, last_run, positions = row
+    blob = json.loads(positions or "[]")
+    if isinstance(blob, dict):                    # 28 Oct: positions + interest
+        plist, interest = blob.get("positions", []), blob.get("interest")
+    else:                                         # older snapshots: a bare positions list
+        plist, interest = blob, None
     oc.execute("BEGIN")
     try:
         oc.execute("DELETE FROM paper_positions WHERE book = ?", [book])
-        for r in json.loads(positions or "[]"):
+        for r in plist:
             r["expiry"] = r["expiry"][:10]
             r["entry_date"] = r["entry_date"][:10]
-            oc.execute(f"INSERT INTO paper_positions VALUES ({', '.join('?' * (len(POS_COLS) + 1))})",
-                       [book] + [r[c] for c in POS_COLS])
+            oc.execute(f"INSERT INTO paper_positions (book, {', '.join(POS_COLS)}) "
+                       f"VALUES ({', '.join('?' * (len(POS_COLS) + 1))})",
+                       [book] + [_num_or(r.get(c)) for c in POS_COLS])
         oc.execute("DELETE FROM paper_trades WHERE book = ? AND exit_date = ?", [book, d])
         oc.execute("DELETE FROM paper_fills WHERE book = ? AND date = ?", [book, d])
         oc.execute("DELETE FROM paper_daily WHERE book = ? AND date = ?", [book, d])
         oc.execute("DELETE FROM paper_state WHERE book = ?", [book])
         if cash is not None:
-            oc.execute("INSERT INTO paper_state VALUES (?, ?, ?, ?, now())", [book, cash, pid, last_run])
+            oc.execute("INSERT INTO paper_state (book, cash, pid, last_run, updated, interest) "
+                       "VALUES (?, ?, ?, ?, now(), ?)", [book, cash, pid, last_run, interest])
         oc.execute("COMMIT")
     except Exception:
         oc.execute("ROLLBACK")
@@ -374,8 +415,9 @@ def save_book(oc, book: str, d: date, snap: datetime, st: wb.State, closed: list
     try:
         oc.execute("DELETE FROM paper_positions WHERE book = ?", [book])
         for ps in st.book:
-            oc.execute(f"INSERT INTO paper_positions VALUES ({', '.join('?' * (len(POS_COLS) + 1))})",
-                       [book] + [getattr(ps, c) for c in POS_COLS])
+            oc.execute(f"INSERT INTO paper_positions (book, {', '.join(POS_COLS)}) "
+                       f"VALUES ({', '.join('?' * (len(POS_COLS) + 1))})",
+                       [book] + [_num_or(getattr(ps, c)) for c in POS_COLS])
         for t in closed:
             oc.execute("DELETE FROM paper_trades WHERE book = ? AND pid = ?", [book, t["pid"]])
             cols = ["pid", "symbol", "side", "sector", "expiry", "strike", "lot", "lots", "entry_date",
@@ -408,7 +450,8 @@ def save_book(oc, book: str, d: date, snap: datetime, st: wb.State, closed: list
                     eq["n_open"], eq["n_new"], len(closed), eq["breach"], eq["cash_rule_breach"], span_file,
                     _num(eq.get("stress")), _num(eq.get("stress_cap")), bool(eq.get("brake"))])
         oc.execute("DELETE FROM paper_state WHERE book = ?", [book])
-        oc.execute("INSERT INTO paper_state VALUES (?, ?, ?, ?, now())", [book, st.cash, st.pid, d])
+        oc.execute("INSERT INTO paper_state (book, cash, pid, last_run, updated, interest) "
+                   "VALUES (?, ?, ?, ?, now(), ?)", [book, st.cash, st.pid, d, st.interest])
         oc.execute("COMMIT")
     except Exception:
         oc.execute("ROLLBACK")
@@ -469,6 +512,11 @@ def run_book(oc, book: str, d: date, *, force: bool, ch: pd.DataFrame, snap: dat
             print(f"  [{book}] no pre-run snapshot for {d}; refusing to re-run")
             return
         print(f"  [{book}] restored pre-run state for {d}")
+    p0, _, _ = load_book(oc, book)
+    bad = unsupported(p0)
+    if bad:
+        print(f"  [{book}] skipped: settings the paper trader cannot apply live: {'; '.join(bad)}")
+        return
     snapshot_state(oc, book, d)
     p, st, last = load_book(oc, book)
     raw_by_pid = {ps.pid: ps.raw for ps in st.book}
@@ -617,8 +665,24 @@ def cmd_run(a) -> int:
     return 0
 
 
+PAPER_UNSUPPORTED = (
+    ("max_iv_hv", lambda p: p.max_iv_hv is not None, "the IV/HV gate needs ATM IV per candidate (backtest only; dropped)"),
+    ("rich_confirm_days", lambda p: p.rich_confirm_days > 0, "richness confirmation needs earlier sessions' "
+                                                              "candidates (backtest only; dropped)"),
+)
+
+
+def unsupported(p: wb.Params) -> list:
+    """Settings the paper trader cannot apply live: a book using them would silently never trade."""
+    return [f"{k}: {why}" for k, test, why in PAPER_UNSUPPORTED if test(p)]
+
+
 def cmd_init(a) -> int:
     p = wb.params_from_args(a)
+    bad = unsupported(p)
+    if bad:
+        print("  refusing: this book uses settings the paper trader cannot apply live:\n    " + "\n    ".join(bad))
+        return 1
     oc = out_con()
     try:
         old = oc.execute("SELECT coalesce(snap_rank, 0) FROM paper_books WHERE book = ?", [a.book]).fetchone()

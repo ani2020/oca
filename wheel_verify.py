@@ -291,6 +291,8 @@ def verify(run: str, out: Path, limit: int | None = None, con=None) -> pd.DataFr
         r["E10_lots"] = (t.lots <= p.get("max_lots_per_trade", 20)) and abs(t.lot - t.lots * lot0) < 0.5
         # exit walk
         stop = p.get("stop_mult")
+        defer = p.get("untraded_exit", "slip") == "defer"           # runs before 28 Oct: 'slip'
+        pending = None
         exp_reason, exp_day = None, None
         if t.reason == "window_end" and t.exit_date <= t.entry_date:
             exp_reason, exp_day = "window_end", t.exit_date      # entered on the last day of the run
@@ -300,6 +302,8 @@ def verify(run: str, out: Path, limit: int | None = None, con=None) -> pd.DataFr
             dl = abs(get(S, k, "delta"))
             vol = get(O, k, "volume")
             traded = vol == vol and vol > 0
+            if mark != mark and traded:                             # no SPAN row that day: traded close
+                mark = get(O, k, "close")
             left = td_exp(d, t.expiry)
             ne = [e for e in events_known(t.symbol, d) if e >= d]
             if left <= 0:
@@ -317,7 +321,14 @@ def verify(run: str, out: Path, limit: int | None = None, con=None) -> pd.DataFr
                 exp_reason = "final_exit"
             elif left <= p.get("time_exit_td", 5) and dl == dl and dl > p.get("near_money_delta", 0.15):
                 exp_reason = "time_exit"
-            if exp_reason:
+            if exp_reason is None and pending:
+                exp_reason = pending
+            if exp_reason and exp_reason != "expiry" and defer and not traded:
+                pending = pending or exp_reason                      # cannot buy back today: wait
+                exp_reason = None
+            elif exp_reason:
+                if exp_reason != "expiry" and pending:
+                    exp_reason = pending
                 exp_day = d
                 break
             if d >= t.exit_date and t.reason == "window_end":
@@ -332,10 +343,14 @@ def verify(run: str, out: Path, limit: int | None = None, con=None) -> pd.DataFr
         ref = cx if (p.get("price_basis") == "close" and tradedx) else mx
         r["X2_exit_px"] = abs(ref - t.exit_px) <= TOL if t.reason != "expiry" else True
         r["M1_credit"] = abs(close0 * (1 - hs(p, vol0)) - t.credit) <= 1e-6
-        fill = t.exit_px * (1 + hs(p, max(vx if vx == vx else 0.0, vol0)) + (0.0 if tradedx else p.get("untraded_slip", 0.1)))
+        vx0 = vx if vx == vx else 0.0
+        vcost = vx0 if p.get("exit_cost_vol", "max") == "exit" else max(vx0, vol0)   # runs before 28 Oct: max
+        fill = t.exit_px * (1 + hs(p, vcost) + (0.0 if tradedx else p.get("untraded_slip", 0.1)))
         r["M2_fill"] = abs(fill - t.exit_fill) <= 1e-6 if t.reason not in ("expiry",) else True
         prem = t.credit * t.lot
-        r["M3_pnl"] = abs((t.credit - t.exit_fill) * t.lot - t.costs - t.pnl) <= 0.5 and 0 <= t.costs <= 0.03 * prem + 100
+        deliv = p.get("delivery_cost", 0.0) * t.strike * t.lot if (t.reason == "expiry" and t.exit_fill > 0) else 0.0
+        r["M3_pnl"] = abs((t.credit - t.exit_fill) * t.lot - t.costs - t.pnl) <= 0.5 and \
+            0 <= t.costs <= 0.03 * prem + 100 + deliv
         rows.append(r)
     v = pd.DataFrame(rows)
     checks = [c for c in v.columns if c[:2] in ("E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9", "X1", "X2", "M1", "M2", "M3")

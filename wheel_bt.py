@@ -324,6 +324,15 @@ class Params:
     broker_mult: float = 1.0
     slippage: float = 0.10              # fraction of premium, each side
     untraded_slip: float = 0.10         # extra when exiting on a day the contract did not trade
+    # exit liquidity (28 Oct review): the exit's half-spread uses the EXIT day's volume only
+    # ('max' = the old max(exit, entry) volume). An exit decided on a day the contract cannot be
+    # bought back ('defer': no trade, and in the paper trader no ask either) waits for the next
+    # tradable session with its reason kept; reaching expiry it settles at intrinsic, an ITM
+    # position paying delivery_cost x strike x qty (physical delivery). 'slip' = old behaviour:
+    # exit anyway at the mark x (1 + half-spread + untraded_slip).
+    exit_cost_vol: str = "exit"
+    untraded_exit: str = "defer"
+    delivery_cost: float = 0.001
     brokerage: float = 20.0             # Rs per order
 
     def key(self) -> str:
@@ -543,7 +552,8 @@ class Data:
     market: dict = field(default_factory=dict)    # see load_market()
     hedge: dict = field(default_factory=dict)     # see load_hedge_chain()
     ca_adj: Optional[dict] = None                 # canon symbol -> contract-adjusting CA ex-dates
-    ca_known: dict = field(default_factory=dict)  # (canon, ex_date) -> first date it was knowable
+    ca_known: Optional[dict] = None               # (canon, ex_date) -> first date it was knowable;
+                                                  # None = every listed ex-date is already known (paper)
 
 
 def _alias_sql() -> str:
@@ -706,44 +716,80 @@ def load_events_full(con, start: date, end: date) -> dict:
             UNION SELECT symbol, trade_date FROM bc.cash_returns_adj
             WHERE is_ca AND trade_date BETWEEN ? AND ?""", [start, end, start, end]).fetchall():
         ca.setdefault(RENAMES.get(sym, sym), []).append(_d(d))
-    # contract-adjusting subset + knowability (28 Oct). Board meetings come from corporate_events
-    # (any purpose); the dividend threshold uses the SPAN underlying price on/before the meeting.
+    # contract-adjusting subset + knowability (28 Oct; hardened after review). Columns are
+    # inspected first: a missing div_amount / ca_type / meeting table never widens the blackout
+    # or switches knowability off -- missing amounts count as adjusting (blocks, conservative),
+    # missing meetings fall back to "known 7 days before the ex-date".
+    def _cols(table: str) -> set:
+        return {r[0] for r in con.execute(
+            "SELECT column_name FROM information_schema.columns WHERE table_catalog = 'bc' AND table_name = ?",
+            [table]).fetchall()}
+    ca_cols, cr_cols, ce_cols, su_cols = (_cols("corporate_actions"), _cols("cash_returns_adj"),
+                                          _cols("corporate_events"), _cols("span_und"))
+    parts, prm = [], []
+    if {"symbol", "ex_date"} <= ca_cols:
+        t_ = "upper(coalesce(ca_type, ''))" if "ca_type" in ca_cols else "''"
+        a_ = "div_amount" if "div_amount" in ca_cols else "NULL::DOUBLE"
+        parts.append(f"SELECT symbol, ex_date, {t_} AS t, {a_} AS div_amount FROM bc.corporate_actions "
+                     f"WHERE ex_date BETWEEN ? AND ?")
+        prm += [start, end]
+    if {"symbol", "trade_date", "is_ca"} <= cr_cols:
+        t_ = "upper(coalesce(ca_type, 'OTHER'))" if "ca_type" in cr_cols else "'OTHER'"
+        parts.append(f"SELECT symbol, trade_date, {t_}, NULL::DOUBLE FROM bc.cash_returns_adj "
+                     f"WHERE is_ca AND trade_date BETWEEN ? AND ?")
+        prm += [start, end]
+    missing = [n for n, ok in (("corporate_actions.ca_type", "ca_type" in ca_cols),
+                               ("corporate_actions.div_amount", "div_amount" in ca_cols),
+                               ("corporate_events", {"symbol", "event_date"} <= ce_cols),
+                               ("span_und", {"symbol", "trade_date", "price"} <= su_cols)) if not ok]
+    if missing:
+        print(f"  note: CA classification without {missing}: unknown types/amounts count as adjusting, "
+              f"unmatched announcements as known 7 days before the ex-date")
+    meet_sql = ("(SELECT max(m.event_date) FROM m WHERE m.symbol = ev.symbol AND m.event_date <= ev.ex_date "
+                "AND m.event_date >= ev.ex_date - 120)" if {"symbol", "event_date"} <= ce_cols else "NULL::DATE")
+    m_cte = ("m AS (SELECT DISTINCT symbol, event_date FROM bc.corporate_events)," if {"symbol", "event_date"} <= ce_cols
+             else "")
+    px_join = ("""ASOF LEFT JOIN (SELECT symbol, trade_date, avg(price) AS px FROM bc.span_und WHERE price > 0
+                  GROUP BY 1, 2) u ON u.symbol = j.symbol AND coalesce(j.meet, j.ex_date - 7) >= u.trade_date"""
+               if {"symbol", "trade_date", "price"} <= su_cols else "")
+    px_col = ("CASE WHEN coalesce(j.meet, j.ex_date - 7) - u.trade_date <= 30 THEN u.px END"
+              if px_join else "NULL::DOUBLE")
+    rows = con.execute(f"""
+        WITH ev AS ({" UNION ALL ".join(parts)}),
+        {m_cte}
+        j AS (SELECT ev.*, {meet_sql} AS meet FROM ev)
+        SELECT j.symbol, j.ex_date, j.t, j.div_amount, j.meet, {px_col} FROM j {px_join}
+    """, prm).fetchall() if parts else []
     ca_adj: dict = {}
     ca_known: dict = {}
-    try:
-        rows = con.execute(f"""
-            WITH ev AS (SELECT symbol, ex_date, upper(coalesce(ca_type, '')) AS t, div_amount
-                        FROM bc.corporate_actions WHERE ex_date BETWEEN ? AND ?
-                        UNION ALL
-                        SELECT symbol, trade_date, upper(coalesce(ca_type, 'OTHER')), NULL
-                        FROM bc.cash_returns_adj WHERE is_ca AND trade_date BETWEEN ? AND ?),
-            m AS (SELECT DISTINCT symbol, event_date FROM bc.corporate_events),
-            j AS (SELECT ev.*, (SELECT max(m.event_date) FROM m WHERE m.symbol = ev.symbol
-                                AND m.event_date <= ev.ex_date AND m.event_date >= ev.ex_date - 120) AS meet
-                  FROM ev),
-            u AS (SELECT symbol, trade_date, avg(price) AS px FROM bc.span_und WHERE price > 0 GROUP BY 1, 2)
-            SELECT j.symbol, j.ex_date, j.t, j.div_amount, j.meet,
-                   CASE WHEN coalesce(j.meet, j.ex_date - 7) - u.trade_date <= 30 THEN u.px END
-            FROM j ASOF LEFT JOIN u ON u.symbol = j.symbol AND coalesce(j.meet, j.ex_date - 7) >= u.trade_date
-        """, [start, end, start, end]).fetchall()
-    except Exception as exc:  # noqa: BLE001  (old DBs without the tables: keep the legacy behaviour)
-        print(f"  note: CA knowability not loaded ({exc}); using every ex-date as always known")
-        rows = []
+    info: dict = {}                              # (canon, ex) -> [types, amounts, price]
     for sym, ex, t, amt, meet, px in rows:
         c, ex = RENAMES.get(sym, sym), _d(ex)
         kn = (_d(meet) + timedelta(days=1)) if meet is not None else ex - timedelta(days=7)
         ca_known[(c, ex)] = min(ca_known.get((c, ex), kn), kn)
-        adjusting = any(x in t for x in ("SPLIT", "BONUS", "RIGHTS", "DEMERGER"))
-        if not adjusting and "DIVIDEND" in t and amt is not None:
-            thr = 0.05 if ex < date(2022, 6, 29) else 0.02
-            adjusting = not (px and px > 0) or float(amt) / float(px) >= thr     # no recent price: assume adjusting
+        it = info.setdefault((c, ex), [set(), [], None])
+        it[0].add(t or "")
+        if amt is not None and amt == amt:
+            it[1].append(float(amt))
+        if px and px > 0:
+            it[2] = float(px)
+    for (c, ex), (types, amts, px) in info.items():
+        if any(any(x in t for x in ("SPLIT", "BONUS", "RIGHTS", "DEMERGER")) or not t for t in types):
+            adjusting = True                     # price-adjusting, or type unknown (conservative)
+        elif any("DIVIDEND" in t for t in types):
+            if not amts or not px:
+                adjusting = True                 # amount or price unknown: block (conservative)
+            else:
+                adjusting = max(amts) / px >= (0.05 if ex < date(2022, 6, 29) else 0.02)
+        else:
+            adjusting = False                    # AGM / EGM / interest / buyback record dates
         if adjusting:
             ca_adj.setdefault(c, []).append(ex)
     for dct in (results, board, ca, ca_adj):
         for k in dct:
             dct[k] = sorted(set(dct[k]))
     return dict(results=results, board=board, known=known, coverage=coverage, ca=ca,
-                ca_adj=ca_adj if rows else None, ca_known=ca_known)
+                ca_adj=ca_adj, ca_known=ca_known)
 
 
 def _has_table(con, catalog: str, table: str) -> bool:
@@ -1041,7 +1087,7 @@ def load_data(p: Params, con=None) -> Data:
           f"{sum(map(len, paths.values())):,} path rows; market: {len(mkt['daily'])} days, "
           f"{len(mkt['beta'])} betas")
     return Data(cal, cands, paths, ev["results"], ev["ca"], dict(SECTOR),
-                ev["board"], ev["known"], ev["coverage"], mkt, hedge, ev.get("ca_adj"), ev.get("ca_known", {}))
+                ev["board"], ev["known"], ev["coverage"], mkt, hedge, ev["ca_adj"], ev["ca_known"])
 
 
 def _d(v) -> date:
@@ -1084,6 +1130,7 @@ class Pos:
     iv_hv: float = float("nan")  # ATM IV / HV20 at entry
     svol: float = float("nan")   # NSE SPAN implied vol for this contract, latest day it was published
     iv: float = float("nan")     # last IV the stress test used (fallback when today's is unusable)
+    exit_pending: str = ""       # exit decided on an untradable day; carried to the next tradable one
 
     @property
     def key(self) -> tuple:
@@ -1142,7 +1189,7 @@ class Ctx:
     market: dict = field(default_factory=dict)    # load_market()
     hedge: dict = field(default_factory=dict)     # load_hedge_chain()
     ca_adj: Optional[dict] = None                 # see Data
-    ca_known: dict = field(default_factory=dict)
+    ca_known: Optional[dict] = None               # see Data
 
 
 def event_dates(p: Params, ctx: Ctx, sym: str, d: date) -> list:
@@ -1164,11 +1211,11 @@ def event_dates(p: Params, ctx: Ctx, sym: str, d: date) -> list:
 def ca_dates(p: Params, ctx: Ctx, sym: str, d: date) -> list:
     """CA ex-dates the blackout may use for sym on day d (sorted): the scope's set, and with
     pit_ca only those already knowable on d. Contexts without the new maps (tests, old callers)
-    fall back to ctx.ca with no knowledge filter."""
+    fall back to ctx.ca; ctx.ca_known None (paper: everything stored is announced) skips the filter."""
     src = ctx.ca_adj if (p.ca_scope == "adjusting" and ctx.ca_adj is not None) else ctx.ca
     ev = src.get(sym, [])
-    if p.pit_ca and ctx.ca_known:
-        kn = ctx.ca_known
+    if p.pit_ca and ctx.ca_known is not None:     # backtest: an ex-date counts only once knowable
+        kn = ctx.ca_known                         # (no announcement on record: 7 days before)
         ev = [e for e in ev if kn.get((sym, e), e - timedelta(days=7)) <= d]
     return ev
 
@@ -1254,7 +1301,18 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
     def exit_slip(ps: Pos, row) -> float:
         traded = row is not None and row[1] > 0
         vol = row[1] if row is not None else 0.0
-        return half_spread(p, max(vol, ps.entry_vol)) + (0.0 if traded else p.untraded_slip)
+        if p.exit_cost_vol == "max":
+            vol = max(vol, ps.entry_vol)
+        return half_spread(p, vol) + (0.0 if traded else p.untraded_slip)
+
+    def tradable(row) -> bool:
+        """Can the position be bought back today? A trade on the day, or (paper) a live ask."""
+        if row is None:
+            return False
+        if row[1] > 0:
+            return True
+        ask = row[6] if len(row) > 6 else NAN
+        return fill_mode == "quote" and ask == ask and ask > 0
 
     def close_pos(ps: Pos, row, reason: str):
         traded = row is not None and row[1] > 0
@@ -1262,6 +1320,8 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
         if reason == "expiry":
             intrinsic = max(ps.strike - ps.und, 0.0) if ps.side == "PE" else max(ps.und - ps.strike, 0.0)
             fill, cost = intrinsic, 0.0
+            if intrinsic > 0:                    # ITM at expiry: physical delivery of the shares
+                cost = p.delivery_cost * ps.strike * ps.lot
         else:
             ask = row[6] if row is not None and len(row) > 6 else NAN
             if fill_mode == "quote" and ask == ask and ask > 0:
@@ -1325,8 +1385,13 @@ def step(p: Params, st: State, d: date, ctx: Ctx, row_of, cands: Optional[pd.Dat
             reason = "final_exit"
         elif left <= p.time_exit_td and ps.delta == ps.delta and ps.delta > p.near_money_delta:
             reason = "time_exit"
-        if reason:
-            close_pos(ps, row, reason)
+        if reason is None and ps.exit_pending:
+            reason = ps.exit_pending             # an earlier exit that could not be executed
+        if reason and reason != "expiry" and p.untraded_exit == "defer" and not tradable(row):
+            ps.exit_pending = ps.exit_pending or reason   # keep the first reason; retry next session
+            keep.append(ps)
+        elif reason:
+            close_pos(ps, row, ps.exit_pending if (ps.exit_pending and reason != "expiry") else reason)
         else:
             keep.append(ps)
     st.book = keep
@@ -1729,7 +1794,8 @@ def simulate(p: Params, data: Data) -> Result:
             traded = row is not None and row[1] > 0
             vol = row[1] if row is not None else 0.0
             ref = row[0] if (p.price_basis == "close" and traded and row[0] == row[0] and row[0] > 0) else ps.mark
-            fill = ref * (1 + half_spread(p, max(vol, ps.entry_vol)) + (0.0 if traded else p.untraded_slip))
+            vcost = vol if p.exit_cost_vol == "exit" else max(vol, ps.entry_vol)   # as exit_slip()
+            fill = ref * (1 + half_spread(p, vcost) + (0.0 if traded else p.untraded_slip))
             cost = order_costs(last, fill * ps.lot, "B", p.brokerage)
             pnl = (ps.credit - fill) * ps.lot - ps.entry_cost - cost
             st.cash -= fill * ps.lot + cost
